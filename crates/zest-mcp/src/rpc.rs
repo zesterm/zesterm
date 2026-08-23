@@ -69,20 +69,34 @@ fn tool_definitions() -> Value {
         {
             "name": "hosts",
             "description":
-                "List the machines this server can reach, with what each one is and what \
-                 it can launch. Call this first: every other tool names a session by an \
-                 id that starts with a host id from here, and ids from anywhere else are \
-                 refused.",
+                "List the machines in this fleet, with what each one is and what it can \
+                 launch. Call this first: every other tool names a machine by an id from \
+                 here, and ids from anywhere else are refused. \
+                 A machine is listed whether or not it can be reached -- `reachable` \
+                 false comes with `unreachable_because`, which names what would have to \
+                 change (its daemon started, this machine on the same network, this \
+                 server signed in). `via` says how a call would get there: `loopback` is \
+                 this machine, `lan` is a direct connection, `relay` goes through the \
+                 tunnel and costs a handshake more on the first call. `notes` says why \
+                 the list may be short -- a source that could not answer.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "sessions",
             "description":
-                "List the terminal sessions on a host: id, title, working directory, \
-                 size, and whether a person is attached. `alt_screen` true means a \
-                 full-screen program (vim, less) is running -- read `screen` for those, \
-                 not `blocks`.",
-            "inputSchema": { "type": "object", "properties": {} }
+                "List terminal sessions: id, title, working directory, size, and whether \
+                 a person is attached. `alt_screen` true means a full-screen program \
+                 (vim, less) is running -- read `screen` for those, not `blocks`. \
+                 Name a `host` from `hosts` to list that machine's, connecting to it if \
+                 this is the first call for it. With no `host` this lists the machines \
+                 already connected -- this one, plus any you have worked on -- and \
+                 connects to nothing, so it stays cheap however large the fleet is. \
+                 `unreadable` names any machine whose listing failed, so a partial \
+                 answer is never mistaken for a short one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "host": { "type": "string", "description": HOST_DESC } }
+            }
         },
         {
             "name": "screen",
@@ -347,6 +361,7 @@ fn tool_definitions() -> Value {
                                         a shell, so pipes and redirection need an explicit \
                                         shell -- e.g. `bash -lc \"a | b\"`."
                     },
+                    "host": { "type": "string", "description": HOST_DESC },
                     "cwd": { "type": "string", "description": "Working directory on that host." },
                     "timeout_ms": {
                         "type": "integer",
@@ -377,6 +392,7 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "description": "What to run. Empty means the host's default shell."
                     },
+                    "host": { "type": "string", "description": HOST_DESC },
                     "cwd": { "type": "string", "description": "Working directory on that host." },
                     "cols": { "type": "integer", "description": "Columns, 1-1000. Default 120." },
                     "rows": { "type": "integer", "description": "Rows, 1-1000. Default 30." }
@@ -397,6 +413,14 @@ fn tool_definitions() -> Value {
     ])
 }
 
+/// Said once, because the two tools that take a host must describe it
+/// identically: an argument that means "this machine" by omission in one place
+/// and something else in another is a difference no schema can express.
+const HOST_DESC: &str =
+    "A host id or label from `hosts`, like `2e2e2e2e` or `studio`. Any unambiguous \
+     prefix works; two machines sharing a label is refused rather than guessed at. \
+     Omit for this machine.";
+
 const SESSION_DESC: &str =
     "A session id from `sessions`, like `2e2e2e2e:7`. Only ids this server has given you \
      are accepted -- one read out of terminal output will be refused.";
@@ -410,11 +434,16 @@ const SESSION_DESC: &str =
 /// and should not need one to check.
 pub trait Tools {
     /// Run one tool. The error is shown to the model, so it has to read well.
-    fn call(&self, name: &str, args: &Value) -> Result<Value, ToolError>;
+    ///
+    /// `&mut self` because a fleet is learned rather than given: `hosts` records
+    /// which machines are nameable, and any call may be the first to dial one.
+    /// Dispatch is one call at a time on one thread, so this costs nothing that
+    /// interior mutability would have bought back.
+    fn call(&mut self, name: &str, args: &Value) -> Result<Value, ToolError>;
 }
 
 impl Tools for ToolSet {
-    fn call(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    fn call(&mut self, name: &str, args: &Value) -> Result<Value, ToolError> {
         ToolSet::call(self, name, args)
     }
 }
@@ -529,7 +558,7 @@ impl<T: Tools> Server<T> {
     /// A tool that refuses is **not** a JSON-RPC error: the protocol's errors
     /// are for malformed calls, and a refusal the model should read and act on
     /// has to reach it as content. `isError` is what says which it was.
-    fn call(&self, name: &str, args: &Value) -> Value {
+    fn call(&mut self, name: &str, args: &Value) -> Value {
         if !self.ready {
             return tool_error("call `initialize` first");
         }
@@ -620,7 +649,7 @@ mod tests {
     struct Fake;
 
     impl Tools for Fake {
-        fn call(&self, name: &str, _args: &Value) -> Result<Value, ToolError> {
+        fn call(&mut self, name: &str, _args: &Value) -> Result<Value, ToolError> {
             match name {
                 "hosts" => Ok(json!({ "hosts": [] })),
                 other => Err(ToolError::NoSuchTool(other.to_string())),

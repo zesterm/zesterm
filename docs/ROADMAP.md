@@ -28,7 +28,7 @@ is reported rather than gated.
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
 | `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with, the account client every device shares — `fetch_hosts` and the one relay ladder, moved down out of the app so a second client can reach them |
-| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping; `input` takes named keys and a paste, each its own keystroke; `sessions` asks the host rather than serving a cache, so a title, cwd and `alt_screen` describe the session now — ⬜ fleet reach |
+| `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping; `input` takes named keys and a paste, each its own keystroke; `sessions` asks the host rather than serving a cache, so a title, cwd and `alt_screen` describe the session now; reaches **every machine in the fleet** — mDNS plus the account directory, one connection per host dialled on first use, and a machine nothing can reach is listed with the reason rather than hidden |
 
 ### What works end to end today
 
@@ -400,8 +400,24 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       no fence. Always present rather than opt-in, since a signal behind a flag
       is absent exactly when it was wanted. No colour, and the three layout
       bits masked out. → #348.
-- [ ] Fleet reach for `zest-mcp`, gated on a host advertising the observer
-      attach.
+- [x] **The fleet, as an agent's tools.** `hosts` lists every machine mDNS or
+      the account knows, `sessions`/`create_session`/`run_isolated` take one,
+      and every other tool already carried it inside the session id. One
+      connection per machine, dialled on first use.
+      **Not** gated on a host advertising the observer attach, which this line
+      used to promise: `Attach.observe` degrades safely by construction — the
+      agent votes the size the listing reports, so a daemon predating the field
+      counts a no-op vote — and `HostOffer.features` would have bought a way to
+      *know* rather than a way to be *safe*, at the cost of a field
+      contradicting the struct it lives in ("Facts, deliberately, and not a
+      capability matrix"). → #274.
+- [x] **A durable `agent-key`, and a dial that does not cancel its own prompt.**
+      A third principal beside `host-key` and `client-key`, so a host revokes
+      the agent without revoking a laptop; read from the keychain on the first
+      *remote* dial and never at startup. The first dial to an untrusted machine
+      parks on a thread while the call answers with the six-digit code —
+      `PendingHandle::Drop` cancels the request, so refusing by hanging up
+      deletes the prompt it is reporting. → ADR-015.
 - [x] **Tokens per build, measured.** `cargo run -p zest-mcp --example
       token_probe -- --cmd "<command>"` runs a command on a real pty and
       reports four numbers: the raw stream, the framed deltas, `screen`'s text

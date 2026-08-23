@@ -53,6 +53,19 @@ pub const HOST_KEY_NAME: &str = "host-key";
 /// See [`HOST_KEY_NAME`].
 pub const CLIENT_KEY_NAME: &str = "client-key";
 
+/// The MCP server's own key — a *third* principal, not the app's.
+///
+/// Deliberately not [`CLIENT_KEY_NAME`], and the split is the same one
+/// [`APP_CLOUD_TOKEN_NAME`] draws: a remote host's trust store names the key
+/// that asked, so sharing the app's key would make "revoke the agent" and
+/// "revoke my laptop" the same act. They are separate rows in `--trusted` and
+/// separately forgettable, which is the whole point of the agent holding a
+/// durable key at all.
+///
+/// Part of the on-disk contract like its neighbours: change it and every host
+/// that has paired an agent forgets it.
+pub const AGENT_KEY_NAME: &str = "agent-key";
+
 /// The control plane's bearer token for this machine, if it has enrolled.
 ///
 /// Same namespace as the two key names above — one credential store, one entry

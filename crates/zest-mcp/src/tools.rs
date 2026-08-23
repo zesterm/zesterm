@@ -33,16 +33,20 @@
 //! instruction is that it lands on a different one.
 
 use std::collections::hash_map::RandomState;
+use std::collections::BTreeMap;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use zest_core::Modes;
-use zest_proto::{BlockPayload, BlockState, ClientMessage, SessionAddr};
+use zest_mesh::identity::ClientIdentity;
+use zest_proto::{BlockPayload, BlockState, ClientMessage, HostId, SessionAddr};
 
 use crate::addr::{AddrError, Resolver};
 use crate::conn::{Conn, ConnError};
+use crate::fleet::Fleet;
 use crate::keys::{self, Chord, KeyError};
 use crate::run::{self, Anchor, Progress, Refusal};
 use crate::session::Replica;
@@ -78,6 +82,27 @@ pub enum ToolError {
     /// is indistinguishable from one the application chose not to handle (#345).
     #[error("{0}")]
     Key(#[from] KeyError),
+    /// A machine this server can name but cannot open a connection to.
+    ///
+    /// Carries *why* rather than a status, because each way of being
+    /// unreachable asks for a different act -- start a daemon, join a network,
+    /// sign in -- and an agent told only "unreachable" has nowhere to go. The
+    /// listing says the same thing in `unreachable_because`, from the same
+    /// function, so a refusal and a row cannot disagree.
+    #[error("cannot reach `{label}`: {why}")]
+    Unreachable { label: String, why: String },
+    /// A first connection to a machine that has never trusted this agent.
+    ///
+    /// Not a failure and not a retry-in-a-loop: somebody at that machine is
+    /// being asked, right now, to compare six digits. The dial is still open
+    /// while this is read -- dropping it would cancel their prompt -- so the
+    /// act is to tell the person the code and call again.
+    #[error(
+        "`{label}` is asking a person there to approve this agent. The code to compare is \
+         {code} ({secs_left}s left). Nothing else is needed from you: once they approve it, \
+         call again and it will connect -- and it will not ask again after that."
+    )]
+    AwaitingApproval { label: String, code: String, secs_left: u64 },
 }
 
 /// Where an exit code came from, carried on every one this server reports.
@@ -122,21 +147,135 @@ pub fn untrusted(text: &str) -> String {
     )
 }
 
-/// The tools, over one host's connection.
+/// The tools, over every host this server can reach.
 ///
-/// One host in this revision. The fleet arrives with routing, and the shape
-/// here does not change when it does: every call already names a host.
+/// One connection per machine, dialled the first time a call names one and kept
+/// afterwards -- so an agent working on one host pays a handshake once, and a
+/// server that never leaves home opens nothing. `Arc<Conn>` rather than a
+/// borrow because [`Self::conn_for`] may have to insert before it can answer,
+/// and a caller holding a `&Conn` out of the map could not then touch `self`.
 pub struct ToolSet {
-    conn: Conn,
+    conns: BTreeMap<HostId, Arc<Conn>>,
+    /// This machine -- the one connection that exists before any tool is
+    /// called, and the default for the tools that carry no session id.
+    local: HostId,
     resolver: Resolver,
+    fleet: Box<dyn Fleet>,
+    /// Dials waiting on a person at the far machine, one per host.
+    ///
+    /// **One**, and that is the point rather than an optimisation: the host's
+    /// queue resolves by `ClientId`, so a second dial from this same key would
+    /// queue a second prompt that the first approval answers anyway -- two
+    /// dialogs for one decision, which is how people learn to click through
+    /// them.
+    pending: BTreeMap<HostId, PendingDial>,
+    /// Minted on the first *remote* dial and never before.
+    ///
+    /// Loopback keeps a throwaway: the trust store is not consulted there
+    /// (`auth.rs` argues a check would be theatre -- a process that can open
+    /// the socket can already read the key it would check), so a durable key
+    /// buys nothing and costs the OS keychain on the startup path. On macOS
+    /// that path is a modal prompt after every rebuild, and a tool server that
+    /// hangs at startup is a broken tool server. A remote host's `Auth::Proof`
+    /// genuinely gates, so there the key has to survive a restart or every
+    /// launch asks a person to approve the same agent again.
+    agent_key: Option<Arc<ClientIdentity>>,
+    /// Where the durable key is kept.
+    ///
+    /// A field rather than `OsKeyStore` reached for at the point of use, and
+    /// that is not only for tests: a test that minted the *real* `agent-key`
+    /// would write into the developer's own credential store as a side effect
+    /// of `cargo test`, which is a thing a suite must never do.
+    keys: Arc<dyn zest_mesh::keystore::KeyStore>,
+    /// Whether [`Self::agent_key`] will survive this process.
+    ///
+    /// `false` once the store has refused, so `hosts` can say the pairing will
+    /// have to be repeated next launch rather than leaving somebody to notice.
+    durable_key: bool,
+    /// Where this machine's daemon was reached, so a redial goes back to the
+    /// *same* one.
+    ///
+    /// Not `default_socket_path()` at the moment of need: this server may have
+    /// been launched with `--socket`, and re-deriving the default would
+    /// reconnect the local row to a different daemon than the one it has been
+    /// describing -- with the same host id in every id it had already handed
+    /// out.
+    local_socket: String,
+    roots: zest_cloud::tls::Roots,
+}
+
+/// A dial still running after the call that started it has answered.
+///
+/// Two states, and telling them apart is the whole reason the code is an
+/// `Option`: a dial waiting on a **person** is a different thing to report from
+/// one that is merely slow, and only the first has digits to compare. Collapsing
+/// them offers an approval message with a blank code, which reads as a pairing
+/// flow that has gone wrong rather than as a machine still connecting.
+struct PendingDial {
+    /// The six digits the person at the far machine is comparing, once the host
+    /// has asked anybody. `None` while this is only slow.
+    code: Option<String>,
+    label: String,
+    started: Instant,
+    /// Answers once, when the handshake finally resolves.
+    done: crossbeam_channel::Receiver<Result<Conn, String>>,
+    /// Carries the code if the host asks for approval *after* the first call
+    /// gave up waiting -- a handshake that was slow and then met a person.
+    code_rx: crossbeam_channel::Receiver<(String, u32)>,
 }
 
 impl ToolSet {
+    /// The local connection, and where to learn about everything else.
     #[must_use]
-    pub fn new(conn: Conn) -> Self {
+    pub fn new(conn: Conn, fleet: Box<dyn Fleet>) -> Self {
         let mut resolver = Resolver::new();
         resolver.learn(conn.host(), conn.label());
-        Self { conn, resolver }
+        let local = conn.host();
+        Self {
+            conns: BTreeMap::from([(local, Arc::new(conn))]),
+            local,
+            resolver,
+            fleet,
+            pending: BTreeMap::new(),
+            agent_key: None,
+            keys: Arc::new(zest_mesh::keystore::OsKeyStore),
+            durable_key: true,
+            local_socket: zest_daemon::default_socket_path(),
+            roots: zest_cloud::tls::Roots::Platform,
+        }
+    }
+
+    /// Keep the durable key somewhere other than this machine's credential
+    /// store -- which every test does, so none of them writes a real one.
+    #[must_use]
+    pub fn with_key_store(mut self, keys: Arc<dyn zest_mesh::keystore::KeyStore>) -> Self {
+        self.keys = keys;
+        self
+    }
+
+    /// Where this machine's daemon lives, when it is not the default path.
+    #[must_use]
+    pub fn with_local_socket(mut self, path: &str) -> Self {
+        self.local_socket = path.to_string();
+        self
+    }
+
+    /// This client's own route, which is what "local" means to `best_route`.
+    ///
+    /// `None` once the local connection is gone and cannot be reopened by a
+    /// path we still hold, because `best_route`'s local arm returns whatever
+    /// this is -- and answering `Some` there for a socket that is not ours
+    /// would be a route to a different machine wearing this one's id.
+    fn local_route(&self) -> Option<zest_fleet::HostRoute> {
+        local_route(&self.local_socket)
+    }
+
+    /// Verify remote hosts against `roots` -- a test's own CA, or a platform
+    /// store.
+    #[must_use]
+    pub fn with_roots(mut self, roots: zest_cloud::tls::Roots) -> Self {
+        self.roots = roots;
+        self
     }
 
     #[must_use]
@@ -145,36 +284,390 @@ impl ToolSet {
     }
 
     /// Dispatch by name. The transport layer does nothing but call this.
-    pub fn call(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
+    ///
+    /// `&mut self` because two of these genuinely mutate: `hosts` learns which
+    /// machines are nameable, and any call naming one may have to dial it. The
+    /// alternative -- locks inside -- would buy nothing, since `Server::serve`
+    /// dispatches one call at a time on one thread.
+    pub fn call(&mut self, name: &str, args: &Value) -> Result<Value, ToolError> {
         match name {
             "hosts" => self.hosts(),
-            "sessions" => self.sessions(),
-            "screen" => self.screen(session_arg(args, &self.resolver)?, args),
-            "blocks" => self.blocks(session_arg(args, &self.resolver)?, args),
-            "output" => self.output(
-                session_arg(args, &self.resolver)?,
-                req_u32(args, "block_id")?,
-                clamp_lines(opt_usize(args, "max_lines")?),
-            ),
-            "input" => self.input(session_arg(args, &self.resolver)?, args),
-            "interrupt" => self.interrupt(session_arg(args, &self.resolver)?),
-            "run" => self.run(session_arg(args, &self.resolver)?, args),
-            "run_isolated" => self.run_isolated(args),
-            "create_session" => self.create_session(args),
-            "close_session" => self.close_session(session_arg(args, &self.resolver)?),
+            "sessions" => self.sessions(args),
+            "screen" => self.on_session(args, |t, c, addr| t.screen(c, addr, args)),
+            "blocks" => self.on_session(args, |t, c, addr| t.blocks(c, addr, args)),
+            "output" => {
+                let block = req_u32(args, "block_id")?;
+                let lines = clamp_lines(opt_usize(args, "max_lines")?);
+                self.on_session(args, move |t, c, addr| t.output(c, addr, block, lines))
+            }
+            "input" => self.on_session(args, |t, c, addr| t.input(c, addr, args)),
+            "interrupt" => self.on_session(args, |t, c, addr| t.interrupt(c, addr)),
+            "run" => self.on_session(args, |t, c, addr| t.run(c, addr, args)),
+            "run_isolated" => {
+                let conn = self.conn_for_arg(args)?;
+                self.run_isolated(&conn, args)
+            }
+            "create_session" => {
+                let conn = self.conn_for_arg(args)?;
+                self.create_session(&conn, args)
+            }
+            "close_session" => self.on_session(args, |t, c, addr| t.close_session(c, addr)),
             other => Err(ToolError::NoSuchTool(other.to_string())),
         }
     }
 
-    fn hosts(&self) -> Result<Value, ToolError> {
-        let (label, offer, closed) =
-            self.conn.with(|s| (self.conn.label().to_string(), s.offer.clone(), s.closed));
-        Ok(json!({
-            "hosts": [{
-                "id": self.conn.host().short(),
-                "label": label,
-                "local": true,
-                "online": !closed,
+    /// Resolve the `session` argument, reach its host, and run `f`.
+    ///
+    /// The host is *inside* the id, so these tools needed no new argument: an
+    /// agent that can name a session on another machine has already been told
+    /// which machine that is, by this server, in a listing it produced. That is
+    /// the confused-deputy guard working rather than a coincidence --
+    /// [`Resolver`] answers only for hosts it has itself listed.
+    fn on_session<T>(
+        &mut self,
+        args: &Value,
+        f: impl FnOnce(&Self, &Conn, SessionAddr) -> Result<T, ToolError>,
+    ) -> Result<T, ToolError> {
+        let addr = session_arg(args, &self.resolver)?;
+        let conn = self.conn_for(addr.host)?;
+        f(self, &conn, addr)
+    }
+
+    /// The connection for an optional `host` argument, defaulting to this
+    /// machine.
+    ///
+    /// `create_session` and `run_isolated` are the two tools with no session id
+    /// to carry a host, so they take one. Omitted means local, which is what
+    /// they have always done.
+    fn conn_for_arg(&mut self, args: &Value) -> Result<Arc<Conn>, ToolError> {
+        let host = match args.get("host").and_then(Value::as_str) {
+            Some(asked) if !asked.trim().is_empty() => self.resolver.host(asked.trim())?,
+            _ => self.local,
+        };
+        self.conn_for(host)
+    }
+
+    /// A live connection to `host`, dialling if this is the first call for it.
+    fn conn_for(&mut self, host: HostId) -> Result<Arc<Conn>, ToolError> {
+        if let Some(conn) = self.conns.get(&host) {
+            // A link that died is worth redialling rather than reporting
+            // forever: the far machine may simply have restarted.
+            if !conn.with(|s| s.closed) {
+                return Ok(Arc::clone(conn));
+            }
+            self.conns.remove(&host);
+        }
+        if let Some(conn) = self.claim_pending(host)? {
+            return Ok(conn);
+        }
+        self.dial(host)
+    }
+
+    /// Take a dial that was waiting on a person, if it has since landed.
+    ///
+    /// Non-blocking on purpose. The dial is parked on its own thread precisely
+    /// so this call does not have to wait for a human, and a tool that blocked
+    /// here would be the hang the whole arrangement exists to avoid.
+    fn claim_pending(&mut self, host: HostId) -> Result<Option<Arc<Conn>>, ToolError> {
+        let Some(p) = self.pending.get_mut(&host) else { return Ok(None) };
+        // A dial that was merely slow may have met a person since. Checked
+        // before the arms below, so the first call after that reports the code
+        // rather than "not answered yet" for the rest of the approval window.
+        if p.code.is_none() {
+            if let Ok((code, _)) = p.code_rx.try_recv() {
+                p.code = Some(code);
+                p.started = Instant::now();
+            }
+        }
+        // Read off what the arms need before any of them touches the map: the
+        // entry is borrowed out of `self`, and removing it is the first thing
+        // two of the three do.
+        let (label, code, started) = (p.label.clone(), p.code.clone(), p.started);
+        match p.done.try_recv() {
+            Ok(Ok(conn)) => {
+                self.pending.remove(&host);
+                self.fleet.report_dial(host, true);
+                tracing::info!(%label, "approved");
+                let conn = Arc::new(conn);
+                self.conns.insert(host, Arc::clone(&conn));
+                Ok(Some(conn))
+            }
+            Ok(Err(e)) => {
+                self.pending.remove(&host);
+                self.fleet.report_dial(host, false);
+                Err(ToolError::Unreachable { label, why: format!("it refused this agent: {e}") })
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => Err(match code {
+                Some(code) => ToolError::AwaitingApproval {
+                    label,
+                    code,
+                    secs_left: zest_mesh::pairing::APPROVAL_TIMEOUT
+                        .saturating_sub(started.elapsed())
+                        .as_secs(),
+                },
+                // Slow, not waiting on anybody. Reporting this as an approval
+                // would hand the agent a blank code to read out.
+                None => ToolError::Unreachable {
+                    label,
+                    why: "it has not finished answering yet; ask again in a moment".into(),
+                },
+            }),
+            // The thread ended without answering, which it cannot do; treat it
+            // as no dial in flight and let the next call start a fresh one.
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.pending.remove(&host);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Open a connection to `host`, or say why not.
+    ///
+    /// # Why the first dial to an untrusted machine does not simply block
+    ///
+    /// It meets a person: a remote host's `Auth::Proof` gates on its trust
+    /// store, and an unknown key waits in a pairing queue while somebody
+    /// compares six digits. Blocking the tool call through
+    /// `APPROVAL_TIMEOUT` would be a two-minute hang with nothing said.
+    ///
+    /// # And why it does not simply hang up either
+    ///
+    /// `PendingHandle::Drop` **cancels the request** on the host -- "a prompt
+    /// for a device that has already hung up is exactly what teaches someone to
+    /// dismiss prompts without reading them". So refusing the call by dropping
+    /// the dial deletes the prompt it is asking the person to answer, and a
+    /// retry mints a fresh code they have to be told about again. It is a
+    /// design that looks correct and can never succeed.
+    ///
+    /// So the dial keeps running on a thread of its own, holding the request
+    /// alive, while the call returns the code at once. A later call collects it
+    /// (see [`Self::claim_pending`]) -- and once the approval writes the key
+    /// into that host's trust store, every future launch of this server
+    /// authenticates outright, which is what the durable `agent-key` is for.
+    fn dial(&mut self, host: HostId) -> Result<Arc<Conn>, ToolError> {
+        let view = self.fleet.view();
+        let Some(row) = view.hosts.iter().find(|h| h.host == host) else {
+            // Unreachable through the tools -- `Resolver` only names hosts a
+            // listing produced -- but reachable if the fleet shrank between the
+            // listing and the call, which is a machine going away rather than a
+            // bug.
+            return Err(ToolError::Unreachable {
+                label: host.short(),
+                why: "it is no longer in this server's fleet listing".into(),
+            });
+        };
+        let local_route = self.local_route();
+        let route = zest_fleet::best_route(
+            row,
+            local_route.as_ref(),
+            view.relay_origin.as_deref(),
+            view.signed_in,
+        )
+        .ok_or_else(|| ToolError::Unreachable {
+            label: row.label.clone(),
+            why: crate::fleet::why_unreachable(row, view.relay_origin.as_deref(), view.signed_in),
+        })?;
+
+        let identity = self.identity_for(&route)?;
+        let label = row.label.clone();
+        let expect = (!route.is_local()).then_some(host);
+        let roots = self.roots;
+        let name = crate::client_label();
+
+        // The dial runs on its own thread whatever happens, so that a handshake
+        // which turns into an approval wait can keep waiting after this call
+        // has answered. The common case -- an already-trusted host -- costs one
+        // thread and one channel more than dialling inline.
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let (code_tx, code_rx) = crossbeam_channel::bounded(1);
+        std::thread::Builder::new()
+            .name("zest-mcp-dial".into())
+            .spawn(move || {
+                let opened = crate::dial::dial(&route, roots)
+                    .map_err(|e| e.to_string())
+                    .and_then(|(read, write)| {
+                        let on_pending = |code: &str, secs: u32| {
+                            let _ = code_tx.try_send((code.to_string(), secs));
+                        };
+                        Conn::open_with(
+                            read,
+                            write,
+                            &identity,
+                            &name,
+                            expect,
+                            Some(&on_pending),
+                        )
+                        .map_err(|e| e.to_string())
+                    });
+                let _ = tx.send(opened);
+            })
+            .map_err(|e| ToolError::Unreachable {
+                label: label.clone(),
+                why: format!("this server could not start a thread to dial it ({e})"),
+            })?;
+
+        // Wait only as long as a handshake with nobody in the way should take.
+        // Past that the host is either asking a person or simply slow, and both
+        // are better answered than waited out.
+        match rx.recv_timeout(DIAL_BUDGET) {
+            Ok(Ok(conn)) => {
+                self.fleet.report_dial(host, true);
+                let conn = Arc::new(conn);
+                self.conns.insert(host, Arc::clone(&conn));
+                Ok(conn)
+            }
+            Ok(Err(e)) => {
+                self.fleet.report_dial(host, false);
+                Err(ToolError::Unreachable { label, why: e })
+            }
+            Err(_) => match code_rx.try_recv() {
+                Ok((code, secs)) => {
+                    let err = ToolError::AwaitingApproval {
+                        label: label.clone(),
+                        code: code.clone(),
+                        secs_left: u64::from(secs),
+                    };
+                    self.pending.insert(
+                        host,
+                        PendingDial {
+                            code: Some(code),
+                            label,
+                            started: Instant::now(),
+                            done: rx,
+                            code_rx,
+                        },
+                    );
+                    Err(err)
+                }
+                // Slow rather than waiting on anybody. The thread is still
+                // dialling, so it is kept: a later call collects it instead of
+                // starting a second handshake against the same host.
+                Err(_) => {
+                    let err = ToolError::Unreachable {
+                        label: label.clone(),
+                        why: "it has not answered yet; ask again in a moment".into(),
+                    };
+                    self.pending.insert(
+                        host,
+                        PendingDial {
+                            code: None,
+                            label,
+                            started: Instant::now(),
+                            done: rx,
+                            code_rx,
+                        },
+                    );
+                    Err(err)
+                }
+            },
+        }
+    }
+
+    /// Which key to prove with. Durable off this machine, throwaway on it.
+    fn identity_for(&mut self, route: &zest_fleet::HostRoute) -> Result<Arc<ClientIdentity>, ToolError> {
+        if route.is_local() {
+            return ClientIdentity::generate().map(Arc::new).map_err(|e| ToolError::Unreachable {
+                label: "this machine".into(),
+                why: format!("this server could not mint a key ({e})"),
+            });
+        }
+        if let Some(key) = &self.agent_key {
+            return Ok(Arc::clone(key));
+        }
+        // First remote dial in this process, and the first moment the
+        // credential store is touched at all.
+        let key = match ClientIdentity::load_or_create_named(
+            self.keys.as_ref(),
+            zest_mesh::keystore::AGENT_KEY_NAME,
+        ) {
+            Ok(k) => k,
+            Err(e) => {
+                // **Degrade, do not refuse.** A machine with no usable
+                // credential store is ordinary -- a headless Linux box with no
+                // Secret Service, a container, a locked keychain -- and
+                // refusing every remote host there would make the fleet
+                // unreachable from exactly the machines most likely to be
+                // driven by an agent. What is lost is only *durability*: one
+                // key per process still pairs, and still holds for the life of
+                // this server. It has to be one per process rather than one
+                // per dial, or a redial would arrive as a stranger and ask
+                // somebody to approve the same agent twice in a minute.
+                tracing::warn!(
+                    error = %e,
+                    "no durable key store; pairing will have to be repeated next launch"
+                );
+                self.durable_key = false;
+                ClientIdentity::generate().map_err(|e| ToolError::Unreachable {
+                    label: "any other machine".into(),
+                    why: format!("this server could not mint a key to prove itself with ({e})"),
+                })?
+            }
+        };
+        let key = Arc::new(key);
+        self.agent_key = Some(Arc::clone(&key));
+        Ok(key)
+    }
+
+    /// Every machine this server knows about, reachable or not.
+    ///
+    /// **Listed is not reachable**, and each row says which. The web client
+    /// states the rule from the other side (`host-source.ts`): a machine whose
+    /// relay is unreachable is still yours, and hiding its row would make the
+    /// fleet appear to shrink whenever the network hiccuped -- what that rules
+    /// out is the row that must fail. For an agent, `unreachable_because` is
+    /// the difference between a refusal naming an act (start a daemon, sign in)
+    /// and a call it will retry forever.
+    ///
+    /// This is also where hosts become *nameable*: [`Resolver::learn`] runs per
+    /// row, so an id in a build log cannot address a machine until this server
+    /// has listed it.
+    fn hosts(&mut self) -> Result<Value, ToolError> {
+        let mut view = self.fleet.view();
+        if !self.durable_key {
+            // Said here rather than only in the log, because the person who
+            // needs it is the one being asked to approve this agent for the
+            // second time.
+            view.notes.push(
+                "this machine has no usable credential store, so this agent's key lasts only \
+                 as long as this server runs -- any machine you approve it on will ask again \
+                 next launch"
+                    .into(),
+            );
+        }
+        let mut rows = Vec::with_capacity(view.hosts.len());
+        for h in &view.hosts {
+            self.resolver.learn(h.host, &h.label);
+            // The local row's facts come from the connection this server
+            // already holds rather than from the fleet source, which has no
+            // reason to know them and would be a second copy if it did.
+            let live = self.conns.get(&h.host);
+            let offer = live
+                .and_then(|c| c.with(|s| s.offer.clone()))
+                .or_else(|| h.offer.clone());
+            let route = zest_fleet::best_route(
+                h,
+                self.local_route().as_ref(),
+                view.relay_origin.as_deref(),
+                view.signed_in,
+            );
+            rows.push(json!({
+                "id": h.host.short(),
+                "label": h.label,
+                "local": h.local,
+                "online": h.is_online(),
+                "connected": live.is_some_and(|c| !c.with(|s| s.closed)),
+                // How a call would get there, so "on the desk" and "through the
+                // tunnel" are distinguishable -- they differ by roughly a
+                // handshake and two round trips per first call.
+                "via": route.as_ref().map(|r| match r {
+                    zest_fleet::HostRoute::LocalSocket(_) => "loopback",
+                    zest_fleet::HostRoute::Tcp(_) => "lan",
+                    zest_fleet::HostRoute::Relay { .. } => "relay",
+                }),
+                "reachable": route.is_some(),
+                "unreachable_because": route.is_none().then(|| {
+                    crate::fleet::why_unreachable(h, view.relay_origin.as_deref(), view.signed_in)
+                }),
                 "os": offer.as_ref().map(|o| o.os.clone()),
                 "arch": offer.as_ref().map(|o| o.arch.clone()),
                 "default_shell": offer.as_ref().map(|o| o.default_shell.clone()),
@@ -184,38 +677,62 @@ impl ToolSet {
                         "command": p.command,
                     })).collect()
                 }),
-            }]
+            }));
+        }
+        Ok(json!({
+            "hosts": rows,
+            // Why the list may be short. A fleet of one with "not signed in"
+            // beside it is a different fact from a fleet of one, and only this
+            // server can tell them apart -- stderr is not somewhere the agent
+            // asking can read.
+            "notes": view.notes,
         }))
     }
 
-    fn sessions(&self) -> Result<Value, ToolError> {
-        // Asked, not read: see `Conn::list_sessions`. Reading `Shared::sessions`
-        // here served whatever our own last create or close returned, so a
-        // session's title, cwd and `alt_screen` were frozen at the values they
-        // held just after it spawned -- empty, empty and false. (#360)
-        let sessions = self.conn.list_sessions()?;
-        Ok(json!({
-            "sessions": sessions.iter().map(|s| json!({
-                "id": Resolver::format(s.addr),
-                "title": s.title,
-                "cwd": s.cwd,
-                "cols": s.cols,
-                "rows": s.rows,
-                // Blocks are not emitted on the alternate screen, so this is
-                // what tells an agent to read `screen` instead of `blocks`.
-                "alt_screen": s.alt_screen,
-                "attached": s.attached,
-                "busy": s.busy,
-                // Passed through whole so each fact keeps its `source` label:
-                // `daemon_probe` is the filesystem's word, `shell_report` is
-                // whatever the shell (or anything that can print) claimed —
-                // orientation, never a gate. The distinction has to reach the
-                // payload an agent reads, not sit in a tool description
-                // (ADR-015). Saves an agent running `git branch` in the
-                // user's live shell just to find out where it is.
-                "context": s.context,
-            })).collect::<Vec<_>>()
-        }))
+    /// The sessions on one machine, or on every machine already connected.
+    ///
+    /// **Omitting `host` never dials.** The obvious alternative -- fan out over
+    /// the whole fleet -- makes the cheapest call in the surface as slow as the
+    /// least responsive machine in it, and makes a listing open connections to
+    /// machines the agent had no interest in. So it answers for what is already
+    /// connected (this machine, at first, and whatever the agent has since
+    /// worked on) and `hosts` is where the fleet is enumerated.
+    fn sessions(&mut self, args: &Value) -> Result<Value, ToolError> {
+        let asked = match args.get("host").and_then(Value::as_str) {
+            Some(a) if !a.trim().is_empty() => Some(self.resolver.host(a.trim())?),
+            _ => None,
+        };
+        let hosts: Vec<HostId> = match asked {
+            Some(h) => {
+                // Named, so dial it: an agent that says which machine it means
+                // is asking for that machine, not for whatever is convenient.
+                self.conn_for(h)?;
+                vec![h]
+            }
+            None => self.conns.keys().copied().collect(),
+        };
+
+        let mut out = Vec::new();
+        let mut unreadable = Vec::new();
+        for host in hosts {
+            let Some(conn) = self.conns.get(&host).map(Arc::clone) else { continue };
+            // Asked, not read: see `Conn::list_sessions`. Reading
+            // `Shared::sessions` here served whatever our own last create or
+            // close returned, so a session's title, cwd and `alt_screen` were
+            // frozen at the values they held just after it spawned -- empty,
+            // empty and false. (#360)
+            match conn.list_sessions() {
+                Ok(sessions) => out.extend(sessions.into_iter().map(|s| session_json(&s))),
+                // One machine going quiet must not cost the listing of the
+                // others: a link that dies mid-fleet is a partial answer, and
+                // saying which part is missing beats failing the whole call.
+                Err(e) => unreadable.push(json!({
+                    "host": host.short(),
+                    "why": e.to_string(),
+                })),
+            }
+        }
+        Ok(json!({ "sessions": out, "unreadable": unreadable }))
     }
 
     /// The screen, optionally after waiting for it to move.
@@ -224,11 +741,12 @@ impl ToolSet {
     /// has always been. The sequence it names is the *terminal's* version
     /// counter, not a per-subscriber one, so a value from an earlier call still
     /// means something after the attach this tool drops between them.
-    fn screen(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+    fn screen(&self, conn: &Conn, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
         let after = opt_u64(args, "after_seq")?;
         let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
         let idle = clamp_idle(opt_u32(args, "idle_ms")?);
         self.attached_with(
+            conn,
             addr,
             |conn| match after {
                 None => Ok(Waited::default()),
@@ -255,11 +773,12 @@ impl ToolSet {
     }
 
     /// The commands, optionally after waiting for one to finish.
-    fn blocks(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+    fn blocks(&self, conn: &Conn, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
         let since = opt_u32(args, "since_id")?;
         let wait = opt_bool(args, "wait")?.unwrap_or(false);
         let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
         self.attached_with(
+            conn,
             addr,
             |conn| {
                 if !wait {
@@ -306,8 +825,8 @@ impl ToolSet {
         )
     }
 
-    fn output(&self, addr: SessionAddr, id: u32, max_lines: usize) -> Result<Value, ToolError> {
-        self.attached(addr, |r| {
+    fn output(&self, conn: &Conn, addr: SessionAddr, id: u32, max_lines: usize) -> Result<Value, ToolError> {
+        self.attached(conn, addr, |r| {
             let rows = r.block_rows(id).ok_or(ToolError::NoSuchBlock(id))?;
             let block = r.blocks().into_iter().find(|b| b.id == id);
             let total = rows.len();
@@ -363,7 +882,7 @@ impl ToolSet {
     /// a CR within the brackets is inserted literally -- which is #344 again in
     /// a different hat. Outside them it executes, exactly as it does for a
     /// person who pastes and then presses Enter.
-    fn input(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+    fn input(&self, conn: &Conn, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
         // Parse everything before sending anything. A refusal on a bad third
         // key must leave the session untouched rather than half-typed-into.
         let plan = Plan::parse(args)?;
@@ -386,11 +905,11 @@ impl ToolSet {
             // waits out the reply deadline rather than refusing at once, the
             // same way `screen` and `blocks` already do. That is #347, and it
             // is one refusal for every tool rather than a new one here.
-            self.attached(addr, |r| {
+            self.attached(conn, addr, |r| {
                 let writes = plan.writes(r.modes(), |t| r.encode_paste(t));
                 let sent = writes.len();
                 for bytes in writes {
-                    self.conn.send(ClientMessage::Input { session: addr, bytes });
+                    conn.send(ClientMessage::Input { session: addr, bytes });
                 }
                 Ok(sent)
             })?
@@ -398,7 +917,7 @@ impl ToolSet {
             let writes = plan.writes(Modes::empty(), |t| t.as_bytes().to_vec());
             let sent = writes.len();
             for bytes in writes {
-                self.conn.send(ClientMessage::Input { session: addr, bytes });
+                conn.send(ClientMessage::Input { session: addr, bytes });
             }
             sent
         };
@@ -421,8 +940,8 @@ impl ToolSet {
     /// at it by name, and one byte does not need a string parser at runtime.
     ///
     /// No attach: `Input` is not a subscriber operation.
-    fn interrupt(&self, addr: SessionAddr) -> Result<Value, ToolError> {
-        self.conn.send(ClientMessage::Input { session: addr, bytes: vec![ETX] });
+    fn interrupt(&self, conn: &Conn, addr: SessionAddr) -> Result<Value, ToolError> {
+        conn.send(ClientMessage::Input { session: addr, bytes: vec![ETX] });
         Ok(json!({ "session": Resolver::format(addr), "interrupted": true }))
     }
 
@@ -453,7 +972,7 @@ impl ToolSet {
     /// a child that exits before the attach lands is *not* swept, because the
     /// predicate needs `ever_attached`; and `Exited` is re-sent on every poll
     /// rather than once, so attaching after the exit still hears about it.
-    fn run_isolated(&self, args: &Value) -> Result<Value, ToolError> {
+    fn run_isolated(&self, conn: &Conn, args: &Value) -> Result<Value, ToolError> {
         let command = args.get("command").and_then(Value::as_str).unwrap_or("").trim();
         if command.is_empty() {
             return Err(ToolError::Missing { field: "command" });
@@ -464,20 +983,20 @@ impl ToolSet {
         let max_lines = clamp_lines(opt_usize(args, "max_lines")?);
         let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
 
-        let addr = self.conn.create_session(command, cwd, cols, rows)?;
+        let addr = conn.create_session(command, cwd, cols, rows)?;
 
         // Observing, like every other attach this crate makes. It owns this
         // session outright, so a vote would harm nobody -- but `observe` is
         // what the daemon reads to mean "no pane", and a client that abstains
         // everywhere cannot acquire the habit of not abstaining.
-        if let Err(e) = self.conn.attach(addr, cols, rows, true) {
+        if let Err(e) = conn.attach(addr, cols, rows, true) {
             // The session exists and has never been attached, so `sweep` will
             // not collect it -- its predicate requires `ever_attached`, which
             // is what keeps a just-created session alive across the gap before
             // its owner attaches. Returning here without closing therefore
             // leaks a shell on the host for the life of the daemon, and the
             // caller has no id to close it with.
-            self.conn.send(ClientMessage::CloseSession { session: addr });
+            conn.send(ClientMessage::CloseSession { session: addr });
             return Err(e.into());
         }
 
@@ -490,7 +1009,7 @@ impl ToolSet {
         // `exit_code: null` for a command that exited perfectly well -- which
         // is precisely the "the host could not say" spelling this whole change
         // exists to stop being wrong.
-        let settled = self.conn.wait_until(deadline, |s| match s.replica(addr).and_then(Replica::exited) {
+        let settled = conn.wait_until(deadline, |s| match s.replica(addr).and_then(Replica::exited) {
             Some(Some(code)) => Some(code),
             // Exited with nothing to report yet, or not exited. Both wait.
             _ => None,
@@ -506,7 +1025,7 @@ impl ToolSet {
         // The link's own state comes back with the read, under the same lock,
         // so a missing replica can say *why* it is missing rather than being
         // reported as whatever the caller happened to be waiting for.
-        let read = self.conn.with(|s| {
+        let read = conn.with(|s| {
             (
                 s.replica(addr)
                     .map(|r| (r.text_head_tail(max_lines), r.alt_screen(), r.exited().is_some())),
@@ -514,7 +1033,7 @@ impl ToolSet {
                 s.error.clone(),
             )
         });
-        self.conn.detach(addr);
+        conn.detach(addr);
 
         // A timeout is a *result*, not a failure: the command may be sitting at
         // a password prompt, which is exactly the case a sentinel cannot tell
@@ -567,17 +1086,17 @@ impl ToolSet {
         }))
     }
 
-    fn create_session(&self, args: &Value) -> Result<Value, ToolError> {
+    fn create_session(&self, conn: &Conn, args: &Value) -> Result<Value, ToolError> {
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
         let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
         let cols = opt_u16(args, "cols")?.unwrap_or(120);
         let rows = opt_u16(args, "rows")?.unwrap_or(30);
-        let addr = self.conn.create_session(command, cwd, cols, rows)?;
+        let addr = conn.create_session(command, cwd, cols, rows)?;
         Ok(json!({ "session": Resolver::format(addr), "cols": cols, "rows": rows }))
     }
 
-    fn close_session(&self, addr: SessionAddr) -> Result<Value, ToolError> {
-        self.conn.send(ClientMessage::CloseSession { session: addr });
+    fn close_session(&self, conn: &Conn, addr: SessionAddr) -> Result<Value, ToolError> {
+        conn.send(ClientMessage::CloseSession { session: addr });
         Ok(json!({ "session": Resolver::format(addr), "closed": true }))
     }
 
@@ -605,7 +1124,7 @@ impl ToolSet {
     /// case can be answered with `input`, stopped with `interrupt`, or followed
     /// with `blocks(wait:)`; and this is somebody's shell, so ending it is never
     /// this tool's business.
-    fn run(&self, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+    fn run(&self, conn: &Conn, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
         let command = run::check_command(args.get("command").and_then(Value::as_str).unwrap_or(""))?;
         if command.is_empty() {
             return Err(ToolError::Missing { field: "command" });
@@ -614,6 +1133,7 @@ impl ToolSet {
         let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
 
         self.attached_with(
+            conn,
             addr,
             |conn| submit_and_wait(conn, addr, command, deadline),
             |r, (anchor, timed_out)| {
@@ -650,10 +1170,11 @@ impl ToolSet {
     /// current size is a no-op, where voting a guess is not.
     fn attached<T>(
         &self,
+        conn: &Conn,
         addr: SessionAddr,
         f: impl FnOnce(&Replica) -> Result<T, ToolError>,
     ) -> Result<T, ToolError> {
-        self.attached_with(addr, |_| Ok(()), |r, ()| f(r))
+        self.attached_with(conn, addr, |_| Ok(()), |r, ()| f(r))
     }
 
     /// The same, with a wait held **inside** the attachment.
@@ -667,20 +1188,20 @@ impl ToolSet {
     /// reason to leave a subscriber behind on the host.
     fn attached_with<W, T>(
         &self,
+        conn: &Conn,
         addr: SessionAddr,
         wait: impl FnOnce(&Conn) -> Result<W, ToolError>,
         f: impl FnOnce(&Replica, W) -> Result<T, ToolError>,
     ) -> Result<T, ToolError> {
-        let already = self.conn.with(|s| s.replica(addr).is_some());
+        let already = conn.with(|s| s.replica(addr).is_some());
         if !already {
-            let (cols, rows) = self
-                .conn
+            let (cols, rows) = conn
                 .with(|s| s.sessions.iter().find(|i| i.addr == addr).map(|i| (i.cols, i.rows)))
                 .unwrap_or(DEFAULT_SIZE);
-            self.conn.attach(addr, cols, rows, true)?;
+            conn.attach(addr, cols, rows, true)?;
         }
-        let out = match wait(&self.conn) {
-            Ok(w) => self.conn.with(|s| {
+        let out = match wait(conn) {
+            Ok(w) => conn.with(|s| {
                 s.replica(addr)
                     .map(|r| f(r, w))
                     .unwrap_or(Err(ToolError::Conn(ConnError::TimedOut)))
@@ -690,7 +1211,7 @@ impl ToolSet {
         if !already {
             // Nothing is held that is not in use: a process living for hours
             // converges on zero attachments whenever the agent stops asking.
-            self.conn.detach(addr);
+            conn.detach(addr);
         }
         out
     }
@@ -1243,6 +1764,57 @@ fn run_json(o: &Outcome, max_lines: usize) -> Value {
 /// the host but is not in this cached copy.
 const DEFAULT_SIZE: (u16, u16) = (200, 50);
 
+/// How long a dial may take before it is answered rather than waited out.
+///
+/// Long enough for a TCP connect, a TLS handshake and the encrypted daemon
+/// handshake over a slow link; far short of `APPROVAL_TIMEOUT`, because past
+/// this point the interesting case is that a *person* is being asked, and the
+/// useful answer is the code rather than more silence. The dial itself keeps
+/// running either way -- this bounds the reply, not the attempt.
+const DIAL_BUDGET: Duration = Duration::from_secs(12);
+
+/// The route to this machine's own daemon, from the socket this server was
+/// pointed at.
+///
+/// A free function so it can be tested without a daemon, which matters more
+/// than it looks: the failure it guards against is silent. Re-deriving
+/// `default_socket_path()` at the moment of need would send a redial of the
+/// local connection to a *different* daemon than the one this server has been
+/// describing -- under `--socket`, with the first daemon's host id already
+/// inside every session id it had handed out.
+fn local_route(socket: &str) -> Option<zest_fleet::HostRoute> {
+    (!socket.is_empty()).then(|| zest_fleet::HostRoute::LocalSocket(socket.to_string()))
+}
+
+/// One session row, as every listing spells it.
+///
+/// A function rather than a closure because two callers now share it, and the
+/// fields are the tool's contract: a second spelling is how one of them
+/// silently stops carrying `context`.
+fn session_json(s: &zest_proto::SessionInfo) -> Value {
+    json!({
+        "id": Resolver::format(s.addr),
+        "title": s.title,
+        "cwd": s.cwd,
+        "cols": s.cols,
+        "rows": s.rows,
+        // Blocks are not emitted on the alternate screen, so this is what
+        // tells an agent to read `screen` instead of `blocks`.
+        "alt_screen": s.alt_screen,
+        "attached": s.attached,
+        "busy": s.busy,
+        // Passed through whole so each fact keeps its `source` label:
+        // `daemon_probe` is the filesystem's word, `shell_report` is whatever
+        // the shell (or anything that can print) claimed -- orientation, never
+        // a gate. The distinction has to reach the payload an agent reads, not
+        // sit in a tool description (ADR-015). Saves an agent running
+        // `git branch` in the user's live shell just to find out where it is.
+        "context": s.context,
+    })
+}
+
+
+
 /// How long a session with no blocks yet is given to draw its prompt.
 ///
 /// The one ambiguity `run` cannot resolve by looking: a shell with no integration
@@ -1771,6 +2343,26 @@ mod input_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_local_route_names_the_socket_this_server_was_given() {
+        // Under `--socket`, re-deriving the default at the moment of need would
+        // point a redial of the local connection at a *different* daemon --
+        // while every session id already handed out carries the first one's
+        // host. Silent, and only reachable after a local link drops, which is
+        // why it is pinned here rather than left to a live test that would have
+        // to kill a daemon to reach it.
+        assert_eq!(
+            local_route("/tmp/somewhere-else.sock"),
+            Some(zest_fleet::HostRoute::LocalSocket("/tmp/somewhere-else.sock".into())),
+            "the configured socket, not `default_socket_path()`"
+        );
+        assert_eq!(
+            local_route(""),
+            None,
+            "no socket is no route -- `best_route`'s local arm returns this verbatim, so a              `Some` here would be a route to whatever answered that path"
+        );
+    }
+
     use super::*;
 
     #[test]

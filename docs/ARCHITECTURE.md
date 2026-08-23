@@ -1339,6 +1339,81 @@ opened its block a beat later, roughly one run in eight. Nothing on the wire say
 bounded drain afterwards; the alternative is reporting a command that plainly ran
 as never having started.
 
+### The fleet comes from two sources, and neither one is the fleet
+
+An agent reaches every machine the window can, and finding out which machines
+those are is not a thing the daemon can answer. `Hello.watch_hosts` sounds like
+it should — it does not: it carries *this* machine's own `HostOffer`, there is
+no `HostMessage::Hosts`, and `zest-daemon` runs no discovery at all. A daemon
+knows itself and its sessions.
+
+So the roster is assembled client-side from the two sources `zest-app` uses.
+**mDNS** is the local link, and the half it misses is exactly the half the relay
+exists for — an enrolled machine on another network. **The account directory**
+is the durable half (ADR-006: enrolment is the spine, discovery decorates), and
+it knows nothing of a machine on the desk that never enrolled. Either alone
+produces a fleet that silently shrinks, which is indistinguishable from machines
+being asleep.
+
+What `zest-mcp` must **not** copy is the app's engine. `FleetModel` is threads, a
+dirty latch, an `EventLoopProxy` and a poller on a timer, and reproducing it
+would make this crate the "second, headless copy of the app's session handling"
+its own boundary warns against. Knowing which machines exist is not the
+objectionable half; owning a live model of them is. `Fleet::view` is therefore a
+*pull*: the multicast socket opens and the control plane is asked on the first
+`hosts` call and at no other moment, and a server nobody asks touches neither.
+That is also this ADR's own rule from the other side — nothing delivers anything
+with no call outstanding.
+
+`best_route` is shared rather than reimplemented (`zest-fleet`, #398), and so is
+the relay ladder (`zest_daemon::account::relay_dialer`, #457). A route decision
+every surface must agree on, and a sequence where a reused ticket is a security
+bug, are the last two things to keep two copies of.
+
+### Listed is not reachable, and the reason is the product
+
+Every machine either source knows is listed, including ones nothing can dial,
+each carrying `unreachable_because`. The web client states the rule from the
+other side: a machine whose relay is unreachable is still yours, and hiding its
+row would make the fleet appear to shrink whenever the network hiccuped — what
+that rules out is *the row that must fail*.
+
+For an agent the stakes are different from a greyed-out card. `best_route` is a
+three-fact rule and each way of failing it asks for a different act — start a
+daemon, join a network, sign in — so "unreachable" is a dead end where "it is
+one of the account's machines, but this server is signed out" is a next step. A
+listing and a refusal produce that sentence from the same function, so they
+cannot disagree about which fact was missing.
+
+### The first dial to a new machine must not hang up, and that is not obvious
+
+Loopback does not consult the trust store — `auth.rs` argues a check there would
+be theatre, since a process that can open the socket can already read the key it
+would check. A **remote** host's `Auth::Proof` genuinely gates, so the first dial
+meets a person comparing six digits.
+
+The obvious arrangement is to refuse the tool call at once, let them approve, and
+retry. **It can never succeed.** `PendingHandle::Drop` cancels the request — "a
+prompt for a device that has already hung up is exactly what teaches someone to
+dismiss prompts without reading them" — so hanging up deletes the very prompt it
+is asking them to answer, and the retry mints a fresh code they must be told
+about again. The failure looks like a person being slow.
+
+So the dial keeps running on a thread of its own, holding the request alive,
+while the call returns the code immediately; a later call collects the
+connection. One dial in flight per host, because the queue resolves by
+`ClientId` and a second would raise a second dialog that the first approval
+answers anyway.
+
+This is what makes the durable key load-bearing rather than tidy. `agent-key` is
+a **third** principal beside the daemon's `host-key` and the window's
+`client-key`: the approval writes *that* key into the far machine's trust store,
+so every later launch authenticates outright, and `zest-daemon --forget` revokes
+the agent without revoking anyone's laptop. It is read from the OS keychain on
+the first remote dial and never at startup — on macOS an ad-hoc-signed dev build
+loses its Keychain grant every `cargo build`, and a tool server that blocks on a
+modal prompt before it can answer `initialize` is a broken tool server.
+
 ### This client's keystrokes are encoded server-side, and that is an exception
 
 `crates/zest-input/src/lib.rs` states the rule the other way round: the protocol

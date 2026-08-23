@@ -159,11 +159,38 @@ impl Conn {
         label: &str,
         expect_host: Option<HostId>,
     ) -> Result<Self, DaemonError> {
+        Self::open_with(read, write, identity, label, expect_host, None)
+    }
+
+    /// [`Self::open`], hearing the six-digit code when a person is being asked
+    /// to approve this client.
+    ///
+    /// `on_pending` runs **on this thread, mid-connect**, and the connect keeps
+    /// blocking afterwards — the host's eventual `Welcome` or `AuthFailed`
+    /// resolves it. Without it the code exists only in a log line while the
+    /// caller waits, and a person at the far machine is comparing it against a
+    /// prompt nobody can read back to them.
+    ///
+    /// **The connection must not be dropped while the code is outstanding.**
+    /// `PendingHandle::Drop` cancels the request on the host — "a prompt for a
+    /// device that has already hung up is exactly what teaches someone to
+    /// dismiss prompts without reading them" — so hanging up to report the code
+    /// deletes the very prompt it is reporting. Whoever calls this holds the
+    /// dial open for the approval window; `ToolSet` runs it on a thread of its
+    /// own for exactly that reason.
+    pub fn open_with(
+        read: Box<dyn Read + Send>,
+        write: Box<dyn Write + Send>,
+        identity: &Arc<ClientIdentity>,
+        label: &str,
+        expect_host: Option<HostId>,
+        on_pending: Option<zest_daemon::client::OnPending<'_>>,
+    ) -> Result<Self, DaemonError> {
         // `hosts: true` so the first listing carries this machine's facts and
         // its profiles. `sessions: false` on purpose: a push arriving while a
         // request/reply is in flight is *discarded* by `DaemonClient`, and
         // nothing here needs to hear about a session list it can ask for.
-        let mut client = DaemonClient::connect_watching(
+        let mut client = DaemonClient::connect_with(
             read,
             write,
             identity,
@@ -179,6 +206,7 @@ impl Conn {
                 // subscription that exists to be discarded.
                 signals: false,
             },
+            on_pending,
         )?;
 
         let host = client.host();

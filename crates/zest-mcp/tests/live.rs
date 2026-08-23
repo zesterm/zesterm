@@ -123,6 +123,31 @@ fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
     (addr, registry)
 }
 
+/// A `ToolSet` over one in-process daemon, with a fleet of exactly that
+/// machine.
+///
+/// `StaticFleet` rather than `LiveFleet` throughout: these tests are about the
+/// tools, and a real fleet source would put multicast and an HTTPS call to the
+/// control plane inside every one of them. The fleet-reach tests build their
+/// own multi-machine `StaticFleet` for the same reason -- what is under test is
+/// the dispatch, not whether this runner can hear an advertisement.
+fn tools(conn: Conn) -> zest_mcp::ToolSet {
+    let row = local_row(&conn);
+    zest_mcp::ToolSet::new(conn, Box::new(zest_mcp::StaticFleet::new(vec![row])))
+}
+
+/// The fleet row for a machine reached over loopback TCP, as this test's
+/// daemons are.
+///
+/// `local: true` on the connection the server was built with, so `best_route`
+/// answers with the caller's own route. The rest is what discovery would have
+/// said about an advertising machine.
+fn local_row(conn: &Conn) -> zest_fleet::FleetHost {
+    let mut h = zest_fleet::fixture::local(1, conn.label());
+    h.host = conn.host();
+    h
+}
+
 fn dial(addr: &str, label: &str) -> Conn {
     let stream = TcpStream::connect(addr).expect("connect");
     // Not a hang detector: a session sitting quietly at a prompt keeps this
@@ -433,7 +458,7 @@ fn the_tools_answer_over_a_real_connection() {
     // shapes are the subject, and waiting on a spawned process is what makes
     // the rest of this repo's suite flaky on Windows (#285).
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let hosts = tools.call("hosts", &serde_json::json!({})).expect("hosts");
     let host = &hosts["hosts"][0];
@@ -500,7 +525,7 @@ fn an_arrow_key_reaches_a_live_session_and_lets_go_of_it_again() {
     // deadline instead of answering. That is #347's cost and it applies to
     // `screen` and `blocks` equally; what this test is about is the live path.
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
     let created = tools
         .call(
             "create_session",
@@ -543,7 +568,7 @@ fn a_session_id_this_server_never_minted_is_refused() {
     // the damage of obeying an injected instruction is that it lands on a
     // different machine, so this refusal is the one that matters most.
     let (addr, _registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let err = tools
         .call("screen", &serde_json::json!({ "session": "deadbeef:1" }))
@@ -586,7 +611,7 @@ fn exit_3_cmd() -> String {
 #[test]
 fn run_isolated_reports_the_status_the_process_really_exited_with() {
     let (addr, _registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let v = tools
         .call("run_isolated", &serde_json::json!({ "command": exit_3_cmd() }))
@@ -622,7 +647,7 @@ fn run_isolated_reports_the_status_the_process_really_exited_with() {
 #[test]
 fn a_finished_commands_output_is_read_before_the_session_is_swept() {
     let (addr, _registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let cmd = if cfg!(windows) {
         "cmd.exe /c echo zesterm-marker".to_string()
@@ -654,7 +679,7 @@ fn a_finished_commands_output_is_read_before_the_session_is_swept() {
 #[test]
 fn a_timeout_returns_partial_output_and_leaves_the_command_running() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let cmd = if cfg!(windows) {
         "powershell.exe -NoProfile -Command Start-Sleep 30".to_string()
@@ -744,7 +769,7 @@ fn integrated_shell() -> Option<(String, String)> {
 /// into the gap reports `NoBlocks` exactly as a broken hook would. So every
 /// submission below waits for the prompt first, and a shell that never gets
 /// there fails as that, rather than as whatever the next assertion is about.
-fn wait_for_prompt(tools: &zest_mcp::ToolSet, session: &str, limit: Duration) -> bool {
+fn wait_for_prompt(tools: &mut zest_mcp::ToolSet, session: &str, limit: Duration) -> bool {
     let give_up = std::time::Instant::now() + limit;
     while std::time::Instant::now() < give_up {
         let v = tools
@@ -793,7 +818,7 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     };
 
     let (addr, registry) = serve_daemon_with(true);
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": shell, "cols": 100, "rows": 30 }))
@@ -802,7 +827,7 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     let session_addr = tools.resolver().resolve(&session).expect("the id this server minted");
 
     assert!(
-        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        wait_for_prompt(&mut tools, &session, Duration::from_secs(30)),
         "`{shell}` never emitted an OSC 133 prompt marker. That is shell startup or the \
          integration hook, not the correlation -- run \
          `cargo run -p zest-daemon --example attach` to see whether the markers arrive at all"
@@ -848,7 +873,7 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // followed the first -- the case the correlation must accept alongside the
     // reused id above, and the one an `==` would fail.
     assert!(
-        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        wait_for_prompt(&mut tools, &session, Duration::from_secs(30)),
         "the shell never drew its prompt again after the first command. Submitting into \
          that gap races `PROMPT_GRACE` against a loaded machine (#363)"
     );
@@ -892,7 +917,7 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // two shells reach it differently -- pwsh emits its `D` from the prompt
     // function, which runs *after* `Clear-Host`.
     assert!(
-        wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+        wait_for_prompt(&mut tools, &session, Duration::from_secs(30)),
         "the shell never returned to a prompt after `echo` (#363)"
     );
     let cleared = tools
@@ -930,12 +955,12 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
     // typed. An empty Enter is that something: pwsh brackets even an empty line
     // with `C`/`D` and pushes a fresh prompt, and zsh's bare `A` pushes into an
     // empty index too, so the nudge converges on both shells.
-    if !wait_for_prompt(&tools, &session, Duration::from_secs(5)) {
+    if !wait_for_prompt(&mut tools, &session, Duration::from_secs(5)) {
         tools
             .call("input", &serde_json::json!({ "session": session, "keys": ["enter"] }))
             .expect("an empty Enter re-mints a prompt block");
         assert!(
-            wait_for_prompt(&tools, &session, Duration::from_secs(30)),
+            wait_for_prompt(&mut tools, &session, Duration::from_secs(30)),
             "the shell never minted a prompt block after `clear` destroyed them all, even \
              after an empty Enter re-prompted it (#363)"
         );
@@ -977,7 +1002,7 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
 #[test]
 fn a_run_in_a_shell_that_emits_no_markers_names_run_isolated() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": quiet_cmd() }))
@@ -1014,7 +1039,7 @@ fn a_run_in_a_shell_that_emits_no_markers_names_run_isolated() {
 #[test]
 fn an_exit_code_and_its_source_are_present_together_or_not_at_all() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     for (args, what) in [
         (serde_json::json!({ "command": exit_3_cmd() }), "a command that finished"),
@@ -1064,7 +1089,7 @@ fn an_exit_code_and_its_source_are_present_together_or_not_at_all() {
 #[test]
 fn a_wait_that_times_out_still_answers_with_the_screen() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
@@ -1107,7 +1132,7 @@ fn a_wait_that_times_out_still_answers_with_the_screen() {
 #[test]
 fn a_wait_for_a_sequence_already_passed_answers_immediately() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": quiet_cmd(), "cols": COLS, "rows": ROWS }))
@@ -1153,7 +1178,7 @@ fn a_wait_for_a_sequence_already_passed_answers_immediately() {
 #[test]
 fn a_wait_ends_when_the_session_does_rather_than_running_out_its_deadline() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     // A session of our own, never attached, whose child exits at once. Not
     // `run_isolated`'s: that one detaches on the way out, and `Registry::sweep`
@@ -1217,7 +1242,7 @@ fn a_wait_ends_when_the_session_does_rather_than_running_out_its_deadline() {
 #[test]
 fn a_block_wait_gives_up_on_time_and_refuses_a_flag_that_is_not_one() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
@@ -1271,7 +1296,7 @@ fn a_block_wait_gives_up_on_time_and_refuses_a_flag_that_is_not_one() {
 #[test]
 fn a_listing_reflects_a_session_this_connection_did_not_create() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     // One create of our own, so the cache is warm and populated: without this
     // the listing would be empty for the ordinary reason rather than the one
@@ -1332,7 +1357,7 @@ fn a_listing_reflects_a_session_this_connection_did_not_create() {
 #[test]
 fn a_listing_and_a_screen_never_disagree_about_one_session() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
@@ -1390,7 +1415,7 @@ fn a_listing_and_a_screen_never_disagree_about_one_session() {
 #[test]
 fn a_dead_session_is_refused_at_once_rather_than_at_the_deadline() {
     let (addr, registry) = serve_daemon();
-    let tools = zest_mcp::ToolSet::new(dial(&addr, "zest-mcp agent"));
+    let mut tools = tools(dial(&addr, "zest-mcp agent"));
 
     let created = tools
         .call("create_session", &serde_json::json!({ "command": long_lived_cmd(), "cols": COLS, "rows": ROWS }))
