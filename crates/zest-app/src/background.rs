@@ -10,7 +10,7 @@
 //! leaves the window looking exactly as it did before the setting was touched,
 //! which is the only behaviour that stays honest while someone is typing one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -97,7 +97,7 @@ impl Backgrounds {
     pub fn invalidate(&mut self, store: &mut ImageStore) {
         let generation = self.generation;
         self.entries.retain(|_, e| e.seen == generation);
-        let live: Vec<ImageId> = self.entries.values().filter_map(|e| e.slot.id()).collect();
+        let live: HashSet<ImageId> = self.entries.values().filter_map(|e| e.slot.id()).collect();
         store.retain(|id| live.contains(&id));
         self.generation += 1;
     }
