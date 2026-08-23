@@ -76,6 +76,12 @@ fn serve_daemon(socket: &str) {
     // Wait for it to be dialable rather than sleeping a fixed time. The
     // binary under test would spawn its own daemon otherwise, and then this
     // test would be about a daemon it did not configure.
+    //
+    // Which is also why nothing here can catch #412: keeping the cold path out
+    // means `spawn_detached` never runs, so a daemon leaking this process's
+    // pipes would go unnoticed by every test in this file. That invariant is
+    // covered in `zest-daemon/src/spawn.rs`, by
+    // `a_detached_child_inherits_nothing_of_ours`.
     let give_up = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < give_up {
         if zest_daemon::connect(&socket_for_probe).is_ok() {

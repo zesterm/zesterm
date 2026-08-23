@@ -567,6 +567,32 @@ you need before you trip on it.
   object. The fix is `FILE_FLAG_OVERLAPPED` on both ends — and `ConnectNamedPipe`
   must then be overlapped too, or it returns without waiting and the server
   serves a connection nobody made. (`zest-daemon/src/local.rs`.)
+- **`Command::spawn` on Windows hands the child every inheritable handle
+  *this* process holds**, not the ones you named. std passes
+  `bInheritHandles = TRUE` with no `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, and
+  `Stdio::null()` narrows that by nothing — it only decides what the child's own
+  `GetStdHandle` returns. So a detached daemon inherited the pipe a shell had
+  handed zesterm as stdout and held it for its whole life: `zesterm
+  --attach-probe | Out-String` hung for 85 seconds, released only by killing a
+  daemon nobody was talking to, and `zest-mcp` is the same shape with an agent
+  harness's pipes. Every call reports success and the victim is one process
+  away, so it reads as already fixed — the `Stdio::null()` calls that look like
+  the fix predate the first report. `SetHandleInformation` on our own std
+  handles is the trap, not the fix: process-global, racy against any other
+  thread spawning, and three handles out of a set whose size the *launcher*
+  chooses — #403's umask lesson in different clothes, whose constructive half
+  (prefer the call that takes the property as an argument) points straight at
+  the handle list. `spawn_detached` (`zest-daemon/src/spawn.rs`) therefore calls
+  `CreateProcessW` itself, naming exactly three `NUL` handles, and
+  **`DETACHED_PROCESS` turns out to be load-bearing twice**: the console it
+  declines is also the console whose handles would be inherited *outside* the
+  list, which `CreateProcessW` rejects. Two smaller edges paid for at the same
+  time: the attribute list's alignment trap is the same one `zest-pty` hit (a
+  `Vec<u8>` buffer is silently ignored — allocate `Vec<usize>`), and **argv[0]
+  is parsed by a different rule from every argument after it** — no backslash
+  escaping inside its quotes, so escaping it is what adds a slash to the path.
+  std will be able to express this one day; `inherit_handles` (rust#146407) and
+  `spawn_with_attributes` (rust#114854) are both still nightly. (#412)
 - **`shutdown` does not unpark a socket read that is already parked, on
   Winsock** — and neither does arming `SO_RCVTIMEO` at cut time, which applies
   only to calls issued *after* it is set. POSIX wakes the reader; Windows never
