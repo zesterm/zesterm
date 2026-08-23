@@ -16,7 +16,12 @@
 
 import type { CursorState, Delta, RowPayload } from './wire.ts';
 
-/** A keystroke as the caller knows it *before* `encodeKey` — never un-encoded. */
+/**
+ * A keystroke as the caller knows it *before* `encodeKey` — never un-encoded.
+ *
+ * `ch` is one code point; anything else (a ZWJ sequence, a composed string, an
+ * empty string) is treated as `other` — it flushes and predicts nothing.
+ */
 export type PredictKey = { key: 'printable'; ch: string } | { key: 'backspace' } | { key: 'other' };
 
 export type PredictPolicy = 'auto' | 'always' | 'off';
@@ -70,6 +75,13 @@ export class Predictor {
     if (this.policy === 'off') return;
     switch (key.key) {
       case 'printable': {
+        // One cell or two is the host's call (a client never computes
+        // widths, ADR-004), and a guess placed after a wrong answer lands in
+        // the spacer and refutes a correct line. Stop guessing instead.
+        if (!narrow(key.ch)) {
+          this.#pending = [];
+          return;
+        }
         // A full-screen program decides for itself what a key does.
         if (this.#altScreen) return;
         const last = this.#pending[this.#pending.length - 1];
@@ -210,6 +222,19 @@ export class Predictor {
   pending(): readonly Prediction[] {
     return this.#pending;
   }
+}
+
+/**
+ * A character this engine will vouch for occupying exactly one cell: exactly
+ * one code point, below U+1100 (where the first wide range, Hangul Jamo,
+ * begins), not a combining mark, not a control. Not a width table — a client
+ * must never carry one. Anything else is *unknown here*, not wide.
+ */
+function narrow(ch: string): boolean {
+  const cps = [...ch];
+  if (cps.length !== 1) return false;
+  const c = (cps[0] as string).codePointAt(0) as number;
+  return c >= 0x20 && c < 0x1100 && !(c >= 0x0300 && c <= 0x036f) && c !== 0x7f;
 }
 
 /**

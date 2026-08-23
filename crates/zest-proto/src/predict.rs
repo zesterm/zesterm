@@ -32,7 +32,10 @@
 //!   prediction; stop at the right edge rather than guess at the shell's
 //!   wrapping. Backspace pops the newest pending prediction and predicts
 //!   nothing otherwise. Every other key flushes: the line is about to be the
-//!   shell's business.
+//!   shell's business. So does a printable whose *width* only the host knows
+//!   — a client never computes cell widths (the rule `Run::cells` exists
+//!   for), so a CJK glyph, an emoji or a combining mark makes no guess and
+//!   ends the guessing until the host's cursor says where the line got to.
 //! - **Confirm** when the host's cursor has moved past the predicted cell and
 //!   the row delivered in the same delta holds the character — or, with no row
 //!   delivered, when the cursor alone has passed it (the host coalesced the
@@ -155,6 +158,12 @@ impl Predictor {
             return;
         }
         match key {
+            Key::Printable(ch) if !narrow(ch) => {
+                // One cell or two is the host's call, and a guess placed
+                // after a wrong answer lands in the spacer and refutes a
+                // correct line. Stop guessing instead.
+                self.pending.clear();
+            }
             Key::Printable(ch) => {
                 // A full-screen program decides for itself what a key does;
                 // guessing "it echoes" is wrong for every one of them.
@@ -317,6 +326,17 @@ impl Predictor {
     pub fn pending(&self) -> &[Prediction] {
         &self.pending
     }
+}
+
+/// A character this engine will vouch for occupying exactly one cell.
+///
+/// Not a width table — a client must never carry one (ADR-004; `Run::cells`).
+/// Everything below U+1100 is one cell in every East Asian Width revision,
+/// except the combining marks, which are zero; the first wide range begins at
+/// U+1100 (Hangul Jamo). Anything above is *unknown here*, not wide.
+fn narrow(ch: char) -> bool {
+    let c = ch as u32;
+    (0x20..0x1100).contains(&c) && !(0x0300..=0x036F).contains(&c) && c != 0x7F
 }
 
 /// The character a row payload puts at `col`: one per cell, a space once a

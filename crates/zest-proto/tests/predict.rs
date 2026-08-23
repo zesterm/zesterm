@@ -46,7 +46,11 @@ struct Step {
 #[derive(Deserialize)]
 #[serde(tag = "key", rename_all = "lowercase")]
 enum Input {
-    Printable { ch: char },
+    /// A string, not a `char`: the fixture carries what a TypeScript caller
+    /// might pass, and a `char` cannot hold a ZWJ sequence. The TS port's
+    /// guard turns more than one code point into `other`; the Rust type
+    /// makes that the caller's problem, so the replayer maps it the same way.
+    Printable { ch: String },
     Backspace,
     Other,
 }
@@ -92,7 +96,13 @@ fn every_scenario_in_the_fixture_replays() {
             let here = format!("{} step {i} (at {})", sc.name, step.at);
             if let Some(input) = &step.input {
                 let key = match input {
-                    Input::Printable { ch } => Key::Printable(*ch),
+                    Input::Printable { ch } => {
+                        let mut it = ch.chars();
+                        match (it.next(), it.next()) {
+                            (Some(c), None) => Key::Printable(c),
+                            _ => Key::Other,
+                        }
+                    }
                     Input::Backspace => Key::Backspace,
                     Input::Other => Key::Other,
                 };
