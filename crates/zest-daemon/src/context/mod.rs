@@ -521,63 +521,18 @@ pub fn os_hostname() -> Option<String> {
 /// untracked enumeration is the expensive half of `git status` and the
 /// dirty question is about tracked files.
 fn git_dirty(cwd: &str) -> Option<(bool, u32)> {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-
+    // The bounded-subprocess skeleton lives in `gitcmd` since #453, where the
+    // review panel's diff needs the same one. What stays here is the part that
+    // is about *this* question: the arguments, and what the output means.
     const DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
     const CAP: u64 = 256 * 1024;
 
-    let mut child = Command::new("git")
-        .args(["-C", cwd, "status", "--porcelain", "-uno"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    // Every early exit past the spawn must reap the child, or the failure
-    // path leaks a subprocess exactly when the machine is under the pressure
-    // that caused the failure.
-    let reap = |mut child: std::process::Child| {
-        let _ = child.kill();
-        let _ = child.wait();
-        None
-    };
-    let Some(stdout) = child.stdout.take() else {
-        return reap(child);
-    };
-    let drain = match std::thread::Builder::new()
-        .name("zest-daemon-git-drain".into())
-        .spawn(move || {
-            let mut out = Vec::new();
-            let _ = stdout.take(CAP).read_to_end(&mut out);
-            out
-        }) {
-        Ok(drain) => drain,
-        Err(_) => return reap(child),
-    };
-
-    let started = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < DEADLINE => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let out = drain.join().ok()?;
-    let status = status?;
-    if !status.success() {
+    let run = crate::gitcmd::run_git(cwd, &["status", "--porcelain", "-uno"], CAP, DEADLINE)?;
+    if !run.ok {
         return None;
     }
-    let changed =
-        u32::try_from(out.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count()).unwrap_or(u32::MAX);
+    let changed = u32::try_from(run.out.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count())
+        .unwrap_or(u32::MAX);
     Some((changed > 0, changed))
 }
 

@@ -230,10 +230,17 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       moved underneath — and a truncated read carries no hash at all, so a
       buffer holding the first few megabytes of a larger file cannot save over
       the rest of it.
-- [ ] **`GitDiff`**, for the review panel: the repo's uncommitted changes as
-      raw unified text plus the untracked names `git diff` structurally cannot
-      show. A subprocess with a deadline, so unlike the file reads it needs a
-      worker and a deferred-reply mailbox rather than the dispatch arm.
+- [x] **`GitDiff`** (#453), for the review panel: the repo's uncommitted
+      changes as raw unified text — staged *and* unstaged against HEAD, so the
+      panel has one truth rather than two lists a person adds up — plus the
+      untracked names `git diff` structurally cannot show. Truncation drops
+      whole files, never half a hunk. A subprocess with a deadline, so unlike
+      the file reads it answers off a worker through a deferred-reply mailbox:
+      the serve loop holds the connection lock across `on_bytes`, and a slow
+      repository would otherwise stall that session's own input and output.
+      `gitcmd::run_git` is the bounded-subprocess skeleton, extracted from the
+      context engine's dirty probe so there is one copy of "run git without
+      letting it hang the daemon".
 - [ ] **A pane can be something other than a session.** `PaneContent` becomes a
       sum type so a tab can hold an editor beside its shell; no runtime change.
 - [ ] **A file opens in a pane**: the buffer, gutter, ⌘S, and the conflict

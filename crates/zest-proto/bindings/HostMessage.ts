@@ -223,4 +223,52 @@ conflict: boolean,
 /**
  * Why nothing was written, phrased for a person. Empty on success.
  */
+error: string, } | { "t": "git_diff_result", 
+/**
+ * The directory that was asked about, echoed.
+ */
+cwd: string, 
+/**
+ * The repository root the diff describes, host-absolute — the panel's
+ * title, and what the repo-relative paths inside `diff` are relative
+ * to.
+ *
+ * **Spelled as git spells it, which on Windows is not how
+ * [`Self::FileContents::path`] is spelled**: `rev-parse` answers
+ * `C:/Users/…` where a canonicalized path is `\\?\C:\Users\…`. Same
+ * directory, different dialect — so a client joining this with a
+ * diff's path and handing the result to `ReadFile` is fine (the host
+ * resolves it), but one *comparing* the two strings is not.
+ */
+repo_root: string, 
+/**
+ * Raw unified diff: staged *and* unstaged against HEAD, so the panel
+ * has one truth rather than two lists a person has to add up.
+ *
+ * **Raw text rather than a parsed structure** on purpose. Splitting
+ * on `diff --git ` is a small pure function in each client, while a
+ * wire-level hunk/rename/mode vocabulary would freeze a large surface
+ * on the day it shipped — and every client renders it differently
+ * anyway.
+ */
+diff: string, 
+/**
+ * More files changed than `diff` carries. Whole files are dropped,
+ * never half of one: a header promising six lines followed by two is
+ * something a parser is entitled to call corrupt.
+ */
+truncated: boolean, 
+/**
+ * Untracked files, repo-relative, by **name only**.
+ *
+ * Their content is absent because `git diff` structurally cannot show
+ * it — an untracked file has no index entry to diff against — and a
+ * client that wants it already has [`ClientMessage::ReadFile`].
+ */
+untracked: Array<string>, untracked_truncated: boolean, 
+/**
+ * Why there is no diff, when there is none for a reason — not a
+ * repository, or git did not answer. Empty when the tree is simply
+ * clean, which must not render as a failure.
+ */
 error: string, };

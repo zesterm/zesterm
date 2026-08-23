@@ -458,6 +458,19 @@ pub struct Connection {
     /// `EnrollResult`; enrolment is a one-shot human act, and the app's
     /// button disables itself in flight anyway.
     enroll_running: bool,
+    /// Replies workers settled while this connection waited (#453).
+    ///
+    /// `enroll_result`'s idea, but a **queue** rather than a one-answer cell,
+    /// and the difference is not tidiness: an enrolment is a one-shot human
+    /// act with a button that disables itself, while a review panel refreshing
+    /// and a second one opening are the ordinary case. A single cell would let
+    /// one answer overwrite another nobody had read, and each caller would
+    /// wait forever on a reply the other received.
+    deferred: Arc<Mutex<Vec<HostMessage>>>,
+    /// How many deferred workers this connection has in flight, so a client
+    /// cannot spawn threads without bound by asking faster than git answers.
+    /// Over the cap is refused honestly rather than queued silently.
+    deferred_running: Arc<std::sync::atomic::AtomicUsize>,
     /// Called once, when the handshake completes.
     ///
     /// The LAN listener uses it to disarm its watchdog and release its
@@ -590,6 +603,8 @@ impl Connection {
             decided: Arc::new(Mutex::new(None)),
             enroll_result: Arc::new(Mutex::new(None)),
             enroll_running: false,
+            deferred: Arc::new(Mutex::new(Vec::new())),
+            deferred_running: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             on_ready: None,
             on_pending: None,
             waker: None,
@@ -1488,6 +1503,86 @@ impl Connection {
                 }
                 vec![reply]
             }
+
+            // Unlike the two above, this one cannot answer from here. A read
+            // is bounded by its cap and a write is the buffer the client
+            // already sent; `git diff` is a subprocess on somebody else's
+            // repository, and the serve loop holds this connection's lock
+            // across `on_bytes` — so a slow repo would stall the session's
+            // own input *and* its output. It goes to a worker, and the answer
+            // rides the wake the writer is already blocked on.
+            ClientMessage::GitDiff { cwd } => {
+                use std::sync::atomic::Ordering;
+
+                /// Enough for a panel per pane; low enough that a client
+                /// asking faster than git answers cannot spawn threads
+                /// without bound.
+                const MAX_DEFERRED: usize = 4;
+
+                // Claimed with one atomic rather than a `load` and then a
+                // `fetch_add`. Only the reader thread reaches this today, so
+                // the two-step version cannot actually over-admit — but that
+                // is an invariant held somewhere else entirely, and a bound on
+                // how many threads a client can make us spawn should not
+                // depend on it staying true.
+                let claimed = self
+                    .deferred_running
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n < MAX_DEFERRED).then_some(n + 1)
+                    })
+                    .is_ok();
+                if !claimed {
+                    // Refused by name rather than queued, because a queued
+                    // refresh is one that arrives after the person has stopped
+                    // looking — and an honest "ask again" is something the
+                    // panel can act on.
+                    return vec![HostMessage::GitDiffResult {
+                        cwd,
+                        repo_root: String::new(),
+                        diff: String::new(),
+                        truncated: false,
+                        untracked: Vec::new(),
+                        untracked_truncated: false,
+                        error: "too many git questions in flight; ask again".into(),
+                    }];
+                }
+                // Kept for the reply, because every answer — including a
+                // refusal — has to echo the question. It is the only
+                // correlation this pair has.
+                let asked = cwd.clone();
+                let cell = Arc::clone(&self.deferred);
+                let running = Arc::clone(&self.deferred_running);
+                let waker = self.waker.clone();
+                let spawned =
+                    std::thread::Builder::new().name("zest-daemon-git-diff".into()).spawn(
+                        move || {
+                            let msg = crate::gitcmd::git_diff(&cwd);
+                            cell.lock().expect("deferred lock").push(msg);
+                            // Released before the wake, so a writer that runs
+                            // immediately sees the slot already free.
+                            running.fetch_sub(1, Ordering::Relaxed);
+                            if let Some(w) = &waker {
+                                w();
+                            }
+                        },
+                    );
+                if let Err(e) = spawned {
+                    // No worker ran, so nothing will be drained and nothing
+                    // will release the slot — free it here or this connection
+                    // leaks one for good.
+                    self.deferred_running.fetch_sub(1, Ordering::Relaxed);
+                    return vec![HostMessage::GitDiffResult {
+                        cwd: asked,
+                        repo_root: String::new(),
+                        diff: String::new(),
+                        truncated: false,
+                        untracked: Vec::new(),
+                        untracked_truncated: false,
+                        error: format!("no thread for the diff: {e}"),
+                    }];
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1684,6 +1779,16 @@ impl Connection {
         taken.into_iter().collect()
     }
 
+    /// Replies deferred workers have finished, if any (#453). Writer-loop
+    /// drained beside [`Self::take_enroll_result`].
+    ///
+    /// Unlike that one, draining frees nothing: a worker releases its own slot
+    /// as it finishes, because the cap is on *work in flight* rather than on
+    /// answers waiting to be read.
+    pub fn take_deferred(&mut self) -> Vec<HostMessage> {
+        std::mem::take(&mut *self.deferred.lock().expect("deferred lock"))
+    }
+
     fn no_such(session: SessionAddr) -> HostMessage {
         HostMessage::Error {
             session: Some(session),
@@ -1834,6 +1939,7 @@ where
             // however long someone took to answer.
             outgoing.extend(c.take_decision());
             outgoing.extend(c.take_enroll_result());
+            outgoing.extend(c.take_deferred());
             outgoing.extend(c.poll_with(updates));
         }
         if updates {
@@ -4218,6 +4324,52 @@ mod tests {
             b"two",
             "nothing was written"
         );
+    }
+
+    /// The wire half of #453, and the half that is *not* like `ReadFile`.
+    ///
+    /// A diff answers with nothing from the serve loop — the subprocess runs
+    /// on a worker, and the reply reaches the writer through `take_deferred`
+    /// on the wake it already blocks on. Asserting the empty return is what
+    /// pins that: if this ever came back inline, a slow repository would be
+    /// stalling the session's own input and output with nothing to show for
+    /// it in a test.
+    #[test]
+    fn a_diff_is_answered_off_the_worker_and_not_from_the_serve_loop() {
+        let dir = std::env::temp_dir().join(format!("zest-srv-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let (mut c, _registry) = conn();
+        // The waker the writer loop is woken by; a worker that settles an
+        // answer without firing it would leave the reply sitting in the
+        // mailbox until something else happened to wake the connection.
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&woken);
+        c.set_waker(Box::new(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)));
+
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(&mut c, &ClientMessage::GitDiff { cwd: dir.to_string_lossy().into_owned() });
+        assert!(out.is_empty(), "the serve loop answers nothing; a worker does: {out:?}");
+
+        let mut settled = None;
+        for _ in 0..200 {
+            let drained = c.take_deferred();
+            if let Some(msg) = drained.into_iter().next() {
+                settled = Some(msg);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let Some(HostMessage::GitDiffResult { .. }) = settled else {
+            panic!("the worker's answer reaches the mailbox: {settled:?}");
+        };
+        assert!(
+            woken.load(std::sync::atomic::Ordering::SeqCst),
+            "and it wakes the writer, or the reply waits for an unrelated event"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
