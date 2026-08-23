@@ -18,17 +18,9 @@
 
 use std::io::{BufReader, IsTerminal};
 use std::sync::Arc;
-use std::time::Duration;
 
 use zest_mcp::rpc::Server;
-use zest_mcp::{Conn, ToolSet};
-
-/// How long to wait for a daemon that is not running yet.
-///
-/// The same budget the app allows, and for the same reason: on the cold path
-/// this is a process spawn, and a harness starting a tool server has no window
-/// to keep responsive while it happens.
-const DAEMON_START: Duration = Duration::from_secs(5);
+use zest_mcp::{Conn, LiveFleet, ToolSet, DAEMON_START};
 
 fn main() -> std::process::ExitCode {
     // stderr, not stdout. See the module doc -- this is not a preference.
@@ -83,8 +75,11 @@ fn main() -> std::process::ExitCode {
     // a process that can open the socket can already read the key it would
     // check -- and minting one keeps the OS keychain off the startup path
     // entirely. On macOS that path is a modal prompt after every rebuild, and a
-    // tool server that hangs at startup is a broken tool server. A durable
-    // `agent-key` arrives with the fleet, where the trust store is real.
+    // tool server that hangs at startup is a broken tool server.
+    //
+    // The durable `agent-key` is `ToolSet`'s, minted on the first *remote* dial
+    // and never before -- so this startup path is unchanged for a session that
+    // never leaves this machine.
     let identity = match zest_mesh::identity::ClientIdentity::generate() {
         Ok(i) => Arc::new(i),
         Err(e) => {
@@ -93,7 +88,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let label = opt("--label").unwrap_or_else(default_label);
+    let label = opt("--label").unwrap_or_else(zest_mcp::client_label);
     let conn = match Conn::open(attached.read, attached.write, &identity, &label, None) {
         Ok(c) => c,
         Err(e) => {
@@ -103,7 +98,13 @@ fn main() -> std::process::ExitCode {
     };
     tracing::info!(host = %conn.host().short(), label = conn.label(), "connected");
 
-    let mut server = Server::new(ToolSet::new(conn));
+    // Nothing is discovered here. `LiveFleet` opens its multicast socket and
+    // asks the control plane on the first `hosts` call and at no other moment,
+    // so a server nobody asks about the fleet touches neither the network nor
+    // the keychain -- which is what keeps this the same startup it has always
+    // been.
+    let fleet = LiveFleet::new(conn.host(), conn.label());
+    let mut server = Server::new(ToolSet::new(conn, Box::new(fleet)));
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     match server.serve(BufReader::new(stdin.lock()), stdout.lock()) {
@@ -112,18 +113,6 @@ fn main() -> std::process::ExitCode {
             eprintln!("zest-mcp: {e}");
             std::process::ExitCode::FAILURE
         }
-    }
-}
-
-/// What the host shows a person when this client asks to be trusted.
-///
-/// `Hello.label` is signed into the transcript and is the human's entire
-/// decision input at a pairing prompt, so it says plainly what this is. It must
-/// never be mistakable for somebody's laptop.
-fn default_label() -> String {
-    match std::env::var("MCP_CLIENT_NAME") {
-        Ok(h) if !h.trim().is_empty() => format!("zest-mcp agent ({h})"),
-        _ => "zest-mcp agent".into(),
     }
 }
 

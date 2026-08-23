@@ -321,6 +321,22 @@ impl ClientIdentity {
         )?))
     }
 
+    /// The same, under a name of the caller's choosing.
+    ///
+    /// A client key is one *principal*, and a machine can hold more than one:
+    /// the window's is `client-key`, the MCP server's is
+    /// [`AGENT_KEY_NAME`](crate::keystore::AGENT_KEY_NAME). They must be
+    /// separate rows in a host's trust store, because a host revokes the key
+    /// that asked and "stop trusting the agent" is not "stop trusting my
+    /// laptop".
+    ///
+    /// `name` is on-disk contract: it is the entry a store is keyed by, so a
+    /// caller passing a fresh string mints a fresh identity and every host
+    /// that had paired the old one no longer knows it.
+    pub fn load_or_create_named(store: &dyn KeyStore, name: &str) -> Result<Self, MeshError> {
+        Ok(Self::from_secret_bytes(&*load_or_create_secret(store, name)?))
+    }
+
     #[must_use]
     pub const fn client_id(&self) -> ClientId {
         self.id

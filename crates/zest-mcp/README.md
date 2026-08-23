@@ -22,7 +22,7 @@ prints the default.
 
 | tool | what it answers |
 |---|---|
-| `hosts` | the machines this server can reach, what each is, and what it can launch |
+| `hosts` | every machine in the fleet, what each is, what it can launch, and whether it can be reached |
 | `sessions` | terminals on a host: id, title, cwd, size, `alt_screen`, attached |
 | `screen` | what a session shows now, as text — with `styled` saying where it is dim or reversed |
 | `blocks` | the commands that have run — no output text, so history is cheap |
@@ -32,7 +32,35 @@ prints the default.
 | `input` / `interrupt` | type into a session, send it named keys or a paste, or send it Ctrl+C |
 | `create_session` / `close_session` | start a terminal, or end one |
 
-Sessions are named `<host>:<session>`, e.g. `540d2d00:7`.
+Sessions are named `<host>:<session>`, e.g. `540d2d00:7`. `sessions`,
+`create_session` and `run_isolated` take an optional `host` — the other tools
+already carry one inside the session id.
+
+## The fleet, not this machine
+
+`hosts` lists every machine mDNS hears on this network plus every machine the
+account lists, merged by id, the way the window builds the same list. Naming one
+opens a connection to it and keeps it, so an agent working on a second machine
+pays a handshake once.
+
+**A machine is listed whether or not it can be reached**, with
+`unreachable_because` saying what would have to change. That is the web client's
+rule (`host-source.ts`): a machine whose relay is unreachable is still yours, and
+hiding its row would make the fleet appear to shrink whenever the network
+hiccuped — what it rules out is *the row that must fail*. Here the payoff is
+sharper: "it is one of the account's machines, but this server is signed out" is
+an act, where a missing row is a machine the agent never thinks to ask about.
+`via` says `loopback`, `lan` or `relay`, which is roughly how much the first
+call to it costs.
+
+Nothing is discovered at startup. The multicast socket opens and the account is
+asked on the **first `hosts` call** and at no other moment, so a session that
+never asks about the fleet makes no requests and touches no keychain.
+
+`sessions` with no `host` lists the machines already connected — this one, plus
+whatever the agent has worked on — and dials nothing, so it stays cheap however
+large the fleet is. Fanning out would make the cheapest call in the surface as
+slow as the least responsive machine in it.
 
 ## `run`, and why it is the primitive
 
@@ -233,8 +261,18 @@ one.
 **On a remote host the gate is real.** LAN, WebSocket and relay transports
 consult the trust store, and an unknown device makes the far machine print a
 six-digit code that a person compares. That is where the durable `agent-key`
-lands, and it is what makes an agent revocable per host with
-`zest-daemon --forget`.
+lands — a **third** principal beside the daemon's `host-key` and the window's
+`client-key`, so `zest-daemon --forget` revokes the agent without revoking
+anybody's laptop. It is read from the OS keychain on the first *remote* dial and
+never at startup, which keeps the macOS prompt off the path that must answer
+`initialize`.
+
+The first call naming an unapproved machine comes back with the code rather than
+hanging, and the dial stays open behind it: `PendingHandle::Drop` **cancels** a
+pairing request, so refusing by hanging up would delete the prompt the person is
+reading and the retry would mint a code they have to be told about again. Once
+they approve, the next call connects — and no launch after that asks again,
+which is the whole reason the key is durable.
 
 ## Reading never resizes anybody's window
 
@@ -300,6 +338,13 @@ real zsh recording, and measures the naive predicate beside it.
   off a real pty, which is what makes the shell-shaped half of this crate
   testable on every CI platform.
 - `tests/live.rs` — the connection and tools against a real in-process daemon.
+- `tests/fleet.rs` — one `ToolSet` reaching **two** in-process daemons, so
+  "which connection did that land on" is an assertion rather than a hope. It
+  carries the confused-deputy test that one host could not have (a session
+  number under the wrong machine's prefix) and the pairing one: a first dial to
+  a host serving `Auth::Proof` answers with the code, and the far machine's
+  queue still holds the prompt afterwards — which is what a dial that hung up to
+  report the code would have cancelled.
 - `tests/stdio.rs` — the built binary, driven over stdin/stdout as a harness
   drives it, asserting that every line on stdout is JSON-RPC.
 

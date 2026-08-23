@@ -27,6 +27,16 @@ thiserror = { workspace = true }
 zest-daemon.workspace = true
 # The agent's own device key, and the sealer/opener the split connection needs.
 zest-mesh.workspace = true
+# What a machine in the fleet is, and the one rule that picks how to reach it.
+# Shared rather than reimplemented for the reason the crate exists: a route
+# decision every surface must agree on is the last thing to keep two copies of,
+# and #398 moved it out of `zest-app` specifically so this crate could have it.
+zest-fleet.workspace = true
+# `Roots`, and nothing else: the relay ladder is `zest_daemon::account`'s, and
+# choosing which trust store verifies the control plane is the one decision it
+# leaves to its caller. This crate is on `check-deps`' `TLS_BY_DESIGN` list
+# already, through `zest-daemon`.
+zest-cloud.workspace = true
 # The writer thread is fed by a channel rather than sharing the sealer behind a
 # mutex; see `conn.rs`.
 crossbeam-channel = { workspace = true }

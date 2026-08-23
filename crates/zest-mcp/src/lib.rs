@@ -53,6 +53,8 @@
 
 pub mod addr;
 pub mod conn;
+pub mod dial;
+pub mod fleet;
 pub mod keys;
 pub mod rpc;
 pub mod run;
@@ -61,8 +63,34 @@ pub mod tools;
 
 pub use addr::{AddrError, Resolver};
 pub use conn::{Conn, Shared};
+pub use dial::{dial, DialError};
+pub use fleet::{Fleet, FleetView, LiveFleet, StaticFleet};
 pub use keys::{Chord, KeyError};
 pub use run::{Anchor, Progress, Refusal};
 pub use session::{Replica, StyledSpan};
 pub use rpc::{Server, Tools};
 pub use tools::{ToolError, ToolSet};
+
+/// How long to wait for a daemon that is not running yet.
+///
+/// The same budget the app allows, and for the same reason: on the cold path
+/// this is a process spawn, and a harness starting a tool server has no window
+/// to keep responsive while it happens. Here rather than in `main.rs` because
+/// [`dial`] needs it too — a `LocalSocket` route may be the one this server
+/// dialled at startup, or another window's on a `--socket` somewhere else.
+pub const DAEMON_START: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a host shows a person when this client asks to be trusted.
+///
+/// `Hello.label` is signed into the transcript and is the human's entire
+/// decision input at a pairing prompt, so it says plainly what this is. It must
+/// never be mistakable for somebody's laptop. Shared by the startup connection
+/// and by every fleet dial, because a person approving this agent on a second
+/// machine must see the same words they saw on the first.
+#[must_use]
+pub fn client_label() -> String {
+    match std::env::var("MCP_CLIENT_NAME") {
+        Ok(h) if !h.trim().is_empty() => format!("zest-mcp agent ({h})"),
+        _ => "zest-mcp agent".into(),
+    }
+}
