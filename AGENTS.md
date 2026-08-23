@@ -1131,6 +1131,21 @@ you need before you trip on it.
   — so sniffing on top of `open` can never reject a text file named `.png`.
   Build the reader with `ImageReader::new` instead, which starts with no format
   at all. (`zest-app/src/background.rs`, `looks_like_an_image`.)
+- **A native file dialog must not be opened from an event handler.** It runs a
+  nested modal message loop, which pumps window messages straight back into
+  winit's dispatch while `window_event` still holds `&mut self` — re-entering
+  the handler that is already running. The click records a `PickRequest` and
+  `about_to_wait` opens the dialog, which is outside every event's dispatch.
+  (`zest-app`'s `pending_pick` / `run_file_picker`.) `rfd` earns its place
+  cheaply here: 0.17 defaults to the XDG-portal backend rather than gtk3, so
+  Linux needs no dev headers and CI no new packages, and everything under it —
+  pollster, wayland, zbus, objc2, windows-sys — was already in the tree.
+- **A picker belongs on a `file-path`, never on a `path`.** `Widget::FilePath`
+  is a file on *this* machine and a native dialog answers the right question;
+  `Widget::Path` is a directory that may live on another host in the fleet
+  (`starting_directory` can be `\\wsl$\Ubuntu-24.04\home\…`), where a local
+  dialog would answer a different one. The two are separate widgets so the
+  distinction is in the type rather than in whoever is reading the row.
 - **A drop on the terminal deliberately does nothing.** Every other terminal
   (iTerm2, Windows Terminal, GNOME Terminal, Konsole) inserts the *path* into
   the shell, so claiming the gesture for a wallpaper would seize it for exactly

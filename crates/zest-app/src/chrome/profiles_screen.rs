@@ -1185,6 +1185,7 @@ mod tests {
                         panic!("row {i} is not an override; its dot must not take clicks")
                     }
                     Some(HitRegion::ScreenPanel | HitRegion::SettingsPanel) | None => {}
+                    Some(HitRegion::SettingsBrowse(_)) => {}
                     other => panic!("({x},{y}) escaped the profiles screen: {other:?}"),
                 }
             }

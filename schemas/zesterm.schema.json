@@ -649,7 +649,7 @@
           "description": "Picture drawn behind the cells. Empty draws none.\n\nA relative path resolves against the config directory, so a config that\ntravels with its pictures keeps working on another machine.",
           "type": "string",
           "x_zest_group": "Window",
-          "x_zest_widget": "path"
+          "x_zest_widget": "file-path"
         },
         "chrome_opacity": {
           "default": 1.0,

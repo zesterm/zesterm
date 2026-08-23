@@ -30,6 +30,14 @@ pub enum Widget {
     ThemePicker,
     Text,
     Path,
+    /// A path to a *file on this machine*, offered with a picker.
+    ///
+    /// Distinct from [`Self::Path`], which is a directory and may name one this
+    /// machine has never heard of — a profile's `starting_directory` can point
+    /// into a host on the other side of the fleet, where a local dialog would
+    /// be answering a different question. A `FilePath` is local by
+    /// construction: the only thing that reads one is this process.
+    FilePath,
     FontList,
     TagList,
     KeyValue,
@@ -174,6 +182,7 @@ fn field_of(
         "theme-picker" => Widget::ThemePicker,
         "text" => Widget::Text,
         "path" => Widget::Path,
+        "file-path" => Widget::FilePath,
         "font-list" => Widget::FontList,
         "tag-list" => Widget::TagList,
         "key-value" => Widget::KeyValue,

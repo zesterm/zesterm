@@ -184,10 +184,14 @@ the history behind them is in closed issues and PRs.
       Settings or Profiles screen** are in. What is left is the *positional*
       part — §12's 96px `<image-slot>` as a real target you drop *onto* — which
       needs our own `IDropTarget` behind a window subclass, because winit
-      discards the drop coordinate (see "Traps already paid for"). There is
-      still no file picker anywhere in `crates/`; #439 and #446 would give an
-      in-app one that also works for a profile pinned to a remote host, which a
-      native OS dialog cannot. The browser ignores the keys: it cannot read a
+      discards the drop coordinate (see "Traps already paid for"). The
+      `Browse…` button is a **native** picker (`rfd`), which is right for
+      `window.background_image` — the picture is decoded here and uploaded to
+      this machine's GPU, so the path is local by construction — and would be
+      wrong for `shell.cwd` or a profile's `starting_directory`, which may name
+      a directory on another machine; those stay `Widget::Path` and take no
+      picker until #439/#446 give an in-app, fleet-wide one. The browser
+      ignores the keys: it cannot read a
       native host's path, and `painter.ts`'s per-dirty-row `fillRect` of the
       default background would erase an image layer strip by strip.
 - [ ] Render `SessionInfo.busy` in the ⌘K picker and the fleet cards. The

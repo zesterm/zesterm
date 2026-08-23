@@ -228,6 +228,8 @@ pub enum HitRegion {
     /// from the config file (design §11, "it is the reset button"). Hittable
     /// only while the row is modified; a transparent dot takes no clicks.
     SettingsReset(usize),
+    /// A file-path row's `Browse…` button: clicking opens a native picker.
+    SettingsBrowse(usize),
     /// The rail's filter pill; typing already filters, so a click only says
     /// "yes, this is where the characters go".
     SettingsFilter,
@@ -386,6 +388,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelT
         | R::SettingsToggle(_)
         | R::SettingsSlider(_)
         | R::SettingsReset(_)
+        | R::SettingsBrowse(_)
         | R::SettingsCategory(_)
         | R::SettingsFilter
         | R::SettingsEditToml
@@ -605,6 +608,7 @@ mod tests {
             HitRegion::SettingsToggle(0),
             HitRegion::SettingsSlider(0),
             HitRegion::SettingsReset(0),
+            HitRegion::SettingsBrowse(0),
             HitRegion::SettingsCategory(0),
             HitRegion::SettingsFilter,
             HitRegion::SettingsEditToml,

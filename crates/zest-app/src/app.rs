@@ -2289,6 +2289,14 @@ pub struct App {
     chrome_dirty: bool,
     /// What the pointer was last over, for hover fills.
     chrome_hover: Option<HitRegion>,
+    /// A `Browse…` click waiting for its dialog to be opened.
+    ///
+    /// **Not opened from the click handler.** A native file dialog runs a
+    /// nested modal message loop, which pumps window messages straight back
+    /// into winit's dispatch while `window_event` still holds `&mut self` —
+    /// re-entering the handler that is already running. It is opened from
+    /// `about_to_wait` instead, which is outside every event's dispatch.
+    pending_pick: Option<PickRequest>,
     /// What dropping the file currently over the window would do.
     ///
     /// `None` while nothing is being dragged, and while what is being dragged
@@ -2561,6 +2569,7 @@ impl App {
             chrome_layout: None,
             chrome_dirty: true,
             chrome_hover: None,
+            pending_pick: None,
             drop_hint: None,
             cursor: winit::window::CursorIcon::Default,
             strip_scroll: 0.0,
@@ -7460,6 +7469,21 @@ impl App {
             (HitRegion::SettingsCategory(i), MouseButton::Left) => {
                 self.select_settings_category(i);
             }
+            (HitRegion::SettingsBrowse(row), MouseButton::Left) => {
+                // Recorded, not opened -- see `App::pending_pick`. The row is
+                // resolved now rather than later because the list is rebuilt
+                // every frame and the index would not survive the dialog.
+                let to_profiles = self.profiles_tab_active();
+                let field = if to_profiles {
+                    self.profiles_field_of_row(row)
+                } else {
+                    self.settings_field_of_row(row)
+                };
+                if let Some(field) = field {
+                    self.pending_pick = Some(PickRequest { field, to_profiles });
+                }
+            }
+
             (HitRegion::SettingsReset(i), MouseButton::Left) => {
                 // THE DOT RESETS (§11/§12): delete the key from the file,
                 // then reload through the cascade — the file stays the
@@ -7994,7 +8018,7 @@ impl App {
             // Numbers, text and paths open a buffer: arrows step a number,
             // but "make it 18" should not be nine keypresses, and a string
             // has no other way in.
-            Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
+            Widget::Number | Widget::Slider | Widget::Text | Widget::Path | Widget::FilePath => {
                 let seed = self.settings_ui.as_ref().and_then(|ui| {
                     let field = ui.fields.get(idx)?;
                     let values = serde_json::to_value(&self.settings).ok()?;
@@ -8126,6 +8150,75 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Open the native picker and write whatever comes back.
+    ///
+    /// Blocking, and on the main thread on purpose: rfd's own guidance is to
+    /// spawn dialogs from the main thread, and a background thread would need
+    /// the answer marshalled back through the event loop for no gain — nothing
+    /// can usefully happen in this window while a modal dialog owns it anyway.
+    fn run_file_picker(&mut self, request: PickRequest) {
+        let PickRequest { field, to_profiles } = request;
+        let key = self.picker_field_key(field, to_profiles);
+
+        let mut dialog = rfd::FileDialog::new().set_title("Choose a picture");
+        // Start where the setting already points, so replacing a picture opens
+        // in the folder the last one came from rather than at the filesystem
+        // root.
+        if let Some(dir) = self
+            .picker_current_value(field, to_profiles)
+            .as_deref()
+            .and_then(crate::background::resolve_path)
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .filter(|p| p.is_dir())
+        {
+            dialog = dialog.set_directory(dir);
+        }
+        // Named rather than a bare extension list so the dialog's own filter
+        // dropdown reads as a sentence, and "All files" stays available for a
+        // picture whose name says nothing.
+        dialog = dialog
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "tif", "tiff"])
+            .add_filter("All files", &["*"]);
+
+        tracing::debug!(?key, "opening the file picker");
+        let Some(chosen) = dialog.pick_file() else {
+            // Cancelled. Not an error and not worth a banner.
+            return;
+        };
+        let Some(text) = chosen.to_str().map(str::to_string) else {
+            self.drop_report(to_profiles, "that path is not valid UTF-8".to_string());
+            return;
+        };
+        // Through the same write path a typed edit takes, so provenance, the
+        // restart ledger and the reload all behave identically -- a picker
+        // that wrote the file itself would be a second way to save a setting.
+        if to_profiles {
+            self.profiles_apply_edit(field, serde_json::Value::String(text));
+        } else {
+            self.apply_edit(field, serde_json::Value::String(text));
+        }
+    }
+
+    /// The dotted key a pick will write, for the log line only.
+    fn picker_field_key(&self, field: usize, to_profiles: bool) -> Option<String> {
+        let fields = if to_profiles {
+            self.profiles_ui.as_ref().map(|ui| &ui.fields)
+        } else {
+            self.settings_ui.as_ref().map(|ui| &ui.fields)
+        };
+        fields?.get(field).map(|f| f.key.clone())
+    }
+
+    /// What the setting says today, so the dialog can open beside it.
+    fn picker_current_value(&self, field: usize, to_profiles: bool) -> Option<String> {
+        let value = if to_profiles {
+            self.profiles_value_of(field)
+        } else {
+            self.settings_value_of(field)
+        };
+        value?.as_str().map(str::to_string)
     }
 
     /// What dropping a file right now would do.
@@ -8757,7 +8850,7 @@ impl App {
                     self.profiles_begin_edit(idx);
                 }
             }
-            Widget::Number | Widget::Slider | Widget::Text | Widget::Path => {
+            Widget::Number | Widget::Slider | Widget::Text | Widget::Path | Widget::FilePath => {
                 self.profiles_begin_edit(idx);
             }
             // The rosters open the Settings tab's dropdown — a ▾ pill should
@@ -15442,6 +15535,19 @@ impl App {
         }
     }
 
+    /// Open a file picker a click only *recorded*.
+    ///
+    /// Outside every event's dispatch, which is the whole reason the click
+    /// does not open it: the picker is modal and pumps its own loop, and
+    /// running it inside a winit event handler re-enters the loop that is
+    /// already running. See [`App::pending_pick`]. Per window, because each
+    /// has its own settings screen and its own pending request.
+    pub(crate) fn drain_pending_pick(&mut self) {
+        if let Some(request) = self.pending_pick.take() {
+            self.run_file_picker(request);
+        }
+    }
+
     /// When this window next needs the loop to wake — a due screenshot, or
     /// the animation clock's one deadline. The process merges every
     /// window's answer into the loop's single control flow.
@@ -16124,6 +16230,16 @@ fn pane_selection_bg(
     identity: Option<&crate::tabs::ProfileIdentity>,
 ) -> zest_core::Rgb {
     identity.and_then(|i| i.selection_bg).unwrap_or(window)
+}
+
+/// A `Browse…` click that has not opened its dialog yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PickRequest {
+    /// Index into the open editor's `fields`, resolved at click time: the row
+    /// list is rebuilt every frame, so a row index would not survive the wait.
+    field: usize,
+    /// Which editor asked, and therefore which write path the answer takes.
+    to_profiles: bool,
 }
 
 /// Where a file dropped on the window lands.

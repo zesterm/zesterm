@@ -29,6 +29,7 @@ export type Widget =
   | 'theme-picker'
   | 'text'
   | 'path'
+  | 'file-path'
   | 'font-list'
   | 'tag-list'
   | 'key-value'

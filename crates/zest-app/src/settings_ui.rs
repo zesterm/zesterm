@@ -492,6 +492,13 @@ pub(crate) fn value_cell(
             };
             SettingsValueCell::Stepper { text }
         }
+        Widget::FilePath => {
+            // The picker is an *addition*: Enter still opens the text buffer,
+            // so a path can be typed, pasted, or reached with no pointer at
+            // all. A control that can only be driven by a mouse is one a
+            // keyboard user cannot set.
+            SettingsValueCell::FilePath { text: text_of(value), placeholder: false }
+        }
         Widget::Text | Widget::Path | Widget::AccentPicker => {
             // The settings tab shows resolved values, never captions, so
             // nothing here is a placeholder; the profiles editor sets the
@@ -699,7 +706,9 @@ pub fn parse_input(field: &UiField, text: &str) -> Option<serde_json::Value> {
 pub fn edit_seed(field: &UiField, value: Option<&serde_json::Value>) -> String {
     match (field.widget, value) {
         (_, None) => String::new(),
-        (Widget::Text | Widget::Path, Some(v)) => v.as_str().unwrap_or_default().to_string(),
+        (Widget::Text | Widget::Path | Widget::FilePath, Some(v)) => {
+            v.as_str().unwrap_or_default().to_string()
+        }
         (_, Some(v)) if field.integer => {
             v.as_i64().map_or_else(String::new, |i| i.to_string())
         }
@@ -737,6 +746,7 @@ pub fn to_toml(
         | Widget::ThemePicker
         | Widget::Text
         | Widget::Path
+        | Widget::FilePath
         | Widget::HostPicker
         | Widget::SchemePicker
         | Widget::IconPicker => Some(zest_config::toml_edit::Value::from(value.as_str()?)),
@@ -1382,6 +1392,14 @@ mod tests {
         assert!(
             matches!(cell_of("shell.env"), SettingsValueCell::KeyValue { .. }),
             "env entries are paired cells"
+        );
+        assert!(
+            matches!(cell_of("window.background_image"), SettingsValueCell::FilePath { .. }),
+            "a local file earns the picker; a plain `path` (shell.cwd) does not, because              that one may name a directory on another machine"
+        );
+        assert!(
+            matches!(cell_of("shell.cwd"), SettingsValueCell::Text { .. }),
+            "and the plain path stays a text box, so the two do not drift into one"
         );
     }
 
