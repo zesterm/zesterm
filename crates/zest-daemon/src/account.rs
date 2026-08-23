@@ -480,10 +480,45 @@ const RELAY_ATTACH_PATH: &str = "/v1/attach";
 /// warns turns "not paired" into an infinite reconnect.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RelayDialError {
-    #[error("signed out - sign in again to reach this machine")]
-    SignedOut,
+    /// The credential cannot open a leg, and no retry will change that until a
+    /// person acts.
+    ///
+    /// **Which** act differs, which is why the reason is carried rather than
+    /// collapsed: `MachineRefusal`'s own doc makes the point — revoked wants a
+    /// restore, pending wants waiting, expired and absent want a sign-in — and
+    /// a single "signed out, sign in again" would point three of the four at
+    /// the wrong remedy.
+    #[error("{0}")]
+    Credential(CredentialRefusal),
     #[error("{0}")]
     Io(String),
+}
+
+/// Why this device's credential could not open a relay leg.
+///
+/// [`MachineRefusal`] plus the case that never reached the control plane at
+/// all: there was no token to send. Same four acts, one enum, so a caller
+/// matching on it cannot meet a state with no sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialRefusal {
+    #[error("this machine is signed out - sign in again")]
+    SignedOut,
+    #[error("this machine's access was revoked - restore it, or sign in again")]
+    Revoked,
+    #[error("this machine is still waiting to be approved")]
+    Pending,
+    #[error("this machine's credential has expired - sign in again")]
+    Expired,
+}
+
+impl From<MachineRefusal> for CredentialRefusal {
+    fn from(r: MachineRefusal) -> Self {
+        match r {
+            MachineRefusal::Revoked => Self::Revoked,
+            MachineRefusal::Pending => Self::Pending,
+            MachineRefusal::Expired => Self::Expired,
+        }
+    }
 }
 
 /// One relay dial: a fresh ticket, a leg to the relay, the WS upgrade —
@@ -511,7 +546,8 @@ pub fn relay_dial(
         // A named refusal is terminal exactly as a bare one: a revoked or
         // pending machine's dial must stop, not back off against guaranteed
         // 401s. The header's honest wording is the account watcher's job.
-        CloudError::SignedOut | CloudError::Refused(_) => RelayDialError::SignedOut,
+        CloudError::SignedOut => RelayDialError::Credential(CredentialRefusal::SignedOut),
+        CloudError::Refused(r) => RelayDialError::Credential(r.into()),
         // Transient by classification: `Io` is the shape the redial loop
         // backs off on, which is right for an unreachable control plane.
         other => RelayDialError::Io(other.to_string()),
@@ -569,7 +605,18 @@ pub fn relay_dialer(
 ) -> Result<DialHalves, RelayDialError> {
     let mint = || {
         let token = stored_app_token(secrets)
-            .map_err(|e| CloudError::Transport(e.to_string()))?
+            .map_err(|e| match e {
+                // The store answered, and what it holds is not a token -- a
+                // key filed under this name, or a corrupt entry. Terminal:
+                // every retry re-reads the same bytes, so classifying it as
+                // transport would spin the caller's redial loop for ever
+                // against something only a fresh sign-in can fix.
+                EnrollError::BadResponse(_) => CloudError::SignedOut,
+                // Everything else is the store itself failing, and a store
+                // that could not be read is not a store with no key: a locked
+                // keychain is the ordinary case here, and it unlocks.
+                other => CloudError::Transport(other.to_string()),
+            })?
             .ok_or(CloudError::SignedOut)?;
         let api = HttpsAccountApi::new(control_plane, roots)
             .map_err(|e| CloudError::Transport(e.to_string()))?;
@@ -803,10 +850,61 @@ mod tests {
             panic!("no ticket, no dial")
         };
         assert!(
-            matches!(err, RelayDialError::SignedOut),
-            "SignedOut is the variant the supervisor stops on; got {err:?}"
+            matches!(err, RelayDialError::Credential(CredentialRefusal::SignedOut)),
+            "`Credential` is the variant the supervisor stops on; got {err:?}"
         );
         assert!(!connected.get(), "a refused mint must cost no socket");
+    }
+
+    #[test]
+    fn a_named_refusal_keeps_its_own_name_and_its_own_remedy() {
+        // Terminal like a bare sign-out, and *not* the same sentence: revoked
+        // wants a restore, pending wants waiting, expired wants a sign-in. One
+        // collapsed "sign in again" would point two of the three at the wrong
+        // act, which is the whole reason `MachineRefusal` exists.
+        for (refusal, expect, word) in [
+            (MachineRefusal::Revoked, CredentialRefusal::Revoked, "revoked"),
+            (MachineRefusal::Pending, CredentialRefusal::Pending, "approved"),
+            (MachineRefusal::Expired, CredentialRefusal::Expired, "expired"),
+        ] {
+            let Err(err) = relay_dial(
+                HostId::from_bytes([9; 32]),
+                "relay.example",
+                &|| Err(CloudError::Refused(refusal)),
+                &|| panic!("a refused mint must cost no socket"),
+            ) else {
+                panic!("no ticket, no dial")
+            };
+            assert!(matches!(err, RelayDialError::Credential(r) if r == expect), "{err:?}");
+            assert!(
+                err.to_string().contains(word),
+                "the sentence names this refusal's own remedy: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_token_that_is_not_text_is_terminal_rather_than_retried_for_ever() {
+        // A key filed under the token's name, or a corrupt entry. Every retry
+        // re-reads the same bytes, so classifying it as transport would spin a
+        // redial loop against something only a fresh sign-in can fix -- while
+        // a store that merely could not be *read* (a locked keychain) must stay
+        // retryable, because that one unlocks.
+        let store = MemoryKeyStore::new();
+        store.store_secret(APP_CLOUD_TOKEN_NAME, &[0xff, 0xfe]).expect("store");
+        let Err(err) = relay_dialer(
+            HostId::from_bytes([9; 32]),
+            "http://127.0.0.1:1",
+            "https://control.example",
+            zest_cloud::tls::Roots::Bundled,
+            &store,
+        ) else {
+            panic!("bytes that are not a token cannot mint a ticket")
+        };
+        assert!(
+            matches!(err, RelayDialError::Credential(CredentialRefusal::SignedOut)),
+            "a corrupt credential is terminal, not a network blip; got {err:?}"
+        );
     }
 
     #[test]

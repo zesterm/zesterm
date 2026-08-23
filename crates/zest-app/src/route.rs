@@ -83,7 +83,7 @@ impl Dial for HostRoute {
                         // difference: it stops on `SignedOut` and backs off on
                         // anything else, and no redial can succeed until a
                         // person signs in again.
-                        crate::cloud::RelayDialError::SignedOut => {
+                        crate::cloud::RelayDialError::Credential(_) => {
                             crate::remote::RemoteError::SignedOut
                         }
                         crate::cloud::RelayDialError::Io(e) => crate::remote::RemoteError::Io(e),
