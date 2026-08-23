@@ -202,6 +202,33 @@ fn load(
     Slot::Ready { id, size, stamp }
 }
 
+/// Whether a file's own bytes say it is a picture.
+///
+/// Reads the magic bytes and stops: `with_guessed_format` sniffs the header and
+/// `format` answers without decoding a pixel. That matters because the only
+/// caller is the drag-and-drop path, which runs on the UI thread — deciding
+/// "is this a picture" must not cost a 20 MB JPEG decode while the pointer is
+/// still moving. The real decode happens later, when the setting is next read.
+///
+/// The **extension is deliberately not consulted**. Something named `.png` that
+/// is really a text file would otherwise be written into the settings and then
+/// draw nothing, which is exactly the outcome this gate exists to prevent.
+///
+/// **Not `ImageReader::open`.** That constructor sets the format from the path's
+/// *extension*, and `with_guessed_format` is documented to "keep current state
+/// if not" found -- `self.format = format.or(self.format)`. So sniffing on top
+/// of `open` can never override a lying extension: a text file named `.png`
+/// comes back as a picture, which is the one answer this function exists to
+/// refuse. `ImageReader::new` starts with no format at all, so the guess is the
+/// only thing that can set one.
+#[must_use]
+pub fn looks_like_an_image(path: &std::path::Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    image::ImageReader::new(std::io::BufReader::new(file))
+        .with_guessed_format()
+        .is_ok_and(|r| r.format().is_some())
+}
+
 /// The renderer's placement mode for a settings one.
 #[must_use]
 pub fn fit_of(fit: zest_config::settings::BackgroundFit) -> BackgroundFit {
@@ -245,6 +272,37 @@ mod tests {
         // one in VRAM with nothing pointing at it.
         assert_eq!(id_of("a.png"), id_of("a.png"));
         assert_ne!(id_of("a.png"), id_of("b.png"));
+    }
+
+    #[test]
+    fn the_image_sniff_reads_bytes_and_not_the_name() {
+        let dir = std::env::temp_dir().join("zesterm-drop-sniff");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A one-pixel PNG, byte for byte. Named `.txt` on purpose: the sniff
+        // must accept it, because what a person drags in from a download
+        // folder is frequently named nothing useful at all.
+        let png: [u8; 67] = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let real = dir.join("a-picture.txt");
+        std::fs::write(&real, png).expect("write");
+        assert!(looks_like_an_image(&real), "a PNG is a picture whatever it is called");
+
+        // And the reverse, which is the case that matters: the setting must not
+        // be written with a path that renders nothing.
+        let fake = dir.join("not-a-picture.png");
+        std::fs::write(&fake, b"this is prose").expect("write");
+        assert!(!looks_like_an_image(&fake), "an extension is not evidence");
+
+        assert!(!looks_like_an_image(&dir.join("absent.png")), "a missing file is not a picture");
+
+        let _ = std::fs::remove_file(&real);
+        let _ = std::fs::remove_file(&fake);
     }
 
     #[test]

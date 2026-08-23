@@ -1113,6 +1113,30 @@ you need before you trip on it.
   (`bindTerminalInput`, `trackChip`). Every ref in the client is annotated
   `(el: T | null)` so the next dereference is a type error. (#440)
 
+- **A dropped file arrives with no position, and the format sniff believes the
+  extension.** Two traps in one feature (#144). `winit` registers an
+  `IDropTarget` for us and then throws the coordinate away: `DragEnter`,
+  `DragOver` and `Drop` each take a `_pt: *const POINTL` and discard it, and
+  `DragOver` emits no event at all — so `WindowEvent::DroppedFile(PathBuf)`
+  cannot be hit-tested and there is no `CursorMoved` during a drag to infer a
+  position from. A *positional* drop target therefore needs our own
+  `IDropTarget` behind a window subclass, which is the same unsolved problem as
+  Snap Layouts' `WM_NCHITTEST`; until then a drop is routed by **which screen is
+  open** (`app::drop_target`). The good half: drops are already delivered —
+  winit defaults `drag_and_drop: true` on Windows, so the events were arriving
+  and falling into `_ => {}` all along. And the second trap, which a test caught
+  rather than a person: `image::ImageReader::open` sets the format from the
+  path's **extension**, and `with_guessed_format` is documented to *keep the
+  current state if the guess finds nothing* (`self.format = format.or(self.format)`)
+  — so sniffing on top of `open` can never reject a text file named `.png`.
+  Build the reader with `ImageReader::new` instead, which starts with no format
+  at all. (`zest-app/src/background.rs`, `looks_like_an_image`.)
+- **A drop on the terminal deliberately does nothing.** Every other terminal
+  (iTerm2, Windows Terminal, GNOME Terminal, Konsole) inserts the *path* into
+  the shell, so claiming the gesture for a wallpaper would seize it for exactly
+  the file someone is most likely to drag in on purpose, with no keyboard undo.
+  Leaving it unclaimed keeps that meaning available.
+
 ### The dev harness on this box
 
 - **Never run `cargo fmt`.** There is no `rustfmt.toml` and the workspace is not

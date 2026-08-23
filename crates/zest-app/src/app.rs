@@ -2289,6 +2289,13 @@ pub struct App {
     chrome_dirty: bool,
     /// What the pointer was last over, for hover fills.
     chrome_hover: Option<HitRegion>,
+    /// What dropping the file currently over the window would do.
+    ///
+    /// `None` while nothing is being dragged, and while what is being dragged
+    /// is something no screen claims. Shown in the window's notice bar, which
+    /// is the only feedback available: winit reports a hovered file but not
+    /// *where* it is hovering, so there is no row to highlight.
+    drop_hint: Option<String>,
     /// The cursor currently set on the window, so a mouse-move that does not
     /// change it costs no Win32 call.
     cursor: winit::window::CursorIcon,
@@ -2554,6 +2561,7 @@ impl App {
             chrome_layout: None,
             chrome_dirty: true,
             chrome_hover: None,
+            drop_hint: None,
             cursor: winit::window::CursorIcon::Default,
             strip_scroll: 0.0,
             strip_ensure_visible: false,
@@ -6901,7 +6909,11 @@ impl App {
             settings: settings_model,
             launcher: launcher_model,
             block_menu: block_menu_model,
-            notice,
+            // The pairing line wins a collision: it is about something that
+            // happened to this machine and stays until it is dealt with, where
+            // a drop hint is about a gesture in flight and comes back the next
+            // time a file crosses the window.
+            notice: notice.or_else(|| self.drop_hint.clone()),
             approval,
             confirm_close: self.confirm_close.clone(),
         };
@@ -8114,6 +8126,130 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
+    }
+
+    /// What dropping a file right now would do.
+    fn drop_target_now(&self) -> DropTarget {
+        drop_target(
+            self.settings_tab_active(),
+            self.profiles_tab_active(),
+            self.profiles_ui.as_ref().map(|ui| ui.profile.as_str()),
+        )
+    }
+
+    /// A file is over the window: say what dropping it would do, if anything.
+    fn on_file_hovered(&mut self, path: &std::path::Path) {
+        let target = self.drop_target_now();
+        // Logged because the alternative diagnosis is guesswork: if a drag does
+        // nothing, this line says whether the event arrived at all (a platform
+        // question) or arrived and was not claimed (ours).
+        tracing::debug!(path = %path.display(), ?target, "file hovered");
+        // The sniff reads sixteen bytes, and this runs once per file per drag
+        // *entering* the window -- winit emits nothing at all for `DragOver`,
+        // so it cannot run per pointer move even if it wanted to.
+        let hint = match target {
+            _ if !crate::background::looks_like_an_image(path) => None,
+            DropTarget::Unclaimed => None,
+            DropTarget::Window => {
+                Some("Drop to use this picture as the window's background".to_string())
+            }
+            DropTarget::Profile(name) => {
+                Some(format!("Drop to use this picture as {name}'s background"))
+            }
+        };
+        if hint != self.drop_hint {
+            self.drop_hint = hint;
+            self.mark_chrome_dirty();
+        }
+    }
+
+    fn clear_drop_hint(&mut self) {
+        if self.drop_hint.take().is_some() {
+            self.mark_chrome_dirty();
+        }
+    }
+
+    /// A file was dropped on the window.
+    ///
+    /// Fires once per file, so a multi-file drop ends with the last picture in
+    /// it. Deterministic and needs no notion of where a batch begins -- there
+    /// is no event for that, and inferring one from `HoveredFile` would make
+    /// every drop depend on a hover having been delivered first, which is a
+    /// platform assumption whose failure mode is "drag and drop does nothing".
+    fn on_file_dropped(&mut self, path: &std::path::Path) {
+        // First, and whatever the outcome: the drag it described has ended, and
+        // a hint left standing reads as the drop still being available.
+        self.clear_drop_hint();
+
+        let target = self.drop_target_now();
+        let profile = match target {
+            // Silent, deliberately -- see `drop_target`. A terminal has no
+            // meaning for this gesture yet, and explaining that on every stray
+            // drag would be worse than saying nothing.
+            DropTarget::Unclaimed => return,
+            DropTarget::Window => None,
+            DropTarget::Profile(name) => Some(name),
+        };
+
+        if !crate::background::looks_like_an_image(path) {
+            self.drop_report(
+                profile.is_some(),
+                format!("{} is not a picture this build can read", path.display()),
+            );
+            return;
+        }
+        let Some(text) = path.to_str() else {
+            // `write_value` takes a `&str`, and a path that is not UTF-8 cannot
+            // be spelled in TOML at all. Refusing beats writing a mangled one.
+            self.drop_report(profile.is_some(), "that path is not valid UTF-8".to_string());
+            return;
+        };
+        let Some(file) = Self::config_target() else {
+            self.drop_report(profile.is_some(), "no config directory on this system".to_string());
+            return;
+        };
+
+        // The absolute path the OS handed us, not a copy into the config
+        // directory: a drop says which picture to use, and quietly duplicating
+        // someone's file somewhere they did not choose is a second decision
+        // they did not make.
+        let value = zest_config::toml_edit::Value::from(text);
+        const KEY: &str = "window.background_image";
+        let wrote = match &profile {
+            Some(name) => zest_config::write_profile_value(&file, name, KEY, value),
+            None => zest_config::write_value(&file, KEY, value),
+        };
+        match wrote {
+            Ok(()) => {
+                // No `restart_pending` bookkeeping: this key is
+                // `Invalidation::Free` by the table in `zest-config`, and the
+                // reload below is the whole of applying it.
+                self.settings_error = None;
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.error = None;
+                }
+                tracing::info!(path = %path.display(), profile = ?profile, "background set by drop");
+                self.reload_config();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "could not write the dropped background");
+                self.drop_report(profile.is_some(), format!("could not save {KEY}: {e}"));
+            }
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Report a refused drop on whichever editor claimed it.
+    ///
+    /// The two screens keep their banners in different places, and a message
+    /// written to the wrong one is invisible on the screen the person is
+    /// looking at.
+    fn drop_report(&mut self, to_profiles: bool, message: String) {
+        if to_profiles {
+            self.profiles_report(message);
+        } else {
+            self.settings_report(message);
+        }
     }
 
     /// Say why nothing happened — the Settings tab's `profiles_report`.
@@ -13486,6 +13622,14 @@ impl App {
                 }
             }
 
+            // One event per file, and none of the three carries a position --
+            // see `drop_target` for what that costs and what is done instead.
+            WindowEvent::HoveredFile(path) => self.on_file_hovered(&path),
+
+            WindowEvent::HoveredFileCancelled => self.clear_drop_hint(),
+
+            WindowEvent::DroppedFile(path) => self.on_file_dropped(&path),
+
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
 
             WindowEvent::Ime(ime) => self.on_ime(ime),
@@ -15982,6 +16126,45 @@ fn pane_selection_bg(
     identity.and_then(|i| i.selection_bg).unwrap_or(window)
 }
 
+/// Where a file dropped on the window lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DropTarget {
+    /// `window.background_image` in the config file.
+    Window,
+    /// One profile's override of it. The name is `defaults` for the Defaults
+    /// layer, which is a real profile table as far as the writer is concerned.
+    Profile(String),
+    /// Nothing on screen claims a dropped file.
+    Unclaimed,
+}
+
+/// Which surface claims a dropped file.
+///
+/// **Decided by which screen is open, never by where the pointer is.** winit
+/// discards the cursor position on all three of its OLE callbacks —
+/// `DragEnter`, `DragOver` and `Drop` each take a `_pt: *const POINTL` and drop
+/// it — and emits no event at all for `DragOver`, so there is neither a
+/// coordinate on the drop nor a `CursorMoved` during the drag to infer one
+/// from. A positional drop target (§12 draws a 96px `<image-slot>`) needs our
+/// own `IDropTarget` behind a window subclass, which is the same unsolved
+/// problem as Snap Layouts' `WM_NCHITTEST`.
+///
+/// A terminal claims nothing, and that is the deliberate part. Dropping a file
+/// on a terminal conventionally **types its path** — iTerm2, Windows Terminal,
+/// GNOME Terminal and Konsole all do it — so quietly changing the wallpaper
+/// instead would seize that gesture for exactly the file someone is most likely
+/// to drag in on purpose, with no way to undo it from the keyboard. Leaving it
+/// unclaimed keeps that meaning available for whoever implements it.
+fn drop_target(settings_tab: bool, profiles_tab: bool, profile: Option<&str>) -> DropTarget {
+    match (profiles_tab, profile) {
+        // The profiles editor is the narrower claim, and it is checked first so
+        // the answer does not depend on whether two tabs can be active at once.
+        (true, Some(name)) => DropTarget::Profile(name.to_string()),
+        _ if settings_tab => DropTarget::Window,
+        _ => DropTarget::Unclaimed,
+    }
+}
+
 /// The cell-background opacity for one viewport: the identity's override when
 /// it set one, the window's otherwise. Rides the viewport only — whether the
 /// *surface* can show the desktop through stays a window-level decision made
@@ -16936,6 +17119,60 @@ mod scrolling_tests {
         // is what every terminal does.
         assert!(Config::default().scroll_on_keypress, "on by default, as everywhere");
         assert!(!config_with(3, false).scroll_on_keypress);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::{drop_target, DropTarget};
+
+    #[test]
+    fn a_terminal_claims_nothing() {
+        // The load-bearing case. A drop on a terminal must stay unclaimed so
+        // "type the path" -- what every other terminal does with this gesture
+        // -- is still available to implement. Setting a wallpaper instead would
+        // take the gesture and could not be undone from the keyboard.
+        assert_eq!(drop_target(false, false, None), DropTarget::Unclaimed);
+        assert_eq!(drop_target(false, false, Some("powershell")), DropTarget::Unclaimed);
+    }
+
+    #[test]
+    fn the_settings_tab_claims_it_for_the_window() {
+        assert_eq!(drop_target(true, false, None), DropTarget::Window);
+    }
+
+    #[test]
+    fn the_profiles_tab_claims_it_for_the_selected_profile() {
+        assert_eq!(
+            drop_target(false, true, Some("powershell")),
+            DropTarget::Profile("powershell".to_string())
+        );
+        // Defaults is a profile like any other to the writer, so a drop there
+        // sets the layer every profile falls through to -- which is the useful
+        // answer, not an edge case to refuse.
+        assert_eq!(
+            drop_target(false, true, Some("defaults")),
+            DropTarget::Profile("defaults".to_string())
+        );
+    }
+
+    #[test]
+    fn the_narrower_claim_wins_and_the_answer_never_depends_on_that() {
+        // Both flags true should not be reachable -- they are different tabs --
+        // but a rule whose answer changes when it becomes reachable is a bug
+        // waiting for a refactor, so the order is pinned rather than assumed.
+        assert_eq!(
+            drop_target(true, true, Some("nightly")),
+            DropTarget::Profile("nightly".to_string())
+        );
+    }
+
+    #[test]
+    fn a_profiles_tab_with_no_profile_selected_claims_nothing() {
+        // `profiles_ui` is None between opening the tab and building its state.
+        // Writing to `profiles.` with an empty name would create a table nobody
+        // asked for.
+        assert_eq!(drop_target(false, true, None), DropTarget::Unclaimed);
     }
 }
 
