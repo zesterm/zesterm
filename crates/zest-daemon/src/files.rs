@@ -39,6 +39,48 @@ fn hash_hex(bytes: &[u8]) -> String {
     zest_proto::hex::encode(&Sha256::digest(bytes))
 }
 
+/// Why this path is not something the editor can open, if it is not.
+///
+/// A directory is the obvious case and the only one the first cut refused.
+/// The rest matter more: **opening a FIFO or a character device parks the
+/// thread in `read` until somebody writes to it**, and this work runs on the
+/// serve loop precisely because it was argued to be bounded. A named pipe in a
+/// repo is enough to hang that connection — its session included — with no
+/// error anywhere.
+fn not_a_regular_file(meta: &std::fs::Metadata) -> Option<&'static str> {
+    if meta.is_dir() {
+        Some("that is a directory")
+    } else if !meta.is_file() {
+        // A socket, a FIFO, a block or character device. Named as one kind
+        // because the distinction does not change what the editor can do.
+        Some("that is not a regular file")
+    } else {
+        None
+    }
+}
+
+/// The hash of what is on disk, for a save's conflict check.
+///
+/// Bounded the same way a read is, and refusing rather than truncating: a
+/// hash over the first four megabytes of a larger file would be a base that
+/// compares equal to a file it does not describe, which is worse than no
+/// answer. A client cannot reach this anyway — the read that would have given
+/// it a base for such a file hands back an empty one.
+fn disk_hash(real: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(real).map_err(|e| format!("{e}"))?;
+    let meta = f.metadata().map_err(|e| format!("{e}"))?;
+    if let Some(why) = not_a_regular_file(&meta) {
+        return Err(why.to_string());
+    }
+    let mut buf = Vec::new();
+    f.take(READ_CAP as u64 + 1).read_to_end(&mut buf).map_err(|e| format!("{e}"))?;
+    if buf.len() > READ_CAP {
+        return Err("that file is too large for the editor to check against".into());
+    }
+    Ok(hash_hex(&buf))
+}
+
 /// A refusal, in the shape [`HostMessage::FileContents`] carries one: this
 /// message with `error` set, never `HostMessage::Error` — a sessionless
 /// `Error` is what an *old* daemon says, and the app reads that as "too old".
@@ -93,14 +135,43 @@ fn join(path: &str, cwd: &str) -> Result<PathBuf, String> {
 /// dotfiles repo it points into. A file that does not exist yet has no
 /// canonical form, so its directory is canonicalized instead.
 fn resolve_for_write(path: &str, cwd: &str) -> Result<PathBuf, String> {
+    /// Enough for any real chain, few enough that a cycle ends here.
+    const MAX_HOPS: usize = 16;
+
     let joined = join(path, cwd)?;
-    if let Ok(real) = joined.canonicalize() {
-        return Ok(real);
+    match joined.canonicalize() {
+        Ok(real) => return Ok(real),
+        // Only "it is not there yet" earns the fallback below. Taking it for
+        // *any* failure — an unreadable directory, say — would write to a
+        // path nothing had actually resolved, and report success.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("{}: {e}", joined.display()));
+        }
+        Err(_) => {}
     }
-    let parent = joined.parent().ok_or_else(|| format!("{} has no directory", joined.display()))?;
-    let name = joined
-        .file_name()
-        .ok_or_else(|| format!("{} does not name a file", joined.display()))?;
+
+    // Nothing is there — but "nothing is there" also describes a symlink whose
+    // target does not exist yet, and `canonicalize` gives up on the whole path
+    // rather than telling the two apart. Following the link by hand is what
+    // keeps a save landing where the link points, the way a shell's `>` does;
+    // writing to the link's own path instead would replace the link with a
+    // regular file, which is the dotfile-detaching bug one step later.
+    let mut cur = joined.clone();
+    let mut hops = 0;
+    while let Ok(target) = std::fs::read_link(&cur) {
+        hops += 1;
+        if hops > MAX_HOPS {
+            return Err(format!("{}: too many symbolic links", joined.display()));
+        }
+        cur = if target.is_absolute() {
+            target
+        } else {
+            cur.parent().unwrap_or(Path::new("")).join(target)
+        };
+    }
+
+    let parent = cur.parent().ok_or_else(|| format!("{} has no directory", cur.display()))?;
+    let name = cur.file_name().ok_or_else(|| format!("{} does not name a file", cur.display()))?;
     let real_parent = parent
         .canonicalize()
         .map_err(|e| format!("{}: {e}", if parent.as_os_str().is_empty() { Path::new(".") } else { parent }.display()))?;
@@ -127,8 +198,8 @@ pub fn read_file(path: &str, cwd: &str) -> HostMessage {
         Ok(m) => m,
         Err(e) => return read_refusal(&shown, format!("{e}")),
     };
-    if meta.is_dir() {
-        return read_refusal(&shown, "that is a directory".into());
+    if let Some(why) = not_a_regular_file(&meta) {
+        return read_refusal(&shown, why.into());
     }
 
     // Read one byte past the cap, which is how "exactly at the cap" and "over
@@ -184,8 +255,12 @@ pub fn write_file(path: &str, cwd: &str, data: &[u8], base_hash: &str) -> HostMe
     let shown = real.to_string_lossy().into_owned();
 
     let existing = match std::fs::metadata(&real) {
-        Ok(m) if m.is_dir() => return write_refusal(&shown, "that is a directory".into()),
-        Ok(m) => Some(m),
+        Ok(m) => {
+            if let Some(why) = not_a_regular_file(&m) {
+                return write_refusal(&shown, why.into());
+            }
+            Some(m)
+        }
         Err(_) => None,
     };
 
@@ -195,7 +270,14 @@ pub fn write_file(path: &str, cwd: &str, data: &[u8], base_hash: &str) -> HostMe
     // would otherwise have to be told apart from a plain I/O failure.
     match (&existing, base_hash.is_empty()) {
         (Some(_), true) => {
-            let disk = std::fs::read(&real).map(|b| hash_hex(&b)).unwrap_or_default();
+            // A failure here is reported, not defaulted away: an empty hash is
+            // the wire's word for "no base", so swallowing a permission error
+            // into one would answer a refusal the client cannot act on with a
+            // value that says something else entirely.
+            let disk = match disk_hash(&real) {
+                Ok(h) => h,
+                Err(why) => return write_refusal(&shown, why),
+            };
             return HostMessage::FileWritten {
                 path: shown,
                 hash: disk,
@@ -212,9 +294,9 @@ pub fn write_file(path: &str, cwd: &str, data: &[u8], base_hash: &str) -> HostMe
             };
         }
         (Some(_), false) => {
-            let disk = match std::fs::read(&real) {
-                Ok(b) => hash_hex(&b),
-                Err(e) => return write_refusal(&shown, format!("{e}")),
+            let disk = match disk_hash(&real) {
+                Ok(h) => h,
+                Err(why) => return write_refusal(&shown, why),
             };
             if disk != base_hash {
                 return HostMessage::FileWritten {
@@ -488,6 +570,108 @@ mod tests {
         let (_, conflict, error) = written(&msg);
         assert!(conflict, "the client believed a file was there: {error}");
         assert!(!s.join("ghost.txt").exists(), "and it is not recreated behind their back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_rather_than_opened() {
+        // The one that would not have shown up as a wrong answer. Opening a
+        // FIFO parks in `read` until somebody writes to it, and this work runs
+        // on the serve loop *because* it was argued to be bounded — so a named
+        // pipe anywhere a person might click is enough to hang that connection
+        // and its session, with nothing logged. The test times out rather than
+        // failing if this regresses, which is itself the signal.
+        let s = Scratch::new("fifo");
+        let fifo = s.join("pipe");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("cstring");
+        // SAFETY: a NUL-terminated path in a scratch directory this test owns.
+        assert_eq!(unsafe { libc_mkfifo(c.as_ptr()) }, 0, "mkfifo");
+
+        let msg = read_file("pipe", &s.path());
+        let (data, _, _, _, _, error) = contents(&msg);
+        assert!(data.is_empty());
+        assert!(
+            error.contains("regular file"),
+            "a FIFO is refused by kind, not opened and waited on: {error}"
+        );
+
+        // And a save must not reach it either — the same open, the same park.
+        let msg = write_file("pipe", &s.path(), b"x", "");
+        let (_, _, error) = written(&msg);
+        assert!(error.contains("regular file"), "{error}");
+    }
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "mkfifo"]
+        fn libc_mkfifo(path: *const std::ffi::c_char) -> i32;
+    }
+
+    #[test]
+    fn a_conflict_check_against_an_oversized_file_refuses_instead_of_reading_it_all() {
+        // `write_file` hashes what is on disk to decide whether the base still
+        // holds, and that read has to be bounded for the same reason the
+        // editor's read is: it happens on the connection thread. Refusing
+        // beats truncating — a hash over the first four megabytes would be a
+        // base that compares equal to a file it does not describe.
+        let s = Scratch::new("bigconflict");
+        std::fs::write(s.join("big.txt"), vec![b'q'; READ_CAP + 1]).expect("write");
+
+        let msg = write_file("big.txt", &s.path(), b"small", &hash_hex(b"whatever"));
+        let (_, conflict, error) = written(&msg);
+        assert!(!conflict, "this is a refusal, not a disagreement about content");
+        assert!(error.contains("too large"), "and it says why: {error}");
+        assert_eq!(
+            std::fs::read(s.join("big.txt")).expect("read").len(),
+            READ_CAP + 1,
+            "nothing was written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_symlink_is_reported_rather_than_written_through() {
+        // `resolve_for_write` falls back to "canonicalize the parent" when the
+        // target is not there yet. Taking that path for *any* canonicalize
+        // failure is how a broken link gets replaced by a regular file at the
+        // link's own path — the opposite of the follow-the-target guarantee,
+        // reported as success.
+        let s = Scratch::new("broken");
+        std::os::unix::fs::symlink(s.join("nowhere"), s.join("dangling")).expect("symlink");
+
+        let msg = write_file("dangling", &s.path(), b"x", "");
+        let (_, _, error) = written(&msg);
+        assert!(error.is_empty(), "a dangling link's target is simply a file that is not there yet: {error}");
+        assert_eq!(
+            std::fs::read(s.join("nowhere")).expect("read"),
+            b"x",
+            "so the write lands on the target the link names"
+        );
+        assert!(
+            std::fs::symlink_metadata(s.join("dangling")).expect("meta").file_type().is_symlink(),
+            "and the link is still a link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cycle_ends_in_a_refusal_rather_than_a_loop() {
+        // A closed cycle is caught by the kernel first — `canonicalize`
+        // answers ELOOP, which is not `NotFound`, so it never reaches the
+        // hand-rolled walk. The bound in that walk is the backstop for the
+        // other shape, a *dangling* chain long enough to matter, where
+        // `canonicalize` says `NotFound` and the links are followed here.
+        // Both end in a refusal; which layer refuses is not the contract.
+        let s = Scratch::new("cycle");
+        std::os::unix::fs::symlink(s.join("b"), s.join("a")).expect("symlink a");
+        std::os::unix::fs::symlink(s.join("a"), s.join("b")).expect("symlink b");
+
+        let msg = write_file("a", &s.path(), b"x", "");
+        let (_, _, error) = written(&msg);
+        assert!(
+            error.to_lowercase().contains("symbolic link"),
+            "a cycle is refused, and says so: {error}"
+        );
     }
 
     #[cfg(unix)]

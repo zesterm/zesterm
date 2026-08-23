@@ -1462,10 +1462,27 @@ impl Connection {
             }
 
             ClientMessage::WriteFile { path, cwd, data, base_hash } => {
+                let reply = crate::files::write_file(&path, &cwd, &data, &base_hash);
                 // Logged, unlike a read: this one changes somebody's disk, and
                 // "which client wrote that" is the question asked afterwards.
-                tracing::info!(remote = %self.remote, %path, bytes = data.len(), "client wrote a file");
-                vec![crate::files::write_file(&path, &cwd, &data, &base_hash)]
+                //
+                // Logged *after*, and keyed on the resolved path the reply
+                // carries, because the requested one may be relative or a
+                // symlink — an audit line naming `../x` or a link rather than
+                // the file whose bytes changed is one that cannot be acted on.
+                // Both are recorded when they differ; the outcome too, since a
+                // refused write and a completed one must not read alike.
+                if let HostMessage::FileWritten { path: real, conflict, error, .. } = &reply {
+                    tracing::info!(
+                        remote = %self.remote,
+                        path = %real,
+                        requested = if real == &path { "" } else { path.as_str() },
+                        bytes = data.len(),
+                        wrote = !conflict && error.is_empty(),
+                        "client wrote a file"
+                    );
+                }
+                vec![reply]
             }
         }
     }
