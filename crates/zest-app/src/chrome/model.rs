@@ -637,6 +637,31 @@ pub struct BlockMenuModel {
     pub anchor: [f32; 4],
 }
 
+/// The cwd chip's directory browser (#439), ready to draw.
+///
+/// Rows are plain labels: the `..` row first when the path has a parent —
+/// drawn faint, because it *navigates* where every other row switches —
+/// then the filtered children. The app keeps the parallel answer list
+/// (which path each row means), built in the same pass, so index `n` means
+/// one thing to the renderer and the input path by construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirPickerModel {
+    pub rows: Vec<String>,
+    /// Row 0 is the parent row.
+    pub has_parent: bool,
+    pub selected: usize,
+    pub filter: String,
+    pub filter_caret: Caret,
+    pub scroll: f32,
+    pub ensure_visible: bool,
+    /// The host's answer has not arrived yet.
+    pub loading: bool,
+    /// Why the listing is empty when it is empty for a reason.
+    pub error: String,
+    /// More existed than the rows carry.
+    pub truncated: bool,
+}
+
 /// The + launcher menu, when open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LauncherModel {
@@ -981,6 +1006,8 @@ pub struct ChromeModel {
     /// The command palette, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.
     pub palette: Option<PaletteModel>,
+    /// The cwd chip's directory browser, when open (#439).
+    pub dir_picker: Option<DirPickerModel>,
     /// The Settings tab's screen — not an overlay: drawn over the grid area
     /// (like `screen`) while the active tab is Settings, with the modals
     /// still able to open above it.

@@ -365,6 +365,9 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 // connection, which does not happen. Named rather than swept
                 // into a `_` arm so the next tag is still a compile error here.
                 HostMessage::FileContents { .. } | HostMessage::FileWritten { .. } => {}
+                // This probe never asks (#439), so an answer here would be
+                // a daemon talking to itself.
+                HostMessage::DirListing { .. } => {}
 
                 HostMessage::Challenge { host, label, nonce, dh, signature, version } => {
                     eprintln!("[attach] host {} ({label}) challenged", host.short());

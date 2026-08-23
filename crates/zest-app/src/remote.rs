@@ -178,6 +178,9 @@ pub struct RemoteSession {
     /// reader uses its own copy) while every keystroke went to an address the
     /// daemon no longer had.
     addr: Arc<parking_lot::Mutex<SessionAddr>>,
+    /// The parked answer to `ListDir` (#439), last write wins; the reader
+    /// fills it and posts `Wakeup::DirListingReady`.
+    dir_listing: Arc<parking_lot::Mutex<Option<crate::session::DirListing>>>,
     /// Shared with the supervisor, which reattaches at whatever size the
     /// window has reached by the time the link comes back -- not the size it
     /// was born with.
@@ -341,6 +344,8 @@ impl RemoteSession {
             scrollback,
         )));
         let needs_redraw = Arc::new(AtomicBool::new(true));
+        let dir_listing: Arc<parking_lot::Mutex<Option<crate::session::DirListing>>> =
+            Arc::default();
 
         let mut applier = Applier::new();
         {
@@ -425,6 +430,7 @@ impl RemoteSession {
             let size_cell = Arc::clone(&size_cell);
             let predictor = Arc::clone(&predictor);
             let simulated_latency = simulated_latency();
+            let dir_listing = Arc::clone(&dir_listing);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -616,6 +622,25 @@ impl RemoteSession {
                                 HostMessage::Error { message, .. } => {
                                     tracing::warn!(%message, "daemon reported an error");
                                 }
+                                // The cwd chip's browser asked (#439); the
+                                // answer rides the wakeup whole — a one-shot
+                                // reply, not state worth a cell.
+                                HostMessage::DirListing {
+                                    path,
+                                    parent,
+                                    dirs,
+                                    truncated,
+                                    error,
+                                } => {
+                                    *dir_listing.lock() = Some(crate::session::DirListing {
+                                        path,
+                                        parent,
+                                        dirs,
+                                        truncated,
+                                        error,
+                                    });
+                                    wake(Wakeup::DirListingReady);
+                                }
                                 _ => {}
                             }
                         }
@@ -757,6 +782,7 @@ impl RemoteSession {
             needs_redraw,
             tx,
             addr: addr_cell,
+            dir_listing,
             size: size_cell,
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
@@ -914,6 +940,26 @@ impl SessionSource for RemoteSession {
         }
         let session = *self.addr.lock();
         let _ = self.tx.send(Outbound::Msg(ClientMessage::Input { session, bytes }));
+    }
+
+    fn take_dir_listing(&self) -> Option<crate::session::DirListing> {
+        self.dir_listing.lock().take()
+    }
+
+    fn request_dirs(&self, path: &str) -> bool {
+        // Fire-and-forget like `write`: the answer arrives on the reader as
+        // `Wakeup::DirListingReady`, and a send that failed means the writer
+        // is gone — the supervisor is already reconnecting, and the picker's
+        // spinner is the honest interim.
+        //
+        // **`true` regardless of that send**, which is the load-bearing
+        // part: `false` means "nobody here can answer, list locally", and a
+        // remote tab answered from *this* machine's disk would be a picker
+        // confidently showing the wrong computer's directories — the ssh
+        // trap in a different coat. A dropped question costs a spinner; a
+        // wrong answer costs a `cd` into a path that does not exist there.
+        let _ = self.tx.send(Outbound::Msg(ClientMessage::ListDir { path: path.to_string() }));
+        true
     }
 
     fn resize(&self, cols: u16, rows: u16) {

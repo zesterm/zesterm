@@ -65,6 +65,23 @@ pub trait SessionSource {
     /// Force a redraw on the next frame.
     fn mark_dirty(&self);
 
+    /// Ask the session's host what directories `path` holds (#439).
+    ///
+    /// `true` means the question is on the wire and a
+    /// [`crate::session::Wakeup::DirListingReady`] will follow; `false` —
+    /// the default, and every in-process source's answer — means there is
+    /// no host to ask and the caller lists the local filesystem itself,
+    /// which for an in-process session is the host's filesystem (#434's
+    /// rule).
+    fn request_dirs(&self, _path: &str) -> bool {
+        false
+    }
+
+    /// Take the parked answer to [`Self::request_dirs`], clearing it.
+    fn take_dir_listing(&self) -> Option<crate::session::DirListing> {
+        None
+    }
+
     /// Where this session actually runs.
     ///
     /// Surfaced rather than hidden, so a slow keystroke has an explanation. See

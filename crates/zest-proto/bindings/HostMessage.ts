@@ -174,6 +174,32 @@ readonly: boolean,
  * Empty when the read simply succeeded — an empty file and a refused
  * one must not render the same.
  */
+error: string, } | { "t": "dir_listing", 
+/**
+ * The listed directory, as asked.
+ */
+path: string, 
+/**
+ * Its parent, for the `..` row. `None` at a filesystem root.
+ */
+parent?: string, 
+/**
+ * Child directory *names* (not paths), hidden ones skipped, sorted
+ * case-insensitively.
+ */
+dirs: Array<string>, 
+/**
+ * The cap bit: more existed than `dirs` carries. Said rather than
+ * silently cut, because a truncated listing that looks complete
+ * reads as "covered everything" when it didn't.
+ */
+truncated: boolean, 
+/**
+ * Why the listing is empty, when it is empty for a *reason* —
+ * permission denied, not a directory, gone. Empty string when the
+ * listing simply is what it is; an empty directory and a refused
+ * one must not render the same.
+ */
 error: string, } | { "t": "file_written", 
 /**
  * The resolved path, as [`Self::FileContents::path`].

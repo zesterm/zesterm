@@ -33,10 +33,6 @@ pub enum BlockMenuAction {
     RerunInNewTab,
     /// Put the grid selection over the block's output rows.
     SelectText,
-    /// `cd` the shell to the cwd-chip menu's recent at this index (#426).
-    CdTo(usize),
-    /// Copy the cwd chip's own path.
-    CopyPath,
     /// A divider; Enter does nothing and the selection skips it.
     None,
 }
@@ -133,46 +129,6 @@ pub fn build_rows(
     (rows, actions)
 }
 
-/// The cwd chip's menu (#426): copy the path, then `cd` to a recent.
-///
-/// `at_prompt` gates every `cd` row at *build* time, the disabled-row rule
-/// above: a shell mid-command would take the bytes on its stdin, and the row
-/// saying so faintly beats a click that types into a running program. The
-/// build is per chrome pass like the block rows, so a command finishing
-/// under the open menu turns the recents live without reopening it.
-#[must_use]
-pub fn cwd_rows(
-    cwds: &[String],
-    chip_cwd: &str,
-    at_prompt: bool,
-) -> (Vec<BlockMenuRow>, Vec<BlockMenuAction>) {
-    let mut rows = Vec::with_capacity(cwds.len() + 2);
-    let mut actions = Vec::with_capacity(cwds.len() + 2);
-    rows.push(BlockMenuRow::Action {
-        label: "Copy path".to_string(),
-        chord: String::new(),
-        enabled: !chip_cwd.is_empty(),
-    });
-    actions.push(if chip_cwd.is_empty() {
-        BlockMenuAction::None
-    } else {
-        BlockMenuAction::CopyPath
-    });
-    if !cwds.is_empty() {
-        rows.push(BlockMenuRow::Divider);
-        actions.push(BlockMenuAction::None);
-        for (i, cwd) in cwds.iter().enumerate() {
-            rows.push(BlockMenuRow::Action {
-                label: format!("cd {}", crate::status::shorten_home(cwd)),
-                chord: String::new(),
-                enabled: at_prompt,
-            });
-            actions.push(if at_prompt { BlockMenuAction::CdTo(i) } else { BlockMenuAction::None });
-        }
-    }
-    (rows, actions)
-}
-
 /// Move the keyboard selection to the next row that does something.
 ///
 /// Stops at the ends rather than wrapping, and steps over dividers *and*
@@ -207,37 +163,6 @@ pub fn first_actionable(actions: &[BlockMenuAction]) -> usize {
 mod tests {
     use super::*;
     use zest_core::Terminal;
-
-    #[test]
-    fn cwd_rows_gate_every_cd_on_the_prompt_and_keep_rows_and_actions_parallel() {
-        let cwds = vec!["/a".to_string(), "/b".to_string()];
-        let (rows, actions) = cwd_rows(&cwds, "/here", true);
-        assert_eq!(rows.len(), actions.len(), "index n must mean one thing to both lists");
-        assert_eq!(actions[0], BlockMenuAction::CopyPath);
-        assert_eq!(actions[2], BlockMenuAction::CdTo(0));
-        assert_eq!(actions[3], BlockMenuAction::CdTo(1));
-
-        // Mid-command, every cd row goes faint and actionless — the click
-        // path and the keyboard then refuse them by the same one question.
-        let (rows, actions) = cwd_rows(&cwds, "/here", false);
-        assert!(actions[2..].iter().all(|a| *a == BlockMenuAction::None));
-        assert!(rows[2..].iter().all(|r| matches!(
-            r,
-            BlockMenuRow::Action { enabled: false, .. }
-        )));
-        assert_eq!(
-            actions[0],
-            BlockMenuAction::CopyPath,
-            "copying needs no prompt; only typing does"
-        );
-    }
-
-    #[test]
-    fn cwd_rows_with_no_recents_still_offer_the_copy() {
-        let (rows, actions) = cwd_rows(&[], "/here", true);
-        assert_eq!(rows.len(), 1, "no recents means no divider hanging under nothing");
-        assert_eq!(actions[0], BlockMenuAction::CopyPath);
-    }
 
     /// A session with one finished command that printed, and one still running.
     fn session() -> Terminal {

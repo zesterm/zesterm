@@ -55,6 +55,8 @@ pub struct ChromeLayout {
     /// The command palette's scroll, clamped — and possibly *adjusted*, when
     /// the model asked for the selection to be brought into view.
     pub palette_scroll: f32,
+    /// Same contract for the cwd chip's directory browser (#439).
+    pub dir_picker_scroll: f32,
     /// The settings overlay's scroll, clamped — and possibly *adjusted*, when
     /// the model asked for the selection to be brought into view.
     pub settings_scroll: f32,
@@ -412,6 +414,9 @@ pub fn layout(
     // content it was opened from.
     if let Some(palette) = &model.palette {
         palette_overlay(palette, colors, m, measure, &mut out);
+    }
+    if let Some(picker) = &model.dir_picker {
+        dir_picker_overlay(picker, colors, m, measure, &mut out);
     }
     if let Some(launcher) = &model.launcher {
         // Anchored to the `+` the strip pass just recorded; exclusive with
@@ -1469,6 +1474,174 @@ fn picker_overlay(
             px,
             bold: false,
             tracking: 0.0,
+        });
+    }
+}
+
+/// The cwd chip's directory browser (#439) — the palette's modality recipe
+/// with a listing where the command table was. Rows are uniform, every one
+/// selectable; the `..` row (row 0 when the path has a parent) draws faint
+/// because it navigates where the rest switch.
+fn dir_picker_overlay(
+    picker: &super::model::DirPickerModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::DirPickerScrim);
+
+    let w = (PALETTE_W * s).min(m.width - PICKER_MARGIN * s);
+    let filter_h = m.line_height + 2.0 * PICKER_PAD * s;
+    // Sized to what it holds, capped at the palette's height: a listing of
+    // eight directories in a panel built for forty reads as half-loaded,
+    // and the empty states below need one row, not a screenful of nothing.
+    let listed = picker.rows.len().max(1) as f32;
+    // The truncation note gets a row of its own; drawn into the listing's
+    // space it would sit on top of the last directory, since the padding is
+    // a third of a row tall.
+    let footer_h = if picker.truncated { PALETTE_ROW_H * s } else { 0.0 };
+    let wanted =
+        filter_h + HAIRLINE * s + listed * PALETTE_ROW_H * s + footer_h + PICKER_PAD * s;
+    let h = wanted.min((PALETTE_H * s).min(m.height - PICKER_MARGIN * s));
+    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
+    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
+    panel_rect.shadow_blur = 24.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+    out.hit.push(panel, HitRegion::DirPickerPanel);
+
+    let (filter_text, filter_color) = if picker.filter.is_empty() {
+        ("search directories".to_string(), colors.text_faint)
+    } else {
+        (picker.filter.clone(), colors.text_active)
+    };
+    let filter_x = panel[0] + PICKER_PAD * s;
+    if let Some((lo, hi)) = picker.filter_caret.selection {
+        let (a, b) = (
+            measure(&picker.filter[..lo], m.font_px, false, 0.0),
+            measure(&picker.filter[..hi], m.font_px, false, 0.0),
+        );
+        out.rects.push(RectInstance::rounded(
+            [filter_x + a, panel[1] + PICKER_PAD * s, b - a, m.line_height],
+            2.0 * s,
+            colors.accent_soft,
+            panel,
+        ));
+    }
+    out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
+        tracking: 0.0,
+        text: filter_text,
+        pos: [filter_x, text_baseline(m, panel[1], filter_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color: filter_color,
+        clip: panel,
+    });
+    if !picker.filter.is_empty() {
+        let at = measure(&picker.filter[..picker.filter_caret.at], m.font_px, false, 0.0);
+        out.rects.push(RectInstance::filled(
+            [filter_x + at, panel[1] + PICKER_PAD * s, (1.5 * s).max(1.0), m.line_height],
+            colors.text_active,
+            panel,
+        ));
+    }
+    out.rects.push(RectInstance::filled(
+        [panel[0], panel[1] + filter_h, w, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+
+    let rows_clip = [
+        panel[0],
+        panel[1] + filter_h + HAIRLINE * s,
+        w,
+        (h - filter_h - HAIRLINE * s - footer_h).max(0.0),
+    ];
+
+    // The three empty states, each saying which it is: an answer in flight,
+    // a listing that was refused, and a filter that matches nothing.
+    let notice = if picker.loading {
+        Some(("listing\u{2026}".to_string(), colors.text_faint))
+    } else if !picker.error.is_empty() {
+        Some((picker.error.clone(), colors.danger))
+    } else if picker.rows.is_empty() && !picker.filter.is_empty() {
+        Some((format!("nothing matches \u{201c}{}\u{201d}", picker.filter), colors.text_faint))
+    } else if picker.rows.is_empty() {
+        Some(("no subdirectories".to_string(), colors.text_faint))
+    } else {
+        None
+    };
+    if let Some((text, color)) = notice {
+        out.texts.push(TextRun {
+            px: m.font_px,
+            bold: false,
+            tracking: 0.0,
+            text,
+            pos: [panel[0] + PICKER_PAD * s, text_baseline(m, rows_clip[1], PALETTE_ROW_H * s)],
+            max_width: w - 2.0 * PICKER_PAD * s,
+            color,
+            clip: rows_clip,
+        });
+    }
+
+    let row_h = PALETTE_ROW_H * s;
+    let content_h = picker.rows.len() as f32 * row_h;
+    let max_scroll = (content_h - rows_clip[3]).max(0.0);
+    let mut scroll = picker.scroll.clamp(0.0, max_scroll);
+    if picker.ensure_visible && picker.selected < picker.rows.len() {
+        let top = picker.selected as f32 * row_h;
+        let bottom = top + row_h;
+        if top < scroll {
+            scroll = top;
+        } else if bottom > scroll + rows_clip[3] {
+            scroll = bottom - rows_clip[3];
+        }
+        scroll = scroll.clamp(0.0, max_scroll);
+    }
+    out.dir_picker_scroll = scroll;
+
+    let left = panel[0] + PICKER_PAD * s;
+    for (i, label) in picker.rows.iter().enumerate() {
+        let y = rows_clip[1] + i as f32 * row_h - scroll;
+        let band = [panel[0], y, w, row_h];
+        let Some(visible) = intersect(band, rows_clip) else { continue };
+
+        if i == picker.selected {
+            let chip = [panel[0] + 4.0 * s, y + 1.0 * s, w - 8.0 * s, row_h - 2.0 * s];
+            out.rects.push(RectInstance::rounded(chip, RADIUS * s, colors.accent_soft, rows_clip));
+        }
+        out.hit.push(visible, HitRegion::DirPickerRow(i));
+        let parent_row = picker.has_parent && i == 0;
+        out.texts.push(TextRun {
+            px: m.font_px,
+            bold: false,
+            tracking: 0.0,
+            text: label.clone(),
+            pos: [left, text_baseline(m, y, row_h)],
+            max_width: w - 2.0 * PICKER_PAD * s,
+            color: if parent_row { colors.text_faint } else { colors.text_inactive },
+            clip: rows_clip,
+        });
+    }
+
+    if picker.truncated {
+        // Said, not silently cut: a listing that looks complete reads as
+        // "covered everything" when it didn't.
+        out.texts.push(TextRun {
+            px: m.font_px,
+            bold: false,
+            tracking: 0.0,
+            text: "more not shown \u{2014} narrow the search".to_string(),
+            pos: [left, text_baseline(m, panel[1] + h - row_h, row_h)],
+            max_width: w - 2.0 * PICKER_PAD * s,
+            color: colors.text_faint,
+            clip: panel,
         });
     }
 }
@@ -3105,6 +3278,7 @@ mod tests {
             settings_chord: "\u{2318},".into(),
             picker: None,
             palette: None,
+            dir_picker: None,
             settings: None,
             launcher: None,
             block_menu: None,
@@ -3934,6 +4108,134 @@ mod tests {
             "every actionable row must be clickable, and group labels must not be"
         );
         assert!(scrim_hits > 0, "the scrim must be reachable around the panel");
+    }
+
+    #[test]
+    fn the_dir_picker_is_modal_and_every_row_answers_as_itself() {
+        // The chrome discipline, applied to the browser (#439): every point
+        // in the window answers as the picker's rows, panel or scrim, and a
+        // click on row i's centre must return row i — the drawn rect and
+        // the hit rect come from one computation.
+        use crate::chrome::model::DirPickerModel;
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.dir_picker = Some(DirPickerModel {
+            rows: vec![
+                ".. (parent directory)".into(),
+                "clients".into(),
+                "crates".into(),
+                "docs".into(),
+            ],
+            has_parent: true,
+            selected: 1,
+            filter: String::new(),
+            filter_caret: Default::default(),
+            scroll: 0.0,
+            ensure_visible: false,
+            loading: false,
+            error: String::new(),
+            truncated: false,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+
+        let mut seen_rows = std::collections::HashSet::new();
+        let mut off_overlay = 0u32;
+        for x in (0..1200).step_by(4) {
+            for y in (0..800).step_by(4) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::DirPickerRow(i)) => {
+                        seen_rows.insert(i);
+                    }
+                    Some(HitRegion::DirPickerPanel | HitRegion::DirPickerScrim) => {}
+                    other => {
+                        off_overlay += 1;
+                        assert!(
+                            other.is_none(),
+                            "a point answered as {other:?} under a modal overlay"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(off_overlay, 0, "the scrim must cover every last pixel");
+        assert_eq!(
+            seen_rows,
+            (0..4).collect::<std::collections::HashSet<_>>(),
+            "all four rows are clickable, the parent row included"
+        );
+    }
+
+    #[test]
+    fn a_truncated_listing_reserves_its_footer_instead_of_sitting_on_a_row() {
+        // The note has to go somewhere the rows are not: the panel's padding
+        // is a third of a row tall, so a footer drawn into the listing's own
+        // space lands on the last directory. Asserted through the hit map,
+        // which is the only thing that knows where rows actually ended up.
+        use crate::chrome::model::DirPickerModel;
+        let m = metrics(1200.0, 800.0, 1.0);
+        let rows: Vec<String> = (0..6).map(|i| format!("dir-{i}")).collect();
+
+        let bottom_gap = |truncated: bool| {
+            let mut mo = model(
+                vec![tab(1, TabOrigin::Local, TabPresence::Online)],
+                TabsPosition::Top,
+            );
+            mo.dir_picker = Some(DirPickerModel {
+                rows: rows.clone(),
+                has_parent: false,
+                selected: 0,
+                filter: String::new(),
+                filter_caret: Default::default(),
+                scroll: 0.0,
+                ensure_visible: false,
+                loading: false,
+                error: String::new(),
+                truncated,
+            });
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            let (mut last_row_y, mut panel_bottom) = (0.0f32, 0.0f32);
+            for y in (0..800).step_by(2) {
+                match l.hit.hit(600.0, y as f32) {
+                    Some(HitRegion::DirPickerRow(_)) => last_row_y = y as f32,
+                    Some(HitRegion::DirPickerPanel) => panel_bottom = y as f32,
+                    _ => {}
+                }
+            }
+            panel_bottom - last_row_y
+        };
+
+        let plain = bottom_gap(false);
+        let truncated = bottom_gap(true);
+        assert!(
+            truncated - plain >= PALETTE_ROW_H - 2.0,
+            "a truncated listing must reserve a whole row for its note \
+             (gap grew by {}, wanted about {PALETTE_ROW_H})",
+            truncated - plain
+        );
+    }
+
+    #[test]
+    fn the_dir_picker_scroll_is_clamped_and_ensure_visible_reaches_the_selection() {
+        use crate::chrome::model::DirPickerModel;
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(tabs, TabsPosition::Top);
+        mo.dir_picker = Some(DirPickerModel {
+            rows: (0..200).map(|i| format!("dir-{i}")).collect(),
+            has_parent: false,
+            selected: 199,
+            filter: String::new(),
+            filter_caret: Default::default(),
+            scroll: 0.0,
+            ensure_visible: true,
+            loading: false,
+            error: String::new(),
+            truncated: true,
+        });
+        let l = layout(&mo, &colors(), &m, &mut measure);
+        assert!(l.dir_picker_scroll > 0.0, "reaching the last of 200 rows means scrolling");
+        assert!(l.dir_picker_scroll < 1e9, "and the scroll is clamped to the content");
     }
 
     fn palette_rows(n: usize) -> Vec<crate::chrome::model::PaletteRow> {

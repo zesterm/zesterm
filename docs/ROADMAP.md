@@ -198,10 +198,18 @@ then `main* ±3` in the order the answers arrive; and the `link` widget
 (off the default list) shows `lan 0.4 ms` / `relay 62 ms` from the app's
 own fleet model, loopback deliberately silent.
 
-- [ ] **Switcher chips** (branch, kube): a remote session's branch list
-      needs a wire request the protocol does not have, and a local-only
-      switcher that silently no-ops on remote tabs is a half-feature —
-      design the request first.
+The cwd chip grew its directory browser with #439: `ListDir`/`DirListing`
+on the wire (the `Enroll` additive rule), so the same picker serves a
+remote tab over the LAN or relay — search-as-you-type, `..` up, ⏎ or click
+switches (the `cd_bytes` gates), ⇥ browses without committing, and the
+in-process window answers itself. The web client has the wire pair; its
+picker UI is still open below.
+
+- [ ] **Switcher chips** (branch, kube): the `ListDir` precedent shows the
+      shape — a request/reply pair each — but a branch list also wants the
+      write gated the way `cd` is, so design the typing story first.
+- [ ] **The browser in the browser**: the hosted client's cwd-chip picker,
+      on the `DirListing` pair the wire now carries.
 - [ ] **Real runtime versions** (`node --version` and kin), cached per
       binary path: the pins say what was asked for; only a subprocess knows
       what answers.
