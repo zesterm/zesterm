@@ -71,6 +71,15 @@ sha2 = "0.10"
 # why sync tungstenite cannot serve `serve`'s split read/write halves.
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# CommandLineToArgvW, and only for the command-line quoting tests in spawn.rs:
+# the rule being implemented *is* that parser's, so asserting against a
+# hand-written expected string would pin our reading of it rather than the rule.
+# A dev-dependency because resolver 2 keeps dev-only features out of the normal
+# build -- shipping Win32_UI in the daemon to satisfy a test would be the tail
+# wagging the dog.
+windows-sys = { workspace = true, features = ["Win32_UI_Shell"] }
+
 [target.'cfg(unix)'.dependencies]
 # `flock` on the socket path, so two daemons starting at once cannot each
 # unlink the other's socket and serve half the clients. Already in the tree via
@@ -89,4 +98,11 @@ windows-sys = { workspace = true, features = [
     # GetComputerNameExW: a machine has to be able to name itself without help
     # from the environment, on every platform. See `machine_label`.
     "Win32_System_SystemInformation",
+    # SECURITY_ATTRIBUTES appears in the signatures of CreateProcessW,
+    # CreateFileW and CreatePipe, so windows-sys gates all three on this
+    # feature even where we pass null. `local.rs` has called CreateFileW since
+    # it was written and only ever compiled because `zest-pty` enables this and
+    # cargo unifies features across the graph -- a build that depended on
+    # another crate's manifest. `spawn.rs` needs CreateProcessW (#412).
+    "Win32_Security",
 ] }
