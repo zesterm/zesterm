@@ -171,16 +171,78 @@ pub fn pane_frames(area: [f32; 4], s: f32, n: usize) -> Vec<[f32; 4]> {
     (0..n).map(|i| [area[0] + m + i as f32 * (w + 2.0 * m), area[1] + m, w, h]).collect()
 }
 
-/// Where a pane's grid actually lives: inside the frame, below the header.
+/// Where a pane's grid actually lives: inside the frame, below the header,
+/// and inside `window.padding` on the left and right.
+///
+/// That horizontal padding is the block rail's room. The rail is drawn in the
+/// grid layer *outside* the grid rect — chrome painted inside it shaves column
+/// 0 off every output row — so it needs free pixels beside the cells or it is
+/// silently not drawn. A pane used to inset by a hairline only, and since a
+/// pane's grid is sized `floor(body_w / cell_w)` the letterbox then returned
+/// the body rect exactly: a gutter of 0.0, in every pane, always (#460).
+///
+/// `padding` is the same user-facing setting the unsplit path gives its own
+/// gutter, so setting it to zero drops the rail in both layouts together
+/// rather than in one. Floored for the reason `Insets::resolved` states: this
+/// becomes the grid's origin, and a fractional origin resamples every glyph
+/// between texels through the `Nearest` atlas sampler.
 #[must_use]
-pub fn pane_body(frame: [f32; 4], s: f32) -> [f32; 4] {
+pub fn pane_body(frame: [f32; 4], s: f32, padding: u32) -> [f32; 4] {
     let b = HAIRLINE * s;
+    let p = b + (padding as f32 * s).floor();
     [
-        frame[0] + b,
+        frame[0] + p,
         frame[1] + PANE_HEADER * s,
-        (frame[2] - 2.0 * b).max(0.0),
+        (frame[2] - 2.0 * p).max(0.0),
         (frame[3] - PANE_HEADER * s - b).max(0.0),
     ]
+}
+
+/// Where each pane's grid is drawn inside `area`, left to right — one
+/// rectangle per entry in `grids`, which gives each pane's granted
+/// `(cols, rows)`.
+///
+/// The one copy of this arithmetic. It had three — the pointer's rectangle,
+/// the resize, and the render pass — and the comment tying them together said
+/// only that the focused one "must come out equal to `focused_view_rect`".
+///
+/// A single grid is the unsplit window: `area` letterboxed, with no frame and
+/// no pane padding, so an unsplit tab renders byte-identically to what it did
+/// before panes existed (the #44 pixel assertions and #215 both depend on it).
+#[must_use]
+pub fn pane_grid_rects(
+    area: [f32; 4],
+    s: f32,
+    padding: u32,
+    grids: &[(usize, usize)],
+    m: zest_font::CellMetrics,
+) -> Vec<[f32; 4]> {
+    let lb = |rect: [f32; 4], (cols, rows): (usize, usize)| {
+        super::insets::letterbox(rect, cols, rows, m)
+    };
+    match grids {
+        [] => Vec::new(),
+        [one] => vec![lb(area, *one)],
+        many => pane_frames(area, s, many.len())
+            .into_iter()
+            .zip(many)
+            .map(|(f, g)| lb(pane_body(f, s, padding), *g))
+            .collect(),
+    }
+}
+
+/// Free pixels between a pane's border and the grid inside it — the block
+/// rail's room, and the pane's answer to what `window.padding` gives the
+/// unsplit path.
+///
+/// `grid` is the *letterboxed* rect, not [`pane_body`]'s: under size
+/// arbitration (#215) a grid narrower than its pane sits centered in it, and
+/// that slack is room for the rail too. One function because the two numbers
+/// have to agree — the padding [`pane_body`] takes out and the space the
+/// renderer is told about — and a second copy is how one of them drifts.
+#[must_use]
+pub fn pane_gutter(frame: [f32; 4], grid: [f32; 4], s: f32) -> f32 {
+    (grid[0] - frame[0] - HAIRLINE * s).max(0.0)
 }
 
 // The design's type scale, logical px.
@@ -3427,7 +3489,7 @@ mod tests {
         // Deep inside the right (unfocused) pane's body, well clear of both
         // its header and the frame's border.
         let right = pane_frames(model.grid_area, m.scale, 2)[1];
-        let body = pane_body(right, m.scale);
+        let body = pane_body(right, m.scale, 8);
         let (x, y) = (body[0] + body[2] / 2.0, body[1] + body[3] / 2.0);
         assert_eq!(
             l.hit.hit(x, y),
@@ -3956,7 +4018,7 @@ mod tests {
         let area = mo.grid_area;
         let frames = pane_frames(area, 1.0, 2);
         let (lf, rf) = (frames[0], frames[1]);
-        let lb = pane_body(lf, 1.0);
+        let lb = pane_body(lf, 1.0, 8);
         // Middle of the unfocused (right) pane: chrome, and it says which.
         assert_eq!(
             l.hit.hit(rf[0] + rf[2] / 2.0, rf[1] + rf[3] / 2.0),
@@ -4040,6 +4102,129 @@ mod tests {
                 assert!(f[2] >= 0.0 && f[3] >= 0.0, "pane {i} of {n} has a non-negative size");
             }
         }
+    }
+
+    /// A plausible monospace cell, for the pane-geometry tests that have to go
+    /// all the way through the letterbox to say anything.
+    fn cell_metrics() -> zest_font::CellMetrics {
+        zest_font::CellMetrics {
+            cell_w: 9,
+            cell_h: 19,
+            baseline: 15,
+            underline_y: 17,
+            underline_thickness: 1,
+            strikeout_y: 9,
+        }
+    }
+
+    #[test]
+    fn a_pane_leaves_the_block_rail_its_room() {
+        // #460. The rail is drawn in the grid layer *outside* the grid rect —
+        // painting it inside would shave column 0 off every output row — so it
+        // needs free pixels beside the cells and is silently not drawn without
+        // them. A pane used to inset by a hairline only, and since a pane's
+        // grid is sized `floor(body_w / cell_w)` the letterbox then handed
+        // back the body rect exactly: a gutter of 0.0, in every pane, always.
+        //
+        // Asserted through the same three functions the app calls, in the same
+        // order, because the bug was in their composition rather than in any
+        // one of them.
+        let m = cell_metrics();
+        for s in [1.0f32, 1.25, 2.0] {
+            for n in [2usize, 3, 5] {
+                for padding in [4u32, 8] {
+                    let area = [8.0, 46.0, 1600.0, 900.0];
+                    for (i, frame) in pane_frames(area, s, n).into_iter().enumerate() {
+                        let body = pane_body(frame, s, padding);
+                        // Exactly how `resize_split_panes` sizes the pane, so
+                        // the letterbox sees the grid the pty is given.
+                        let cols = ((body[2] / m.cell_w as f32) as usize).max(2);
+                        let rows = ((body[3] / m.cell_h as f32) as usize).max(2);
+                        let grid = super::super::insets::letterbox(body, cols, rows, m);
+                        let g = pane_gutter(frame, grid, s);
+                        assert!(
+                            g >= zest_render_wgpu::RAIL_PX,
+                            "pane {i} of {n} at scale {s}, padding {padding}: gutter {g} is \
+                             under the {}px the rail needs, so no block state is drawn",
+                            zest_render_wgpu::RAIL_PX
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unsplit_window_is_untouched_by_the_pane_geometry() {
+        // One grid is the unsplit window, and it must come out of the shared
+        // function byte-identical to the bare letterbox: no frame, no pane
+        // padding, no margin. Every #44 pixel assertion and the #215 "a grid
+        // that fills the pane keeps the exact pane rect" rule sit on this.
+        let m = cell_metrics();
+        let area = [8.0, 46.0, 1600.0, 900.0];
+        for grid in [(177usize, 45usize), (60, 10), (400, 200)] {
+            assert_eq!(
+                pane_grid_rects(area, 1.25, 8, &[grid], m),
+                vec![super::super::insets::letterbox(area, grid.0, grid.1, m)],
+                "an unsplit tab must not pay a pane's padding"
+            );
+        }
+        assert!(pane_grid_rects(area, 1.0, 8, &[], m).is_empty(), "no panes, no rectangles");
+    }
+
+    #[test]
+    fn every_pane_gets_its_own_rectangle_inside_its_own_frame() {
+        // What `focused_view_rect` and the render pass both read. The rects
+        // must stay inside their frames and never overlap, or a header is
+        // drawn over the neighbour's output.
+        let m = cell_metrics();
+        let area = [8.0, 46.0, 1600.0, 900.0];
+        let s = 1.25;
+        for n in [2usize, 3, 5] {
+            let frames = pane_frames(area, s, n);
+            let grids: Vec<(usize, usize)> = frames
+                .iter()
+                .map(|f| {
+                    let b = pane_body(*f, s, 8);
+                    (((b[2] / m.cell_w as f32) as usize).max(2), ((b[3] / m.cell_h as f32) as usize).max(2))
+                })
+                .collect();
+            let rects = pane_grid_rects(area, s, 8, &grids, m);
+            assert_eq!(rects.len(), n, "one rectangle per pane");
+            for (i, r) in rects.iter().enumerate() {
+                let f = frames[i];
+                assert!(
+                    r[0] >= f[0] && r[0] + r[2] <= f[0] + f[2] + 0.01,
+                    "pane {i} of {n}: the grid must stay inside its own frame"
+                );
+                if i > 0 {
+                    let prev = rects[i - 1];
+                    assert!(
+                        r[0] >= prev[0] + prev[2],
+                        "pane {i} of {n} overlaps its left neighbour's grid"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_with_no_padding_leaves_no_room() {
+        // The rule is `window.padding`, not a constant of the pane's own: a
+        // user who sets it to zero to win back columns must lose the rail in
+        // both layouts together, since the unsplit path has nowhere to draw it
+        // either. Pinned so it cannot be quietly turned into a fixed inset.
+        let m = cell_metrics();
+        let frame = pane_frames([8.0, 46.0, 1600.0, 900.0], 1.0, 2)[0];
+        let body = pane_body(frame, 1.0, 0);
+        let cols = ((body[2] / m.cell_w as f32) as usize).max(2);
+        let rows = ((body[3] / m.cell_h as f32) as usize).max(2);
+        let grid = super::super::insets::letterbox(body, cols, rows, m);
+        assert_eq!(
+            pane_gutter(frame, grid, 1.0),
+            0.0,
+            "no padding is no gutter, exactly as it is for an unsplit window"
+        );
     }
 
     #[test]

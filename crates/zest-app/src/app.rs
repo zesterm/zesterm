@@ -3237,7 +3237,7 @@ impl App {
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
         let n = self.tabs.active().map_or(1, Tab::pane_count) + 1;
         let frames = crate::chrome::layout::pane_frames(area, scale, n);
-        let body = crate::chrome::layout::pane_body(frames[n - 1], scale);
+        let body = crate::chrome::layout::pane_body(frames[n - 1], scale, self.config.padding);
         let cm = fonts.cell_metrics();
         let cols = ((body[2] / cm.cell_w as f32) as u16).max(2);
         let rows = ((body[3] / cm.cell_h as f32) as u16).max(2);
@@ -3332,33 +3332,48 @@ impl App {
         }
     }
 
-    /// The rectangle the focused terminal is drawn in: the grid area, or the
-    /// focused pane's body when the active tab is split. Everything that
-    /// maps pixels to cells reads this — one rectangle, one truth.
-    fn focused_view_rect(&self) -> Option<[f32; 4]> {
-        let window = self.window.as_ref()?;
+    /// The rectangle each pane's terminal is drawn in, left to right: one
+    /// element for an unsplit tab, `pane_count()` for a split one.
+    ///
+    /// The block headers ride these rectangles, and so does every pixel↔cell
+    /// mapping through [`Self::focused_view_rect`] — which is an index into
+    /// this list rather than a second copy of the arithmetic, so a header
+    /// cannot land one letterbox-offset away from the glyph it sits on.
+    fn pane_view_rects(&self) -> Vec<[f32; 4]> {
+        let Some(window) = self.window.as_ref() else { return Vec::new() };
+        let Some(fonts) = self.fonts.as_ref() else { return Vec::new() };
+        let Some(tab) = self.tabs.active() else { return Vec::new() };
         let scale = window.scale_factor() as f32;
         let size = window.inner_size();
         let area = self.insets_at(scale).grid_rect(size.width, size.height);
-        let tab = self.tabs.active()?;
-        let frame = if tab.is_split() {
-            let frames = crate::chrome::layout::pane_frames(area, scale, tab.pane_count());
-            crate::chrome::layout::pane_body(frames[tab.focus.min(frames.len() - 1)], scale)
-        } else {
-            area
-        };
         // The grid, not the pane, decides the final rectangle: under size
         // arbitration (#215) the session is the smallest attached client's
         // size, and a grid smaller than this pane sits centered in it. Reading
         // the granted size from the terminal -- not from `tab.sized`, which
         // records what this window *asked* -- is what keeps the letterbox
         // aligned with the pixels the renderer actually draws.
-        let m = self.fonts.as_ref()?.cell_metrics();
-        let (cols, rows) = {
-            let term = tab.focused_source().terminal().lock();
-            (term.grid().cols(), term.grid().rows())
-        };
-        Some(crate::chrome::insets::letterbox(frame, cols, rows, m))
+        let grids: Vec<(usize, usize)> = (0..tab.pane_count())
+            .map(|i| {
+                let term = tab.pane_source(i).terminal().lock();
+                (term.grid().cols(), term.grid().rows())
+            })
+            .collect();
+        crate::chrome::layout::pane_grid_rects(
+            area,
+            scale,
+            self.config.padding,
+            &grids,
+            fonts.cell_metrics(),
+        )
+    }
+
+    /// The rectangle the focused terminal is drawn in: the grid area, or the
+    /// focused pane's body when the active tab is split. Everything that
+    /// maps pixels to cells reads this — one rectangle, one truth.
+    fn focused_view_rect(&self) -> Option<[f32; 4]> {
+        let tab = self.tabs.active()?;
+        let rects = self.pane_view_rects();
+        rects.get(tab.focus.min(rects.len().saturating_sub(1))).copied()
     }
 
     /// Resize every pane of the active split tab to its body rectangle —
@@ -3377,13 +3392,17 @@ impl App {
                 ((body[3] / cm.cell_h as f32) as u16).max(2),
             )
         };
+        // Copied out before the mutable borrow of the tab below.
+        let padding = self.config.padding;
         let Some(tab) = self.tabs.active_mut() else { return };
         if !tab.is_split() {
             return;
         }
         let frames = crate::chrome::layout::pane_frames(area, scale, tab.pane_count());
-        let fit: Vec<(u16, u16)> =
-            frames.iter().map(|f| dims(crate::chrome::layout::pane_body(*f, scale))).collect();
+        let fit: Vec<(u16, u16)> = frames
+            .iter()
+            .map(|f| dims(crate::chrome::layout::pane_body(*f, scale, padding)))
+            .collect();
         if tab.sized != fit[0] {
             tab.source().resize(fit[0].0, fit[0].1);
             tab.sized = fit[0];
@@ -9617,18 +9636,23 @@ impl App {
         Some(zest_core::AbsPos::new(line, col.min(cols.saturating_sub(1))))
     }
 
-    /// The active session's blocks as the header pass wants them: which
-    /// viewport rows each header covers, plus its state and pre-formatted
-    /// labels. One short terminal lock; plain data out.
+    /// One pane's blocks as the header pass wants them: which viewport rows
+    /// each header covers, plus its state and pre-formatted labels. One short
+    /// terminal lock; plain data out.
+    ///
+    /// Per pane, not per tab: a split tab draws headers in every pane (#460),
+    /// so this reads `pane` throughout — its own source, its own address for
+    /// the selection, its own liveness. `pane == tab.focus` for an unsplit
+    /// tab, where the two were the same thing.
     ///
     /// Empty while a screen owns the pane — see [`pane_is_covered`].
-    fn build_block_views(&self) -> Vec<crate::chrome::blocks::BlockView> {
+    fn build_block_views(&self, pane: usize) -> Vec<crate::chrome::blocks::BlockView> {
         if pane_is_covered(self.screen, self.tabs.settings_active()) {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
-        let pane_dead = tab.pane_dead(tab.focus);
-        let term = tab.focused_source().terminal();
+        let pane_dead = tab.pane_dead(pane);
+        let term = tab.pane_source(pane).terminal();
         let term = term.lock();
         // The alt screen is a separate grid whose ids restart at zero; a
         // primary-grid block would overlay whatever rows happen to collide.
@@ -9636,7 +9660,8 @@ impl App {
             return Vec::new();
         }
         let grid = term.grid();
-        let folded = self.folded_blocks.get(&tab.focused_addr());
+        let addr = tab.pane_addr(pane);
+        let folded = self.folded_blocks.get(&addr);
         // Through the fold view when one is active, so a header sits on the
         // rows the renderer actually draws, not the ones it hid.
         let fold_map = folded.and_then(|f| block_actions::fold_row_map(&term, f));
@@ -9650,8 +9675,12 @@ impl App {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let selected = self.selected_block.get(&tab.focused_addr()).copied();
-        let menu_block = self.block_menu.as_ref().map(|m| m.block);
+        let selected = self.selected_block.get(&addr).copied();
+        // The menu belongs to the focused pane: it is opened by a pointer, and
+        // only the focused pane's headers answer one. Left unscoped, a block
+        // sharing an id with the menu's would hold a ⋯ open in a pane nothing
+        // can click.
+        let menu_block = (pane == tab.focus).then(|| self.block_menu.as_ref().map(|m| m.block)).flatten();
 
         let views = term
             .blocks()
@@ -10031,19 +10060,38 @@ impl App {
         // reach the band builder, which would rail nothing and light nothing
         // while the menu still claimed to be about it.
         self.prune_selected_block();
-        let block_views = self.build_block_views();
+        // Every pane's, not just the focused one's: a split tab draws the
+        // block state in all of them (#460). The rectangles come from the same
+        // list `focused_view_rect` indexes, so a header cannot land one
+        // letterbox-offset away from the glyphs it sits on.
+        let pane_rects = self.pane_view_rects();
+        let focus = self.tabs.active().map_or(0, |t| t.focus);
+        let block_views: Vec<Vec<crate::chrome::blocks::BlockView>> =
+            (0..pane_rects.len()).map(|i| self.build_block_views(i)).collect();
         self.prompt_chips_view = self.build_prompt_chips();
-        self.anim_spin = block_views.iter().any(|v| v.running);
+        // Any pane, or an unfocused pane's running ring freezes mid-turn.
+        self.anim_spin = block_views.iter().flatten().any(|v| v.running);
         let anim = self.anim_phase();
         let caret_on = anim.caret_on;
-        // Where the headers draw: the focused pane's body when split.
-        let block_area = self.focused_view_rect();
-        let fold_map: Option<Vec<usize>> = self.tabs.active().and_then(|t| {
-            let folds = self.folded_blocks.get(&t.focused_addr()).filter(|s| !s.is_empty())?;
-            let term = t.focused_source().terminal();
-            let term = term.lock();
-            block_actions::fold_row_map(&term, folds)
-        });
+        // Per pane too, and for the same reason the views are: a fold is
+        // stored per session address, so a pane folded and then unfocused
+        // would otherwise have its grid drawn unfolded while its headers were
+        // placed through the fold view — the band on the wrong rows.
+        let fold_maps: Vec<Option<Vec<usize>>> = self
+            .tabs
+            .active()
+            .map(|t| {
+                (0..pane_rects.len())
+                    .map(|i| {
+                        let folds =
+                            self.folded_blocks.get(&t.pane_addr(i)).filter(|s| !s.is_empty())?;
+                        let term = t.pane_source(i).terminal();
+                        let term = term.lock();
+                        block_actions::fold_row_map(&term, folds)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // What the window is painted with outside every viewport: the padding,
         // the gaps around the chrome bars, the split gutter. Taken from the
         // app's palette rather than a session's, because those pixels belong to
@@ -10171,47 +10219,68 @@ impl App {
         // Block headers ride the scrollback, so unlike the cached layout they
         // are rebuilt per frame — pure arithmetic over the views above.
         {
-            let area = block_area
-                .unwrap_or_else(|| insets.grid_rect(gpu.config.width, gpu.config.height));
+            let fallback = insets.grid_rect(gpu.config.width, gpu.config.height);
+            let area = pane_rects.get(focus).copied().unwrap_or(fallback);
             let scale = window.scale_factor() as f32;
-            let block_chrome = {
-                let mut measure = |t: &str, px: f32, bold: bool, tr: f32| {
-                    zest_render_wgpu::measure_ui_run(
-                        fonts,
-                        t,
-                        zest_font::Style::new(bold, false),
-                        px,
-                        tr,
+            // Every pane draws its headers; only the focused one's are
+            // interactive. An unfocused pane's whole frame is already a single
+            // click-to-focus target (`layout::panes_overlay`), so merging its
+            // hit map would put block regions under a pointer that must not
+            // reach them — and block ids are per session, so two panes can
+            // name the same one.
+            // The focused pane's, kept past the loop: it is the only one whose
+            // regions answer a pointer.
+            let mut block_chrome = crate::chrome::blocks::BlockChrome::default();
+            for (i, views) in block_views.iter().enumerate() {
+                if views.is_empty() {
+                    continue;
+                }
+                let focused = i == focus;
+                let pane_chrome = {
+                    let mut measure = |t: &str, px: f32, bold: bool, tr: f32| {
+                        zest_render_wgpu::measure_ui_run(
+                            fonts,
+                            t,
+                            zest_font::Style::new(bold, false),
+                            px,
+                            tr,
+                        )
+                    };
+                    crate::chrome::blocks::layout_blocks(
+                        views,
+                        pane_rects.get(i).copied().unwrap_or(fallback),
+                        metrics.cell_h as f32,
+                        scale,
+                        &self.chrome_colors,
+                        // Hover is the pointer's, and the pointer is the
+                        // focused pane's. Passing it on would light a header
+                        // in another pane that shares the hovered block's id.
+                        if focused { self.chrome_hover } else { None },
+                        anim.spin,
+                        &mut measure,
                     )
                 };
-                crate::chrome::blocks::layout_blocks(
-                    &block_views,
-                    area,
-                    metrics.cell_h as f32,
-                    scale,
-                    &self.chrome_colors,
-                    self.chrome_hover,
-                    anim.spin,
-                    &mut measure,
-                )
-            };
-            chrome.rects.extend_from_slice(&block_chrome.rects);
-            for run in &block_chrome.texts {
-                zest_render_wgpu::emit_ui_run(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut gpu.renderer.atlas,
-                    fonts,
-                    &run.text,
-                    zest_font::Style::new(run.bold, false),
-                    run.px,
-                    run.tracking,
-                    run.pos,
-                    run.color,
-                    run.clip,
-                    run.max_width,
-                    &mut chrome.glyphs,
-                );
+                chrome.rects.extend_from_slice(&pane_chrome.rects);
+                for run in &pane_chrome.texts {
+                    zest_render_wgpu::emit_ui_run(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.renderer.atlas,
+                        fonts,
+                        &run.text,
+                        zest_font::Style::new(run.bold, false),
+                        run.px,
+                        run.tracking,
+                        run.pos,
+                        run.color,
+                        run.clip,
+                        run.max_width,
+                        &mut chrome.glyphs,
+                    );
+                }
+                if focused {
+                    block_chrome = pane_chrome;
+                }
             }
             self.block_hits = block_chrome.hit;
             // Kept only while the ⋯ it names is still drawn: an anchor left
@@ -10328,11 +10397,6 @@ impl App {
                     let scale =
                         self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
                     let frames = crate::chrome::layout::pane_frames(area, scale, n);
-                    // Kept for the block rail's gutter: the letterboxed rect
-                    // sits inside the body, and the difference between the
-                    // two *is* the free space beside the grid.
-                    let bodies: Vec<[f32; 4]> =
-                        frames.iter().map(|f| crate::chrome::layout::pane_body(*f, scale)).collect();
                     let active_tab =
                         self.tabs.active().expect("split implies an active tab");
                     // Per pane, not per tab: a pane may later carry its own
@@ -10343,19 +10407,21 @@ impl App {
                         (0..n).map(|i| active_tab.pane_source(i).terminal().lock()).collect();
                     // Each pane letterboxes its own grid (#215); the focused
                     // one must come out equal to `focused_view_rect`, which is
-                    // the rectangle the pointer and IME believe.
-                    let rects: Vec<[f32; 4]> = bodies
-                        .iter()
-                        .zip(&terms)
-                        .map(|(b, t)| {
-                            crate::chrome::insets::letterbox(
-                                *b,
-                                t.grid().cols(),
-                                t.grid().rows(),
-                                metrics,
-                            )
-                        })
-                        .collect();
+                    // the rectangle the pointer and IME believe. The same
+                    // function answers both, so that is now a fact rather than
+                    // a comment — read here under the locks the panes are
+                    // rendered with, because a grid the reader thread resizes
+                    // mid-frame must not leave the viewport describing the
+                    // size it had a moment ago.
+                    let dims: Vec<(usize, usize)> =
+                        terms.iter().map(|t| (t.grid().cols(), t.grid().rows())).collect();
+                    let rects = crate::chrome::layout::pane_grid_rects(
+                        area,
+                        scale,
+                        self.config.padding,
+                        &dims,
+                        metrics,
+                    );
                     let preedit = self.ime.preedit().map(|p| {
                         zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                     });
@@ -10392,7 +10458,16 @@ impl App {
                                 // profile rather than two profiles.
                                 background,
                                 blocks: &bands[i],
-                                gutter: rects[i][0] - bodies[i][0],
+                                // Measured from the pane's *border*, not from
+                                // its body: the body is where the grid starts,
+                                // so that difference is the letterbox slack
+                                // alone — which a pane sized in whole cells
+                                // out of its own body makes exactly zero, and
+                                // a zero gutter is a rail nobody ever sees
+                                // (#460).
+                                gutter: crate::chrome::layout::pane_gutter(
+                                    frames[i], rects[i], scale,
+                                ),
                                 selection: terms[i].selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
                                 preedit: if focused { preedit } else { None },
@@ -10409,7 +10484,12 @@ impl App {
                                 ligatures: self.config.ligatures,
                                 cursor_shape: terms[i].cursor_style().shape,
                                 cursor_offset: if focused { cursor_offset_px } else { [0.0, 0.0] },
-                                row_map: if focused { fold_map.as_deref() } else { None },
+                                // Each pane's own folds: they are stored per
+                                // session address and survive a focus change,
+                                // so the pane the fold was made in must keep
+                                // drawing it after the focus moves on — and
+                                // its headers are placed through the same map.
+                                row_map: fold_maps.get(i).and_then(|m| m.as_deref()),
                             }
                         })
                         .collect();
@@ -10486,7 +10566,7 @@ impl App {
                             ligatures: self.config.ligatures,
                             cursor_shape: term.cursor_style().shape,
                             cursor_offset: cursor_offset_px,
-                            row_map: fold_map.as_deref(),
+                            row_map: fold_maps.first().and_then(|m| m.as_deref()),
                         }],
                         &chrome,
                     );
