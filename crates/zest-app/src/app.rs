@@ -10077,9 +10077,14 @@ impl App {
         // stored per session address, so a pane folded and then unfocused
         // would otherwise have its grid drawn unfolded while its headers were
         // placed through the fold view — the band on the wrong rows.
+        // Nothing reads these while a screen owns the pane: no terminal is
+        // built at all then, and `build_block_views` has already returned
+        // empty for the same reason. `fold_row_map` walks the grid, so this is
+        // the one of the two that is worth not doing per frame behind Settings.
         let fold_maps: Vec<Option<Vec<usize>>> = self
             .tabs
             .active()
+            .filter(|_| !pane_is_covered(self.screen, self.tabs.settings_active()))
             .map(|t| {
                 (0..pane_rects.len())
                     .map(|i| {
