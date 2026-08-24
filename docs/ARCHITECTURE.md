@@ -90,7 +90,7 @@ two reference decoders cell-for-cell equal against recorded sessions.
 | `crates/zest-cloud` | The one crate that owns rustls and HTTP: `TlsDuplex`, enrolment, relay dialling |
 | `crates/zest-fleet` | What a machine in the fleet is, how its two sources merge into one row, and the one rule that picks how to reach it. Pure; no discovery, no sockets |
 | `crates/zest-mcp` | Terminals as an agent's tools, over MCP on stdio (ADR-015) |
-| `xtask/` | The gates: `check-deps` plus schema / bindings / fixtures / web-export generation and checks |
+| `xtask/` | The gates: `check-deps`, `check-spawn`, plus schema / bindings / fixtures / web-export generation and checks |
 | `schemas/` | The generated settings JSON Schema |
 | `scripts/` | `worktree.mjs`, `apply-branch-protection.mjs`, `zesterm-dev` |
 | `clients/web/` | The browser client — a pnpm workspace of ten packages; proto/theme/input are hand-written with no runtime deps, sigx appears only in control/sidecar/app |

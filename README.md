@@ -99,6 +99,7 @@ Then, on either platform:
 ```
 cargo build --workspace
 cargo xtask check-deps
+cargo xtask check-spawn
 ```
 
 ## Theming

@@ -78,7 +78,10 @@ tungstenite = { version = "0.26", default-features = false, features = ["handsha
 # A dev-dependency because resolver 2 keeps dev-only features out of the normal
 # build -- shipping Win32_UI in the daemon to satisfy a test would be the tail
 # wagging the dog.
-windows-sys = { workspace = true, features = ["Win32_UI_Shell"] }
+# GetConsoleProcessList, for the console-membership test in spawn.rs (#461):
+# asking which processes are attached to *our* console is how a child that was
+# given one is told from a child that was not.
+windows-sys = { workspace = true, features = ["Win32_UI_Shell", "Win32_System_Console"] }
 
 [target.'cfg(unix)'.dependencies]
 # `flock` on the socket path, so two daemons starting at once cannot each

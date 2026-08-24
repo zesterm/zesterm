@@ -97,7 +97,11 @@ fn os_version() -> String {
     {
         // Exactly design §7's examples: "Darwin 24.5.0",
         // "Linux 6.8.0-31-generic".
-        std::process::Command::new("uname")
+        // `quiet_command` in an arm that only ever compiles on unix, where it
+        // adds nothing: the rule `check-spawn` holds is that shipped code has
+        // one door, and an exception granted because *this* arm cannot show a
+        // window is an exception the next arm inherits.
+        crate::spawn::quiet_command("uname")
             .arg("-sr")
             .output()
             .ok()

@@ -160,6 +160,40 @@ fn which(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file())
 }
 
+/// A [`Command`](std::process::Command) that will not put a window on screen.
+///
+/// # Why a plain `Command::new` is a bug on Windows (#461)
+///
+/// A console child inherits its parent's console -- and when the parent has
+/// **no** console, Windows does not skip the step. It allocates a fresh one,
+/// `conhost.exe` and a visible window included, and tears it down when the
+/// child exits. [`detached::spawn`] starts the daemon `DETACHED_PROCESS`
+/// precisely so it holds nobody's console, which makes *every* console child it
+/// spawns that case: [`crate::gitcmd`]'s `git status` runs for ~30ms behind an
+/// attach or a detach, and flashed a window every time.
+///
+/// Two things make it expensive to find. A daemon started by hand in a shell
+/// inherits that console and never flashes -- so the bug is absent from exactly
+/// the setup someone debugging it would build -- and the spawn is a background
+/// thread and two crates away from the gesture that triggered it.
+///
+/// `CREATE_NO_WINDOW` is the whole fix, and `cargo xtask check-spawn` is why
+/// this is the only door: call sites that each have to remember are how one of
+/// them forgets.
+#[must_use]
+pub fn quiet_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    // The `mut` is used on Windows only, and a `cfg` on the binding would mean
+    // writing the body twice.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// What [`spawn_detached`] hands back, and the only question anyone asks it.
 ///
 /// Not [`std::process::Child`]: the Windows arm no longer goes through
@@ -838,6 +872,141 @@ mod tests {
     #[ignore = "the child half of a_detached_child_inherits_nothing_of_ours"]
     fn a_child_that_only_stays_alive() {
         std::thread::sleep(CHILD_LIFETIME);
+    }
+
+    /// The pids attached to *this* process's console, or `None` if it has none.
+    ///
+    /// `GetConsoleProcessList` answers with the count when the buffer is too
+    /// small and writes nothing, so the retry is not optional -- a runner with
+    /// enough attached processes would otherwise read an untouched buffer of
+    /// zeros as "the child is not there", which is the answer the test is
+    /// looking for and would make it pass for the wrong reason.
+    #[cfg(windows)]
+    fn console_pids() -> Option<Vec<u32>> {
+        let mut buf = vec![0u32; 64];
+        loop {
+            // SAFETY: a valid buffer and its true length.
+            let n = unsafe {
+                windows_sys::Win32::System::Console::GetConsoleProcessList(
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                )
+            };
+            if n == 0 {
+                return None; // no console attached to this process at all
+            }
+            if n as usize <= buf.len() {
+                buf.truncate(n as usize);
+                return Some(buf);
+            }
+            buf = vec![0u32; n as usize];
+        }
+    }
+
+    /// #461: a child of ours must not be given a console.
+    ///
+    /// The observable works from a console-*owning* test binary, which is what
+    /// `cargo test` gives us, because the two cases differ either way: without
+    /// `CREATE_NO_WINDOW` the child joins our console, with it the child does
+    /// not.
+    ///
+    /// **What this measures is the flag, not the window, and the difference is
+    /// worth stating**: `CREATE_NO_WINDOW` does not stop the child having a
+    /// console, it stops that console having a window -- measured from a
+    /// console-less parent, a plain child's console reports a *visible* hwnd
+    /// and a `CREATE_NO_WINDOW` child's reports none at all. Reproducing that
+    /// here would mean calling `FreeConsole` in the test process, which is
+    /// process-global state mutated while libtest's pool is running -- #403's
+    /// umask lesson exactly. So this asserts the one thing that follows from
+    /// the flag and nothing else: a child that did not join our console was
+    /// created with it.
+    ///
+    /// **The control is the point.** An assertion that a pid is absent from a
+    /// list passes for any reason at all, including a list that was never
+    /// filled in; a second child spawned the unfixed way has to be *present* in
+    /// the same list before the absence means anything. That is the
+    /// `shutdown_probe` lesson -- cross the two cases before believing either.
+    #[cfg(windows)]
+    #[test]
+    fn a_quiet_child_gets_no_console_and_a_plain_one_gets_ours() {
+        /// Long enough to cover process start on a loaded runner, short enough
+        /// that a red run reports rather than hangs.
+        const PATIENCE: Duration = Duration::from_secs(5);
+
+        if console_pids().is_none() {
+            // Under a runner that hands the test binary no console there is
+            // nothing for a child to inherit and both arms would look alike.
+            eprintln!("skipping: this test binary owns no console");
+            return;
+        }
+
+        let me = std::env::current_exe().expect("a test binary knows its own path");
+        // The same stand-in the #412 test uses: this binary, re-running one
+        // ignored test that does nothing but stay alive long enough to be
+        // asked about.
+        let stand_in = |program: &mut std::process::Command| {
+            program
+                .args([
+                    "--exact",
+                    "--ignored",
+                    "--test-threads=1",
+                    "spawn::tests::a_child_that_only_stays_alive",
+                ])
+                // Null stdio only so the children's libtest chatter stays out
+                // of this run's output. It is not what decides console
+                // membership -- that is settled by the creation flags, at
+                // creation, which is the confusion `Stdio::null()` invited in
+                // #412.
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the stand-in")
+        };
+
+        let mut quiet = stand_in(&mut quiet_command(&me));
+        let mut plain = stand_in(&mut std::process::Command::new(&me));
+
+        // Wait for the *control* to show up: console membership is decided at
+        // CreateProcess, so once the unfixed child is listed, the fixed one
+        // either is too or never will be.
+        let started = Instant::now();
+        let mut saw_plain = false;
+        let mut saw_quiet = false;
+        while started.elapsed() < PATIENCE {
+            let pids = console_pids().unwrap_or_default();
+            saw_plain |= pids.contains(&plain.id());
+            saw_quiet |= pids.contains(&quiet.id());
+            if saw_plain {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        // Sample past the control for a beat, so "absent" is a property of the
+        // child rather than of the instant it was read at.
+        for _ in 0..8 {
+            saw_quiet |= console_pids().unwrap_or_default().contains(&quiet.id());
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let _ = quiet.kill();
+        let _ = quiet.wait();
+        let _ = plain.kill();
+        let _ = plain.wait();
+
+        assert!(
+            saw_plain,
+            "the control never joined our console, so this run measured nothing. A plain \
+             `Command::new` child inherits the parent's console; if it did not appear, the \
+             stand-in failed to start or died before it could be seen."
+        );
+        assert!(
+            !saw_quiet,
+            "#461: a child spawned through `quiet_command` joined our console, so it was created \
+             without CREATE_NO_WINDOW. In the daemon -- which holds no console at all, being \
+             DETACHED_PROCESS -- Windows answers that by allocating a fresh console, and a \
+             window flashes on screen for every `git status` the dirty probe runs."
+        );
     }
 
     fn tempdir() -> PathBuf {

@@ -329,36 +329,112 @@ pub fn native_control_inset(_window: &winit::window::Window) -> Option<(f64, f64
     None
 }
 
-/// Hand a file to the OS's default handler — "Edit as TOML" (design §11).
-///
-/// One call, fire-and-forget: the settings tab must not block on an editor,
-/// and a handler that fails does so in the OS's own UI. `cmd /c start` on
-/// Windows (`start` is a cmd built-in, not a program), `open` on macOS,
-/// `xdg-open` elsewhere.
 /// Hand a URL to the default browser — the sign-in hand-off's approval page
 /// (#226). [`open_path`]'s per-OS table with a string argument: a URL is not
 /// a filesystem path, and shoving one through a `Path` invites separator
-/// rewriting on exactly the platform (`cmd /c start`) where it matters.
+/// rewriting on exactly the platform where it matters.
 pub fn open_url(url: &str) {
     if !url_is_shell_safe(url) {
         tracing::warn!(url, "refusing to open a URL a shell could reparse");
         return;
     }
     #[cfg(windows)]
-    // The empty quoted argument is start's window title slot — open_path's
-    // note; and `start` is the one launcher that hands a URL scheme to the
-    // browser rather than the shell.
-    let result = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(url).spawn();
-    if let Err(e) = result {
-        tracing::warn!(error = %e, url, "could not open the browser");
+    shell_open(std::ffi::OsStr::new(url), "browser");
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let result = zest_daemon::spawn::quiet_command("open").arg(url).spawn();
+        #[cfg(not(target_os = "macos"))]
+        let result = zest_daemon::spawn::quiet_command("xdg-open").arg(url).spawn();
+        if let Err(e) = result {
+            tracing::warn!(error = %e, url, "could not open the browser");
+        }
+    }
+}
+
+/// Hand something to the OS's default handler, off this thread.
+///
+/// `ShellExecuteW` rather than the `cmd /c start` this used to be, for three
+/// reasons that all point the same way. It is the call `cmd` makes internally,
+/// so the shell was a whole process of overhead on the way to it. It takes the
+/// target as an *argument* rather than as text something re-parses, which is
+/// #403's constructive half and the reason [`url_is_shell_safe`] is now a
+/// second fence rather than the only one. And `cmd.exe` is a console program:
+/// launched from a GUI-subsystem binary that owns no console — which is what
+/// zesterm is when Explorer starts it — Windows mints a console for it and
+/// flashes a window on screen (#461).
+///
+/// On a thread of its own because it blocks while the OS resolves the handler,
+/// and a cold browser start is not fast; a click that opens a link must not
+/// stall the frame. COM is initialized there because the handlers this reaches
+/// are COM objects, apartment-threaded as a UI launch expects — and this thread
+/// exists to be that apartment, which is why it is not the winit one.
+#[cfg(windows)]
+fn shell_open(target: &std::ffi::OsStr, what: &'static str) {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let wide: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
+    let described = target.to_string_lossy().into_owned();
+    let spawned = std::thread::Builder::new().name("zesterm-shell-open".into()).spawn(move || {
+        use windows_sys::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        // "open" as UTF-16, NUL-terminated. The default verb would do for a URL
+        // and is not the same thing for a file: a `.ps1` whose default verb is
+        // "edit" must still open in an editor, and naming the verb says so.
+        const OPEN: [u16; 5] = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+
+        // The cast is windows-sys 0.60's own inconsistency, not a conversion:
+        // `COINIT_APARTMENTTHREADED` is typed `COINIT` (an i32) while the
+        // generated `CoInitializeEx` takes a `u32`. Both are the same two bits
+        // at the ABI, so `as` is exact -- `try_into().unwrap()` would only add
+        // a panic to a value that is a constant.
+        // SAFETY: a fresh thread that has not initialized COM.
+        let com = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        // SAFETY: both strings are NUL-terminated and live across the call; the
+        // remaining pointers are documented as optional.
+        let rc = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                OPEN.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // Documented as "a value greater than 32 on success" -- the return is a
+        // legacy HINSTANCE and the small values are error codes wearing one.
+        if rc as isize <= 32 {
+            tracing::warn!(code = rc as isize, target = %described, "could not open the {what}");
+        }
+        // Every *success* is balanced, not just `S_OK`. `S_FALSE` means this
+        // thread already had an apartment -- it is still a success, and it
+        // still took a reference, so skipping the release there leaks one.
+        // (It cannot happen on a thread we just created and initialized first
+        // thing; balancing on the contract rather than on that reasoning is
+        // what keeps the next edit correct.) A *failure* -- notably
+        // `RPC_E_CHANGED_MODE` -- took no reference and must not be released.
+        if com >= 0 {
+            // SAFETY: paired with the successful CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "no thread to open the {what} on");
     }
 }
 
 /// Whether a URL may be handed to a launcher that re-parses what it is given.
+///
+/// **Now a second fence rather than the only one** (#461): [`shell_open`] hands
+/// `ShellExecuteW` the URL as an argument, so nothing re-parses it and none of
+/// the characters below are metacharacters any more. It is kept because a
+/// launcher is a place worth being narrow at, and because the scheme check is
+/// the half that was never about `cmd`. What follows is why it was written.
 ///
 /// `cmd /c start` is a shell: `&`, `|`, `<`, `>`, `^` and `%` are
 /// metacharacters there, so a URL carrying one is a second command or a
@@ -382,20 +458,30 @@ fn url_is_shell_safe(url: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || "\"'`&|<>^%".contains(c))
 }
 
+/// Hand a file to the OS's default handler — "Edit as TOML" (design §11).
+///
+/// One call, fire-and-forget: the settings tab must not block on an editor,
+/// and a handler that fails does so in the OS's own UI. [`shell_open`] on
+/// Windows, `open` on macOS, `xdg-open` elsewhere. (This paragraph sat above
+/// [`open_url`] until #461 — two doc comments had run together, so the item it
+/// describes had none.)
 pub fn open_path(path: &std::path::Path) {
     #[cfg(windows)]
-    // The empty quoted argument is start's window title slot: without it a
-    // quoted *path* is parsed as the title and nothing opens.
-    let result = std::process::Command::new("cmd")
-        .args(["/c", "start", ""])
-        .arg(path)
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(path).spawn();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(path).spawn();
-    if let Err(e) = result {
-        tracing::warn!(error = %e, path = %path.display(), "could not open the file externally");
+    shell_open(path.as_os_str(), "file");
+    #[cfg(not(windows))]
+    {
+        // Through `quiet_command` even here, where there is no console to
+        // suppress: the rule `cargo xtask check-spawn` enforces is that shipped
+        // code never calls `Command::new` itself, and an exception carved out
+        // for a file whose Windows arm happens not to need one today is an
+        // exception the next Windows arm inherits.
+        #[cfg(target_os = "macos")]
+        let result = zest_daemon::spawn::quiet_command("open").arg(path).spawn();
+        #[cfg(not(target_os = "macos"))]
+        let result = zest_daemon::spawn::quiet_command("xdg-open").arg(path).spawn();
+        if let Err(e) = result {
+            tracing::warn!(error = %e, path = %path.display(), "could not open the file externally");
+        }
     }
 }
 

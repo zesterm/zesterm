@@ -25,7 +25,7 @@
 //! the `git` on their `PATH` — worktrees, `includeIf`, and hook-driven state
 //! all being places it could.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// How long any one `git` invocation gets.
@@ -54,7 +54,10 @@ pub struct GitRun {
 pub fn run_git(dir: &str, args: &[&str], cap: u64, deadline: Duration) -> Option<GitRun> {
     use std::io::Read as _;
 
-    let mut child = Command::new("git")
+    // Through `quiet_command`, never `Command::new`: the daemon holds no
+    // console, so on Windows a plain spawn makes one -- a real window, for a
+    // process that lives 30ms, on the attach/detach path (#461).
+    let mut child = crate::spawn::quiet_command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
