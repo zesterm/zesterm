@@ -732,7 +732,18 @@ fn check_spawn() -> ExitCode {
         if SPAWN_ALLOWED.iter().any(|(allowed, _)| *allowed == rel) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        // A file this gate cannot read is a file it does not check, and a
+        // gate with a silent skip in it reports green for the one case it was
+        // built to catch. Louder than it needs to be on purpose: Rust source
+        // is UTF-8 by definition, so this only fires on something genuinely
+        // wrong with the checkout.
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                violations.push(format!("{rel}: could not be read ({e}), so it was not checked"));
+                continue;
+            }
+        };
         scanned += 1;
         for (n, line) in text.lines().enumerate() {
             // A top-level `#[cfg(test)]` opens the test module; everything

@@ -411,10 +411,14 @@ fn shell_open(target: &std::ffi::OsStr, what: &'static str) {
         if rc as isize <= 32 {
             tracing::warn!(code = rc as isize, target = %described, "could not open the {what}");
         }
-        // Only when we were the ones who initialized it: a failed
-        // CoInitializeEx must not be balanced, and S_FALSE means somebody else
-        // already had this apartment.
-        if com == 0 {
+        // Every *success* is balanced, not just `S_OK`. `S_FALSE` means this
+        // thread already had an apartment -- it is still a success, and it
+        // still took a reference, so skipping the release there leaks one.
+        // (It cannot happen on a thread we just created and initialized first
+        // thing; balancing on the contract rather than on that reasoning is
+        // what keeps the next edit correct.) A *failure* -- notably
+        // `RPC_E_CHANGED_MODE` -- took no reference and must not be released.
+        if com >= 0 {
             // SAFETY: paired with the successful CoInitializeEx above.
             unsafe { CoUninitialize() };
         }
