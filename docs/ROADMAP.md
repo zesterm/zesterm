@@ -80,6 +80,11 @@ the history behind them is in closed issues and PRs.
       tab does, as its primary). Per-pane scroll wheel routing is still the
       focused pane's (`hit::wheel_target` swallows the rest), and a pane on a
       relayed host has no dial hint for restore, like a relayed tab.
+      Every pane draws its block state since #460 — the rail down each block
+      and a header band with it — but only the focused pane's is
+      *interactive*: hover, the ⋯ menu, fold and rail-click all belong to it,
+      because an unfocused pane's whole frame is one click-to-focus target and
+      block ids are per session, so two panes can name the same one.
 - [ ] Background pictures after #450: the pipeline, the three `window.background_*`
       keys and their rows in Settings and the profiles editor are in, but the
       row is a path *text field* — #144's `<image-slot>` drop target and the OS

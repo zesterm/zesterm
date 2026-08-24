@@ -17,7 +17,13 @@ use crate::instance::{
 /// The block rail's width, physical px. Matches the header band's own rail
 /// (`chrome::blocks::RAIL`) so the two read as one rule down the block —
 /// they are drawn in different layers and cannot share a constant.
-const RAIL_PX: f32 = 2.0;
+///
+/// Public because it is also the *threshold*: below this much
+/// [`Viewport::gutter`] there is nowhere honest to put the rail and it is
+/// silently not drawn, so whoever computes a gutter has to be able to assert
+/// against the number rather than a copy of it. A split pane's gutter was 0.0
+/// by construction for exactly as long as no test could say so (#460).
+pub const RAIL_PX: f32 = 2.0;
 
 /// Breathing room between the rail and the first column, physical px. Without
 /// it the rail reads as a left border on the text rather than as the block's
