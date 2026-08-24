@@ -9,7 +9,7 @@ history, closed PRs and closed issues keep the record.
 
 ## Status
 
-All seven gates green (see `AGENTS.md` § The gates). First paint 35ms **on
+All eight gates green (see `AGENTS.md` § The gates). First paint 35ms **on
 Windows**; the Mac paints against a different compositor and its number (48ms)
 is reported rather than gated.
 

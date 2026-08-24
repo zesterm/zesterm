@@ -81,6 +81,14 @@ jobs:
       # implementation instead of three that drift.
       - run: cargo run -p xtask -- check-deps
 
+      - name: Nothing shipped calls Command::new directly
+        # A child spawned without CREATE_NO_WINDOW by a parent that holds no
+        # console -- which the daemon is, being DETACHED_PROCESS -- makes
+        # Windows allocate one, so a `git status` behind an attach flashes a
+        # window. Checked on Linux because it is a source rule, and needed most
+        # by the two platforms that cannot see the symptom.
+        run: cargo run -p xtask -- check-spawn
+
       # The settings JSON Schema is what the web and phone settings UIs are
       # generated from. A stale one means a setting exists here and nowhere else.
       - run: cargo run -p xtask -- check-schema

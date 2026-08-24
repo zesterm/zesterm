@@ -64,7 +64,7 @@ Never commit straight to `main`.**
    it occupies `<repo>/main`, which parallel sessions share.
 
 3. **Implement & verify.** For a bug fix, failing test first — see "Test-first
-   bug fixes" under Conventions. Either way, prove the change: the seven gates
+   bug fixes" under Conventions. Either way, prove the change: the eight gates
    below, plus the TypeScript suite if you touched `clients/web/` or any type on
    the wire, plus the `cloud/` suite if you touched `cloud/`.
 
@@ -187,12 +187,13 @@ first anyway.
 
 ## The gates
 
-All seven must pass before you call something done:
+All eight must pass before you call something done:
 
 ```
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask check-deps
+cargo xtask check-spawn
 cargo xtask check-schema
 cargo xtask check-bindings
 cargo xtask check-fixtures
@@ -204,6 +205,11 @@ reason that keeps them apart: a **Rust-only** change to `zest-config` or
 `zest-theme` breaks it. The settings schema, the walked UI fields and the
 built-in themes are generated into `clients/web/`, so editing a theme's hex or
 adding a setting leaves them stale with nothing else to notice.
+
+`check-spawn` is in it for the mirror-image reason: it catches a **Windows-only**
+symptom from source that reads fine, so the two platforms that cannot see the
+window flashing are exactly the ones that need telling. See "A console-less
+parent mints a console" under Traps.
 
 And, **if you touched `clients/web/` or any type on the wire**, the TypeScript
 suite too. It is not in the list above on purpose: a Rust-only change that passes
@@ -304,6 +310,7 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo xtask check-deps
+cargo xtask check-spawn
 cargo build -p zest-core --no-default-features --target wasm32-unknown-unknown
 
 cargo xtask schema                             # regenerate the settings JSON Schema
@@ -542,6 +549,29 @@ you need before you trip on it.
 
 ### Subprocesses and paths
 
+- **A console-less parent mints a console for every console child it spawns.**
+  A child inherits the parent's console; a parent that has none does not make
+  the step go away, it makes Windows allocate a fresh console — `conhost.exe`
+  and a real window — and tear it down when the child exits. The daemon is
+  `DETACHED_PROCESS` on purpose (#412), so *every* console child it spawns is
+  that case: the context engine's `git status` runs for ~30ms behind an attach
+  or a detach and flashed a window each time, which reads as the terminal
+  spawning something it shouldn't. `CREATE_NO_WINDOW` is the whole fix — and it
+  withholds the *window*, not the console: measured from a console-less parent,
+  a plain child's console reports a visible hwnd and a `CREATE_NO_WINDOW`
+  child's reports none, both children having a console either way. So the
+  committed test asserts the flag's other consequence, that the child did not
+  join *our* console; measuring the window needs a `FreeConsole` in the test
+  process, which is #403's process-global trap.
+  Two things hid it. **A daemon started by hand in a shell inherits that
+  console and never flashes**, so the bug is absent from exactly the setup
+  someone debugging it would build — the `shutdown_probe` shape again, where
+  what the *other* side is doing decides what you can observe. And the spawn is
+  a background thread and two crates away from the gesture that triggered it.
+  One door, `zest_daemon::spawn::quiet_command`, and `cargo xtask check-spawn`
+  so the next call site cannot forget; `zest-app`'s `cmd /c start` was the same
+  bug wearing a launcher, and became `ShellExecuteW` — the call `cmd` was
+  loading a whole process to make. (#461)
 - **`git` speaks its own path dialect on Windows, and it is not the one
   `canonicalize` speaks.** `rev-parse --show-toplevel` answers
   `C:/Users/…`; `std::fs::canonicalize` answers `\\?\C:\Users\…`. Same

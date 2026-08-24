@@ -226,6 +226,7 @@ fn main() -> ExitCode {
     let cmd = std::env::args().nth(1);
     match cmd.as_deref() {
         Some("check-deps") => check_deps(),
+        Some("check-spawn") => check_spawn(),
         Some("schema") => write_schema(false),
         Some("check-schema") => write_schema(true),
         Some("check-bindings") => check_bindings(),
@@ -249,6 +250,7 @@ fn usage() {
     eprintln!(
         "usage: cargo xtask <command>\n\ncommands:\n  \
          check-deps     verify crate boundary invariants\n  \
+         check-spawn    verify nothing shipped calls Command::new directly\n  \
          schema         regenerate {SCHEMA_PATH}\n  \
          check-schema   fail if {SCHEMA_PATH} is stale\n  \
          check-bindings fail if {BINDINGS_DIR} is stale\n  \
@@ -674,6 +676,114 @@ fn check_deps() -> ExitCode {
              code to a crate above the boundary rather than relaxing the rule."
         );
         ExitCode::FAILURE
+    }
+}
+
+/// Files that may still call `Command::new` directly, each with its reason.
+///
+/// An allow-list rather than a suppression comment for the reason `check_deps`
+/// keeps its rules in one array: the exceptions are then a list somebody can
+/// read in ten seconds and argue with, instead of a property of the code that
+/// has to be discovered by grepping for it.
+const SPAWN_ALLOWED: &[(&str, &str)] = &[
+    (
+        "crates/zest-daemon/src/spawn.rs",
+        "quiet_command is here, and so is the unix arm of spawn_detached, whose \
+         pre_exec setsid has no Windows counterpart to get wrong",
+    ),
+    (
+        "crates/zest-pty/src/unix.rs",
+        "unix by filename -- a console is a Windows concept, and the Windows pty \
+         spawns through ConPTY, which gives its child a pseudoconsole and no window",
+    ),
+];
+
+/// Shipped code spawns through `zest_daemon::spawn::quiet_command`, not
+/// `Command::new` (#461).
+///
+/// # What it is protecting
+///
+/// A console child inherits its parent's console, and a parent with *no*
+/// console makes Windows mint one -- `conhost.exe` and a window on screen --
+/// rather than skip the step. The daemon is `DETACHED_PROCESS` by design, so
+/// every console child it spawns is that case: `git status` behind an attach
+/// flashed a window for 30ms, and the app's `cmd /c start` did the same from
+/// Explorer. `CREATE_NO_WINDOW` fixes it, and the reason this is a gate rather
+/// than a comment is that the fix has to be remembered at *every* spawn, by
+/// people on two platforms where three of the four cannot see the symptom.
+///
+/// # What it does not reach
+///
+/// The spelling, not the semantics: a `use std::process::Command as Cmd` would
+/// walk straight past. It also stops at `crates/*/src` -- `xtask`, examples,
+/// benches and `tests/` directories are dev tools run from a shell, which has
+/// a console to inherit, and a flash there is nobody's bug. Same for a file's
+/// test module: the cut is the first `#[cfg(test)]` at column 0, which is how
+/// this workspace spells a trailing `mod tests` and nothing else.
+fn check_spawn() -> ExitCode {
+    let mut files = Vec::new();
+    collect_rs(std::path::Path::new("crates"), &mut files);
+    files.sort();
+
+    let mut violations = Vec::new();
+    let mut scanned = 0usize;
+    for path in &files {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if SPAWN_ALLOWED.iter().any(|(allowed, _)| *allowed == rel) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        scanned += 1;
+        for (n, line) in text.lines().enumerate() {
+            // A top-level `#[cfg(test)]` opens the test module; everything
+            // below it runs in a binary that has a console of its own.
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue; // naming the call in prose is not making it
+            }
+            if code.contains("Command::new(") {
+                violations.push(format!("{rel}:{}: {}", n + 1, code));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        println!("check-spawn: {scanned} files spawn through quiet_command or not at all");
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("check-spawn: {} direct Command::new call(s) in shipped code", violations.len());
+    for v in &violations {
+        eprintln!("  - {v}");
+    }
+    eprintln!(
+        "\nUse `zest_daemon::spawn::quiet_command`, which stamps CREATE_NO_WINDOW on\n\
+         Windows. Without it a child spawned by the daemon -- which holds no console,\n\
+         being DETACHED_PROCESS -- makes Windows allocate one, and a console window\n\
+         flashes on screen for the life of the child (#461). If the call genuinely\n\
+         cannot show a window, add it to SPAWN_ALLOWED with the reason."
+    );
+    ExitCode::FAILURE
+}
+
+/// Every `*.rs` under `dir`, recursively.
+fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if path.is_dir() {
+            // Dev tools, not shipped code -- see `check_spawn`'s doc comment.
+            if matches!(name.as_ref(), "tests" | "examples" | "benches" | "target") {
+                continue;
+            }
+            collect_rs(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
     }
 }
 

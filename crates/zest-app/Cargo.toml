@@ -86,4 +86,9 @@ windows-sys = { workspace = true, features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    # ShellExecuteW, and the COM apartment its handlers are resolved in: how a
+    # URL or a file reaches its default handler without a `cmd` process and the
+    # console window that comes with one (#461). See `platform::shell_open`.
+    "Win32_UI_Shell",
+    "Win32_System_Com",
 ] }
