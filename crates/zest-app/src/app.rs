@@ -14116,6 +14116,21 @@ async fn init_gpu(
         // #468 was. Naming the compiled set beside the tried set is what makes
         // a missing driver tell itself apart from a missing cargo feature.
         let compiled = wgpu::Instance::enabled_backend_features();
+        // The driver advice is per-platform because the panic is not: a
+        // headless CI runner reaches it on every OS, and Arch package names
+        // are noise on a Mac.
+        let advice = if cfg!(target_os = "macos") {
+            "Metal is the only backend here; a machine that cannot provide it \
+             is usually a VM or a session with no window server."
+        } else if cfg!(windows) {
+            "Install or update the GPU driver; `ZESTERM_BACKEND=vulkan|dx12` \
+             forces a single backend."
+        } else {
+            "Install a Vulkan ICD (mesa's `vulkan-radeon` / `vulkan-intel` / \
+             `nvidia-utils`, or `vulkan-swrast` for a software one), or a GL \
+             driver for the GL rung; `ZESTERM_BACKEND=vulkan|gl` forces a \
+             single backend."
+        };
         panic!(
             "no suitable GPU adapter.\n\
              tried, in order: {preferred:?}\n\
@@ -14123,9 +14138,7 @@ async fn init_gpu(
              A backend listed above but missing from the compiled set can never \
              produce an adapter -- that is a build configuration bug, not a \
              driver problem. Otherwise this machine has no driver for any of \
-             them; on Linux, install a Vulkan ICD (mesa's `vulkan-radeon` / \
-             `vulkan-intel` / `nvidia-utils`, or `vulkan-swrast` for a software \
-             one). `ZESTERM_BACKEND=vulkan|gl|dx12` forces a single backend."
+             them. {advice}"
         );
     };
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "adapter");

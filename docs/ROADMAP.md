@@ -134,7 +134,8 @@ the history behind them is in closed issues and PRs.
 ### Unix hosts
 
 - [ ] The remaining macOS polish tail.
-- [x] **Linux: the Vulkan surface** (#468). It works, on Wayland and X11, and
+- [x] **Linux: the Vulkan surface, and the GL rung behind it** (#468). The
+      surface works, on Wayland and X11, and
       the measured `alpha_modes` for both are now rows in ADR-003 — where the
       whole table had been Windows adapters. What was actually broken was the
       *fallback*: `init_gpu` offered `[VULKAN, GL]` while `zest-render-wgpu`

@@ -195,8 +195,9 @@ Probe results on the development machine (Windows 11, hybrid graphics):
 | Dx12 | Microsoft Basic Render Driver | `Opaque` |
 
 Measured later on Linux (Arch, Hyprland/wlroots, Hyper-V VM with no GPU, so
-Mesa's **lavapipe** software Vulkan — the adapter is irrelevant to what the
-*window system* offers, which is what this table is about):
+Mesa's **lavapipe** software Vulkan, which wgpu reports under its Gallium
+driver name `llvmpipe` — the adapter is irrelevant to what the *window system*
+offers, which is what this table is about):
 
 | Session | Backend | Adapter | `alpha_modes` |
 |---|---|---|---|
