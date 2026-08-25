@@ -2,10 +2,8 @@
 
 struct Globals {
     target_size: vec2<f32>,
-    grid_origin: vec2<f32>,
     text_gamma: f32,
     text_contrast: f32,
-    _pad: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;

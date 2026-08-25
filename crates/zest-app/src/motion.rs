@@ -83,6 +83,25 @@ impl Spring {
         self.value += delta;
     }
 
+    /// Cap how far behind the value is allowed to fall, either side of zero.
+    ///
+    /// A debt is only worth carrying while something can *draw* it. The scroll
+    /// spring's is drawn by displacing the grid, and the renderer covers what
+    /// that displacement exposes with a fixed number of overscan rows
+    /// (`zest_render_wgpu::scene`'s `OVERSCAN`) — so a debt past that tears a
+    /// band the grid has nothing to fill.
+    ///
+    /// It is the better motion regardless: a spring holding three rows is three
+    /// rows behind the wheel, and lagging the input is what reads as the
+    /// terminal failing to keep up rather than as easing.
+    ///
+    /// The velocity is deliberately left alone. A fast spin should still arrive
+    /// fast; it just should not arrive from further away than can be shown.
+    pub fn clamp_to(&mut self, max: f32) {
+        let max = if max.is_finite() { max.abs() } else { return };
+        self.value = self.value.clamp(-max, max);
+    }
+
     /// Give up on animating and be there now.
     ///
     /// Used when motion is switched off, when the OS asks for reduced motion,
@@ -176,6 +195,37 @@ mod tests {
             }
         }
         panic!("a spring that never stops is the bug this module exists to prevent");
+    }
+
+    #[test]
+    fn a_clamped_spring_never_holds_more_debt_than_can_be_drawn() {
+        // The scroll spring's debt is drawn by displacing the grid, and the
+        // renderer covers what that exposes with one overscan row. A notch is
+        // typically three rows and notches accumulate, so without the clamp the
+        // grid is drawn several rows from where it belongs and there is nothing
+        // to fill the band — and the motion lags the wheel by that much, which
+        // reads as the terminal failing to keep up rather than as easing.
+        let mut s = Spring::at(0.0);
+        s.nudge(3.0);
+        s.clamp_to(1.0);
+        assert_eq!(s.value(), 1.0, "three rows of debt is capped at one");
+
+        // Both directions: scrolling the other way displaces the other way.
+        s.nudge(-5.0);
+        s.clamp_to(1.0);
+        assert_eq!(s.value(), -1.0);
+
+        // And a debt already inside the cap is left exactly alone, or every
+        // notch would round the motion up to a full row.
+        s.snap_to(0.0);
+        s.nudge(0.25);
+        s.clamp_to(1.0);
+        assert_eq!(s.value(), 0.25);
+
+        // A non-finite cap sanitizes nothing, so it must not be applied: a
+        // NaN bound would erase the value through `clamp`.
+        s.clamp_to(f32::NAN);
+        assert_eq!(s.value(), 0.25, "a bound that is not a number bounds nothing");
     }
 
     #[test]

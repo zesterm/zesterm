@@ -571,10 +571,8 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&Globals {
                 target_size: [w as f32, h as f32],
-                grid_origin: scene.grid_origin,
                 text_gamma: self.tuning.gamma,
                 text_contrast: self.tuning.contrast,
-                _pad: [0.0; 2],
             }),
         );
         self.rects.upload(device, queue, bytemuck::cast_slice(&scene.rects));
@@ -1429,7 +1427,7 @@ mod tests {
             color: LinearRgba::opaque(0xFF, 0xFF, 0xFF),
             clip: [0.0, 0.0, 4.0, 4.0],
             layer: u32::from(e.layer),
-            flags: crate::glyph_flags::FIXED,
+            flags: 0,
         });
         scene.chrome_glyphs_at = scene.glyphs.len();
 
@@ -1585,16 +1583,26 @@ mod tests {
     }
 
     #[test]
-    fn shader_fixed_flag_matches_the_instance_flag() {
-        // The vertex shader decides scroll-exemption by this bit. If the Rust
-        // constant moves, chrome text silently starts scrolling with the grid
-        // -- a bug that only appears once smooth scrolling ships.
-        let src = include_str!("shaders/glyph.wgsl");
-        let expected = format!("const FLAG_FIXED: u32 = {}u;", super::glyph_flags::FIXED);
-        assert!(
-            src.contains(&expected),
-            "glyph.wgsl FLAG_FIXED is out of sync with glyph_flags::FIXED; expected `{expected}`"
-        );
+    fn no_shader_reads_a_scroll_offset_from_the_uniform() {
+        // There used to be a `grid_origin` in `Globals` that `glyph.wgsl` and
+        // `decor.wgsl` added to their geometry and `rect.wgsl` never did, so
+        // text sheared off the colour under it for the length of every scroll
+        // spring. The debt is folded into the grid's own origin on the CPU now
+        // (`scene::grid_origin`), and the way that stays true is that there is
+        // nowhere else for it to live: a shader reaching for a second origin
+        // would be re-opening the same two-homes bug (#467).
+        for (name, src) in [
+            ("common.wgsl", include_str!("shaders/common.wgsl")),
+            ("glyph.wgsl", include_str!("shaders/glyph.wgsl")),
+            ("decor.wgsl", include_str!("shaders/decor.wgsl")),
+            ("rect.wgsl", include_str!("shaders/rect.wgsl")),
+        ] {
+            assert!(
+                !src.contains("globals.grid_origin"),
+                "{name} reads a scroll offset from the uniform; the debt belongs to one place, \
+                 and that place is the grid's own origin on the CPU"
+            );
+        }
     }
 
     #[test]

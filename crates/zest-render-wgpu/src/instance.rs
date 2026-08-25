@@ -148,11 +148,12 @@ impl RectInstance {
 pub mod glyph_flags {
     /// Sample the colour texture rather than the coverage mask.
     pub const COLOR: u32 = 1 << 0;
-    /// Ignore `Globals::grid_origin`: this glyph belongs to the chrome and must
-    /// hold still while the grid smooth-scrolls beneath it. The origin is a
-    /// global uniform, not per-instance state, so without this bit tab titles
-    /// would ride the scroll offset the moment `scroll_px` becomes nonzero.
-    pub const FIXED: u32 = 1 << 1;
+    // There was a `FIXED` bit here, for chrome text to opt out of a
+    // `Globals::grid_origin` the vertex shader added. The smooth-scroll debt is
+    // folded into the grid's own origin on the CPU now, so a glyph's `pos`
+    // already says where it goes and there is nothing to opt out of — which is
+    // also what stopped the rects, which had no such bit, shearing off the text
+    // (#467).
 }
 
 /// One instance for the glyph pipeline.
@@ -273,17 +274,10 @@ impl ImageInstance {
 pub struct Globals {
     /// Target size in physical pixels, for the pixel-to-clip transform.
     pub target_size: [f32; 2],
-    /// Sub-row scroll offset in pixels.
-    ///
-    /// Smooth scrolling translates grid geometry in the vertex shader and
-    /// renders one extra row, rather than blitting or maintaining a scroll
-    /// texture. Chrome instances pass 0.
-    pub grid_origin: [f32; 2],
     /// Stem-darkening exponent applied at resolve. Light-on-dark text needs
     /// meaningfully more than dark-on-light, which is why it is a knob.
     pub text_gamma: f32,
     pub text_contrast: f32,
-    pub _pad: [f32; 2],
 }
 
 #[cfg(test)]
