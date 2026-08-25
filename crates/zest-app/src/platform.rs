@@ -9,8 +9,11 @@
 /// `with_window_icon` cannot rescue it (winit ignores that on Wayland). Window
 /// rules -- Hyprland's `windowrule`, KWin's -- have nothing to match on either.
 ///
-/// One lowercase spelling for both, matching the binary, the window title and
-/// `packaging/linux/zesterm.desktop`. Deliberately *not* X11's capitalized
+/// One lowercase spelling for both, matching the binary and the window title.
+/// A desktop entry does not exist yet (Linux packaging is still open on #9);
+/// when it does, its basename, its `Icon=` and its `StartupWMClass=` must all
+/// be this string, or the icon lookup finds nothing.
+/// Deliberately *not* X11's capitalized
 /// convention (`("zesterm", "Zesterm")`): Hyprland matches `class:` against the
 /// app_id for a Wayland window and against WM_CLASS's *class* for an XWayland
 /// one, so two spellings is a rule that works in one session and silently does
