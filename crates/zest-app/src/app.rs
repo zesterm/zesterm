@@ -93,10 +93,13 @@ pub struct Config {
     pub padding: u32,
     /// The strip's own alpha, independent of the grid's (ADR-003).
     pub chrome_opacity: f32,
-    /// Draw our own titlebar: no OS caption, caption buttons and resize edges
-    /// out of the chrome's own layout pass. Resolved from the tri-state
-    /// setting here, so nothing downstream has to know what `Auto` means.
-    pub custom_chrome: bool,
+    /// Who draws the window frame, resolved once from the tri-state setting.
+    ///
+    /// A type rather than a `bool` because the two questions asked of it --
+    /// "does the system decorate?" and "do we draw a caption?" -- were
+    /// separately decided and could disagree, which is exactly the window
+    /// wearing two titlebars (#472).
+    pub chrome: crate::window_chrome::WindowChrome,
     /// What the compositor puts behind the window (Mica and friends).
     pub backdrop: zest_config::settings::Backdrop,
     /// Picture drawn behind the cells; empty draws none. A relative path
@@ -220,15 +223,13 @@ impl From<&zest_config::Settings> for Config {
             opacity: s.window.opacity.clamp(0.0, 1.0),
             padding: s.window.padding.min(64),
             chrome_opacity: s.window.chrome_opacity.clamp(0.0, 1.0),
-            // `Auto` means borderless on Windows and nowhere else. macOS
-            // already gets its integrated look from the transparent
-            // full-size titlebar, which is strictly better than borderless
-            // there (WS-C2); Linux has no implementation yet.
-            custom_chrome: match s.window.custom_chrome {
-                zest_config::settings::CustomChrome::On => true,
-                zest_config::settings::CustomChrome::Off => false,
-                zest_config::settings::CustomChrome::Auto => cfg!(windows),
-            },
+            // The whole matrix, and the reasons for it, live on
+            // `WindowChrome::resolve` -- including why `Auto` defers to the
+            // compositor on unix rather than guessing.
+            chrome: crate::window_chrome::WindowChrome::resolve(
+                s.window.custom_chrome,
+                crate::window_chrome::Host::current(),
+            ),
             backdrop: s.window.backdrop,
             background_image: s.window.background_image.clone(),
             background_fit: s.window.background_fit,
@@ -5177,7 +5178,9 @@ impl App {
     /// window would have no titlebar, no caption buttons and nothing to drag —
     /// an undecorated rectangle with no way to move, maximize or close it.
     fn strip_shown(&self) -> bool {
-        self.config.custom_chrome || self.config.tabs.show_single_tab || self.tabs.len() > 1
+        self.config.chrome.draws_caption()
+            || self.config.tabs.show_single_tab
+            || self.tabs.len() > 1
     }
 
     fn mark_chrome_dirty(&mut self) {
@@ -5778,11 +5781,11 @@ impl App {
                 .then(|| platform::native_control_inset(window))
                 .flatten()
                 .map(|(x, y)| [x as f32 * scale, y as f32 * scale]),
-            drawn_caption: self.config.custom_chrome && !fullscreen,
+            drawn_caption: self.config.chrome.draws_caption() && !fullscreen,
             maximized: window.is_maximized(),
             // A maximized window that resized from its edge would un-maximize
             // under the pointer, which is not what the drag meant.
-            resizable_edges: self.config.custom_chrome
+            resizable_edges: self.config.chrome.draws_caption()
                 && !fullscreen
                 && !window.is_maximized(),
         };
@@ -11390,10 +11393,16 @@ impl ApplicationHandler<Wakeup> for App {
             .then(|| self.window_size_in_cells(el))
             .flatten();
 
-        let mut attrs = Window::default_attributes()
+        let attrs = Window::default_attributes()
             .with_title("zesterm")
+            // The cross-platform builder, deliberately: this is the whole of
+            // the Linux decoration story, and putting it here is what stops
+            // `drawn_caption` and the system frame being decided separately
+            // -- which is how the window came to wear two of them (#472).
+            .with_decorations(self.config.chrome.decorations())
             .with_transparent(self.config.opacity < 1.0)
             .with_visible(false);
+        let mut attrs = platform::identify(attrs);
         attrs = match (self.screenshot.as_ref(), early.as_ref()) {
             // `--screenshot-size` is an explicit instruction from this
             // invocation and outranks a stored preference.
@@ -11404,18 +11413,24 @@ impl ApplicationHandler<Wakeup> for App {
             }
             (None, None) => attrs.with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0)),
         };
-        // Not borderless (ROADMAP, WS-C2: borderless costs traffic lights,
+        // Not borderless (issue #9, WS-C2: borderless costs traffic lights,
         // native fullscreen, Sequoia tiling and accessibility). A transparent
         // full-size titlebar keeps all of that, and the tab strip is what
         // fills the space — these are attribute flags, so the startup budget
         // pays nothing.
+        //
+        // Conditioned on the variant rather than on `cfg` alone, so this and
+        // `WindowChrome::resolve` cannot drift into disagreeing about what
+        // macOS gets.
         #[cfg(target_os = "macos")]
-        let attrs = {
+        let attrs = if self.config.chrome == crate::window_chrome::WindowChrome::Integrated {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs
                 .with_titlebar_transparent(true)
                 .with_title_hidden(true)
                 .with_fullsize_content_view(true)
+        } else {
+            attrs
         };
         // Borderless, so the OS caption stops sitting *above* our own tab
         // strip — two titlebars was the state of this window until now.
@@ -11433,11 +11448,15 @@ impl ApplicationHandler<Wakeup> for App {
         // resize edges vanish with the frame. They come back out of the chrome
         // layout pass as `HitRegion::Resize`.
         #[cfg(windows)]
-        let attrs = if self.config.custom_chrome {
-            use winit::platform::windows::WindowAttributesExtWindows;
-            attrs.with_decorations(false).with_undecorated_shadow(true)
-        } else {
+        let attrs = if self.config.chrome.decorations() {
             attrs
+        } else {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            // All that is left here once `with_decorations` moved to the base
+            // builder: the drop shadow, snap animation and rounded corners a
+            // borderless window would otherwise lose. Costs one black pixel
+            // row along the top, per winit's own comment.
+            attrs.with_undecorated_shadow(true)
         };
         let window = Arc::new(el.create_window(attrs).expect("create window"));
 

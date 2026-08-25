@@ -33,6 +33,7 @@ mod tabs;
 mod tabs_state;
 mod text_field;
 mod themes;
+mod window_chrome;
 
 use winit::event_loop::EventLoop;
 

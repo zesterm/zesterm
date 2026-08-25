@@ -149,6 +149,20 @@ the history behind them is in closed issues and PRs.
       confirming a path rather than writing one.
 - [ ] Linux: negotiate `zxdg_toplevel_decoration_v1` or KDE gives you *two*
       titlebars.
+- [ ] Linux: Vulkan surface, fontconfig fallback verification.
+- [x] **Linux: exactly one titlebar** (#472) — and *not* by negotiating
+      `zxdg_toplevel_decoration_v1`, which this line used to ask for. winit
+      owns the `xdg_toplevel` and already negotiates it
+      (`set_decorate` → `request_decoration_mode`, with `sctk-adwaita` as the
+      CSD fallback for Mutter); a second `get_toplevel_decoration` on the same
+      toplevel is the fatal `already_constructed` protocol error, so doing it
+      by hand would kill the app on every compositor that supports the
+      protocol. The bug was that `custom_chrome` was a `bool` read by three
+      consumers and applied to the window by one, inside `#[cfg(windows)]` —
+      so `on` drew our caption and left the compositor's frame up. macOS had
+      the same bug against its traffic lights. `WindowChrome`'s two accessors
+      read one variant, so the pair cannot disagree, and the matrix is tested
+      over a `Host` parameter rather than `cfg!`.
 - [ ] Linux: transparency via an ARGB visual. **Blur has no portable path** —
       X11/KWin has `_KDE_NET_WM_BLUR_BEHIND_REGION`, picom needs user rules,
       Wayland has no protocol. Degrade honestly rather than pretending in the

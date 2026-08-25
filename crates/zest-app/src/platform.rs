@@ -1,5 +1,43 @@
 //! Platform-specific window setup.
 
+/// What this window calls itself to the desktop: Wayland `app_id`, X11
+/// `WM_CLASS`.
+///
+/// Nothing set either before #472, which costs more than a name: on Wayland the
+/// taskbar icon is resolved by matching `app_id` against an installed
+/// `.desktop` file, so without it there is no icon at all and
+/// `with_window_icon` cannot rescue it (winit ignores that on Wayland). Window
+/// rules -- Hyprland's `windowrule`, KWin's -- have nothing to match on either.
+///
+/// One lowercase spelling for both, matching the binary, the window title and
+/// `packaging/linux/zesterm.desktop`. Deliberately *not* X11's capitalized
+/// convention (`("zesterm", "Zesterm")`): Hyprland matches `class:` against the
+/// app_id for a Wayland window and against WM_CLASS's *class* for an XWayland
+/// one, so two spellings is a rule that works in one session and silently does
+/// nothing in the other.
+pub const APP_ID: &str = "zesterm";
+
+/// Stamp [`APP_ID`] onto the window attributes.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    use winit::platform::wayland::WindowAttributesExtWayland;
+    use winit::platform::x11::WindowAttributesExtX11;
+    // Fully-qualified, not method syntax: both extension traits declare
+    // `with_name` with the same signature and different meanings for the first
+    // argument, so `attrs.with_name(..)` is ambiguous and will not compile.
+    // Both are applied because winit compiles both backends; the one that is
+    // not running never reads its field.
+    let attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+    WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID)
+}
+
+/// Windows and macOS identify a window by its executable and bundle, not by a
+/// string on the surface, so there is nothing to stamp.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    attrs
+}
+
 /// Give the window a solid background in the theme colour, painted by the OS.
 ///
 /// # Why this is the actual startup fix
