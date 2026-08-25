@@ -10446,10 +10446,9 @@ impl App {
         let cursor_offset_px =
             [cursor_offset.0 * metrics.cell_w as f32, cursor_offset.1 * metrics.cell_h as f32];
 
-        // The smooth-scroll spring, in pixels. `Viewport::scroll_px` and the
-        // `grid_origin` uniform behind it were built for exactly this and had
-        // been fed a constant 0.0 since; chrome text opts out per instance with
-        // FLAG_FIXED, so a tab title does not ride the grid.
+        // The smooth-scroll spring, in pixels. The renderer folds this into
+        // the grid's own origin, so every grid pass moves together and the
+        // chrome — which is not the grid's — simply never sees it.
         let scroll_px = self.scroll_spring.value() * metrics.cell_h as f32;
 
         // Chrome instances: rectangles come finished from the layout pass;
@@ -13746,6 +13745,12 @@ impl ApplicationHandler<Wakeup> for App {
                     // mid-glide has to keep the velocity it already had, or
                     // scrolling fast reads as a series of restarts.
                     self.scroll_spring.nudge(rows as f32);
+                    // One row of debt at most — see `Spring::clamp_to`. A notch
+                    // is typically three rows, and notches accumulate, so
+                    // without this the grid is drawn several rows from where it
+                    // belongs and the renderer has one overscan row to cover it
+                    // with.
+                    self.scroll_spring.clamp_to(1.0);
                     self.scroll_spring.retarget(0.0);
                 } else {
                     self.scroll_spring.snap_to(0.0);

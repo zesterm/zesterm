@@ -120,9 +120,9 @@ fn row_bands(grid: &Grid, vp: &Viewport<'_>, out: &mut Vec<RowBand>) {
     if vp.blocks.is_empty() {
         return;
     }
-    out.reserve(grid.rows());
-    for row in 0..grid.rows() {
-        let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else {
+    out.reserve(drawn_rows(grid));
+    for row in 0..drawn_rows(grid) {
+        let Some(line) = resolved_row(grid, vp, grid_row(row)).map(|r| r.id) else {
             out.push(RowBand { band: NO_BAND, line: 0, header: false });
             continue;
         };
@@ -324,15 +324,80 @@ pub struct Viewport<'a> {
     pub row_map: Option<&'a [usize]>,
 }
 
-/// The row a visual row shows: mapped through the fold view when one is
+/// Where the grid's own top-left is this frame.
+///
+/// `vp.rect` is where the viewport sits; this is where its *content* sits,
+/// which differs by [`Viewport::scroll_px`] — the smooth-scroll spring's
+/// outstanding visual debt, the distance the text still has to travel to the
+/// place it already belongs.
+///
+/// **Every grid pass takes it from here, rects and glyphs alike.** The debt
+/// used to live in a second place as well, a `grid_origin` uniform that
+/// `glyph.wgsl` and `decor.wgsl` added and `rect.wgsl` never did — so the text
+/// slid while the cell backgrounds, the selection, the caret and a block's
+/// rail and wash stood still and snapped at the end. That is one fact in two
+/// homes and a writer that never learned about the second; there is one home
+/// now, and `glyph_flags::FIXED`, which existed only so chrome text could opt
+/// out of the uniform, went with it (#467).
+fn grid_origin(vp: &Viewport<'_>) -> (f32, f32) {
+    (vp.rect[0], vp.rect[1] - vp.scroll_px)
+}
+
+/// How many rows are drawn beyond each edge of the viewport.
+///
+/// Smooth scrolling draws the grid off its own origin by up to one row (the
+/// spring's debt is clamped there by its caller), which leaves a strip at the
+/// trailing edge that no viewport row reaches. Something has to fill it, or
+/// every scroll shows a bare band easing away — the "renders one extra row"
+/// that [`Viewport::scroll_px`] always described and nothing did.
+///
+/// One is enough *because* the debt is clamped. If that clamp is ever lifted
+/// this has to grow with it, which is why they are documented at each other.
+const OVERSCAN: usize = 1;
+
+/// Rows drawn this frame, viewport plus overscan on both sides.
+fn drawn_rows(grid: &Grid) -> usize {
+    grid.rows() + 2 * OVERSCAN
+}
+
+/// The grid row a drawn row shows. Negative, and past `rows()`, at the edges.
+fn grid_row(drawn: usize) -> isize {
+    drawn as isize - OVERSCAN as isize
+}
+
+/// The row a drawn row shows: mapped through the fold view when one is
 /// active, the viewport row otherwise. `None` is a blank filler row.
-fn resolved_row<'g>(grid: &'g Grid, vp: &Viewport<'_>, row: usize) -> Option<&'g Row> {
+///
+/// Signed, because the overscan asks for the row either side of the viewport.
+/// A fold's `row_map` names exactly the viewport's rows and nothing beyond, so
+/// a compacted view simply has nothing to show out there and says so — which
+/// is right rather than a limitation: the map *is* what the fold decided to
+/// draw.
+fn resolved_row<'g>(grid: &'g Grid, vp: &Viewport<'_>, row: isize) -> Option<&'g Row> {
     match vp.row_map {
-        Some(map) => match map.get(row) {
+        // A fold's map names the viewport's rows and nothing outside them, so
+        // the overscan has nothing to show through one — the map *is* what the
+        // fold decided to draw.
+        Some(map) => match usize::try_from(row).ok().and_then(|r| map.get(r)) {
             Some(&i) if i != usize::MAX => grid.line(i),
             _ => None,
         },
-        None => Some(grid.row(row)),
+        // Signed all the way to the index, so that `-1` reaches the scrollback
+        // line above the viewport instead of being rejected on the way. Doing
+        // the `usize` conversion first is the obvious shape and it silently
+        // blanks the top overscan row, which is the whole of what the overscan
+        // is for.
+        //
+        // Through `line`, not `row`: this indexes past the viewport at both
+        // ends and `line` is the bounds-checked one, so the row above resolves
+        // exactly when there is scrollback to show and the row below exactly
+        // when the view is scrolled back — which are the cases that can produce
+        // a debt in that direction. Equal to `grid.row(row)` everywhere both
+        // are defined.
+        None => {
+            let abs = isize::try_from(grid.abs_index(0)).ok()? + row;
+            grid.line(usize::try_from(abs).ok()?)
+        }
     }
 }
 
@@ -406,8 +471,6 @@ pub struct Scene {
     /// and composites them as black: a black frame around the terminal, whatever
     /// the theme.
     pub backdrop: LinearRgba,
-    /// Sub-pixel grid translation, applied in the vertex shader.
-    pub grid_origin: [f32; 2],
     /// Index in `rects` where the chrome's instances begin.
     ///
     /// The buffers are shared but the draw order is not: the renderer draws
@@ -438,7 +501,6 @@ impl Scene {
         self.decors.clear();
         self.images.clear();
         self.backdrop = LinearRgba::TRANSPARENT;
-        self.grid_origin = [0.0, 0.0];
         self.chrome_rects_at = 0;
         self.chrome_glyphs_at = 0;
         self.overlay_rects_at = 0;
@@ -534,12 +596,14 @@ impl Scene {
         vp: &Viewport<'_>,
     ) {
         let clip = vp.rect;
-        let (ox, oy) = (vp.rect[0], vp.rect[1]);
+        // The grid's origin, not the viewport's — they differ by the scroll
+        // debt, and every pass below is the grid's. `push_window_background`
+        // is the one exception and takes `vp.rect` itself: the window does not
+        // scroll.
+        let (ox, oy) = grid_origin(vp);
         let cw = metrics.cell_w as f32;
         let ch = metrics.cell_h as f32;
         let grid = vp.grid;
-
-        self.grid_origin = [0.0, -vp.scroll_px];
 
         self.push_window_background(vp);
 
@@ -553,12 +617,12 @@ impl Scene {
         // glyphs, and — because they hang off the glyph pass — no underlines.
         // The header used to be an opaque fill hiding exactly these; it is not
         // a surface any more, so this is what hides them (#465).
-        for row in 0..grid.rows() {
+        for row in 0..drawn_rows(grid) {
             if !grid_draws(&rows, row) {
                 continue;
             }
-            let y = oy + row as f32 * ch;
-            self.emit_row_backgrounds(grid, row, vp, ox, y, cw, ch, clip);
+            let y = oy + grid_row(row) as f32 * ch;
+            self.emit_row_backgrounds(grid, grid_row(row), vp, ox, y, cw, ch, clip);
         }
 
         // Block decoration first, then the selection over it: a dragged
@@ -574,12 +638,14 @@ impl Scene {
         // about what it will paste.
         self.emit_selection(grid, vp, ox, oy, cw, ch, clip);
 
-        for row in 0..grid.rows() {
+        for row in 0..drawn_rows(grid) {
             if !grid_draws(&rows, row) {
                 continue;
             }
-            let y = oy + row as f32 * ch;
-            self.emit_row_glyphs(device, queue, atlas, fonts, metrics, grid, row, vp, ox, y, clip);
+            let y = oy + grid_row(row) as f32 * ch;
+            self.emit_row_glyphs(
+                device, queue, atlas, fonts, metrics, grid, grid_row(row), vp, ox, y, clip,
+            );
         }
 
         self.row_bands = rows;
@@ -788,7 +854,7 @@ impl Scene {
     fn emit_row_backgrounds(
         &mut self,
         grid: &Grid,
-        row: usize,
+        row: isize,
         vp: &Viewport<'_>,
         ox: f32,
         y: f32,
@@ -846,7 +912,7 @@ impl Scene {
         fonts: &mut Fonts,
         metrics: CellMetrics,
         grid: &Grid,
-        row: usize,
+        row: isize,
         vp: &Viewport<'_>,
         ox: f32,
         y: f32,
@@ -1174,8 +1240,12 @@ impl Scene {
             if let Some(run) = advance(&mut rail, row, rail_at) {
                 if reach >= rail_w {
                     let b = &vp.blocks[run.band as usize];
-                    let rect =
-                        [rail_x, oy + run.first_row as f32 * ch, rail_w, run.rows() as f32 * ch];
+                    let rect = [
+                        rail_x,
+                        oy + grid_row(run.first_row) as f32 * ch,
+                        rail_w,
+                        run.rows() as f32 * ch,
+                    ];
                     self.rects.push(RectInstance {
                         // Half its own width is the only honest radius for a
                         // rule; the shader clamps it against the short side, so
@@ -1188,7 +1258,12 @@ impl Scene {
             if let Some(run) = advance(&mut wash, row, wash_at) {
                 let b = &vp.blocks[run.band as usize];
                 if let Some(fill) = b.wash {
-                    let rect = [ox, oy + run.first_row as f32 * ch, wash_w, run.rows() as f32 * ch];
+                    let rect = [
+                        ox,
+                        oy + grid_row(run.first_row) as f32 * ch,
+                        wash_w,
+                        run.rows() as f32 * ch,
+                    ];
                     self.rects.push(RectInstance {
                         radii: run.caps(WASH_RADIUS * vp.scale, b.header_to, b.to, rows.len()),
                         ..RectInstance::filled(rect, fill, clip)
@@ -1224,8 +1299,8 @@ impl Scene {
         let fill = LinearRgba::opaque(c.r, c.g, c.b);
         let cols = grid.cols();
 
-        for row in 0..grid.rows() {
-            let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else { continue };
+        for row in 0..drawn_rows(grid) {
+            let Some(line) = resolved_row(grid, vp, grid_row(row)).map(|r| r.id) else { continue };
             let Some((from, to)) = sel.span_on(line, cols) else { continue };
             if to <= from {
                 continue;
@@ -1233,7 +1308,7 @@ impl Scene {
             self.rects.push(RectInstance::filled(
                 [
                     ox + from as f32 * cw,
-                    oy + row as f32 * ch,
+                    oy + grid_row(row) as f32 * ch,
                     (to - from) as f32 * cw,
                     ch,
                 ],
@@ -1630,6 +1705,88 @@ mod tests {
     }
 
     #[test]
+    fn the_overscan_reaches_the_rows_either_side_of_the_viewport() {
+        // What the overscan is *for*: smooth scrolling draws the grid up to a
+        // row off its own origin, and something has to fill the strip that
+        // exposes. Resolving the signed row through `usize::try_from` first is
+        // the obvious shape and it rejects `-1` before it can reach the
+        // scrollback line above — leaving the band as blank as it was before
+        // the overscan existed, and silently, since a blank strip easing away
+        // looks the same either way.
+        let p = palette();
+        let mut grid = lined(3, 10);
+        // Push three lines into scrollback, then look at the middle of history
+        // so there is content on both sides of the viewport.
+        for _ in 0..3 {
+            grid.scroll_up(1, &zest_core::Cell::default());
+        }
+        grid.scroll_display(1);
+        let vp = viewport(&grid, &p, 1.0);
+
+        let above = resolved_row(&grid, &vp, -1).map(|r| r.id);
+        let first = resolved_row(&grid, &vp, 0).map(|r| r.id).expect("the viewport's first row");
+        let last = resolved_row(&grid, &vp, grid.rows() as isize - 1).map(|r| r.id);
+        let below = resolved_row(&grid, &vp, grid.rows() as isize).map(|r| r.id);
+
+        assert_eq!(above, Some(first - 1), "the row above the viewport is the line before it");
+        assert_eq!(
+            below,
+            last.map(|l| l + 1),
+            "and the row below is the line after — the view is scrolled back, so it exists"
+        );
+
+        // A fold names the viewport's rows and nothing beyond, so there is
+        // nothing out there to show and it must not invent one.
+        let map = [0usize, 1, 2];
+        let folded = Viewport { row_map: Some(&map), ..viewport(&grid, &p, 1.0) };
+        assert!(resolved_row(&grid, &folded, -1).is_none(), "a fold draws what it mapped");
+        assert!(resolved_row(&grid, &folded, 3).is_none());
+    }
+
+    #[test]
+    fn every_grid_pass_lands_on_the_same_scrolled_origin() {
+        // The shear this file used to have: the debt reached the GPU as a
+        // `grid_origin` uniform that the glyph and decor shaders added and
+        // `rect.wgsl` never did, so text slid while the colour under it stood
+        // still. What stops it coming back is structural — there is only one
+        // origin now — so what this asserts is that two independent rect
+        // passes agree with `grid_origin` rather than with `vp.rect`.
+        //
+        // The glyph side is not asserted here because it needs a device; it
+        // cannot drift, since it reads the same `oy` these do and the shader
+        // has nothing left to add to it.
+        let p = palette();
+        let grid = lined(4, 10);
+        let scroll = 7.0;
+        let mut sel =
+            zest_core::Selection::new(zest_core::AbsPos::new(1, 0), zest_core::SelectionMode::Simple);
+        sel.head = zest_core::AbsPos::new(1, 4);
+        let bands = [band(1, 2)];
+        let vp = Viewport {
+            selection: Some(sel),
+            blocks: &bands,
+            gutter: 16.0,
+            scroll_px: scroll,
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        assert_eq!(oy, vp.rect[1] - scroll, "the grid sits a debt above its viewport");
+
+        let mut scene = Scene::default();
+        scene.emit_selection(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+        let sel_y = scene.rects.first().expect("the selected row is highlighted").rect[1];
+
+        let mut scene = Scene::default();
+        let mut rows = Vec::new();
+        row_bands(&grid, &vp, &mut rows);
+        scene.emit_block_bands(&vp, &rows, grid.cols(), ox, oy, 8.0, 16.0, vp.rect);
+        let rail_y = rails(&scene).first().expect("the block is railed").1;
+
+        assert_eq!(sel_y, oy + 16.0, "the selection rides the debt");
+        assert_eq!(rail_y, sel_y, "and the rail lands on the same row as it, not a debt away");
+    }
+
+    #[test]
     fn a_rail_needs_a_gutter_and_never_takes_a_cell() {
         // The constraint the whole design turns on. Chrome paints *over* the
         // glyphs, so a rail drawn a layer up shaves the left edge off column
@@ -1783,18 +1940,29 @@ mod tests {
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
         let mut rows = Vec::new();
         row_bands(&grid, &vp, &mut rows);
-        assert!(rows[0].header, "line 0 is the header's");
-        assert!(!rows[1].header && !rows[2].header, "the output rows are the grid's");
+        // Indexed by *drawn* row: the overscan puts viewport row 0 at OVERSCAN.
+        let vis = |row: usize| rows[row + OVERSCAN];
+        assert!(vis(0).header, "line 0 is the header's");
+        assert!(!vis(1).header && !vis(2).header, "the output rows are the grid's");
 
         let mut scene = Scene::default();
-        for row in 0..grid.rows() {
+        for row in 0..drawn_rows(&grid) {
             // The same predicate `build_viewport`'s two row loops call, not a
             // second copy of the rule.
             if !grid_draws(&rows, row) {
                 continue;
             }
-            let y = vp.rect[1] + row as f32 * 16.0;
-            scene.emit_row_backgrounds(&grid, row, &vp, vp.rect[0], y, 8.0, 16.0, vp.rect);
+            let y = vp.rect[1] + grid_row(row) as f32 * 16.0;
+            scene.emit_row_backgrounds(
+                &grid,
+                grid_row(row),
+                &vp,
+                vp.rect[0],
+                y,
+                8.0,
+                16.0,
+                vp.rect,
+            );
         }
         assert_eq!(scene.rects.len(), 2, "one background run per output row, none for the header");
         for r in &scene.rects {
@@ -1863,26 +2031,36 @@ mod tests {
     }
 
     #[test]
-    fn a_band_cut_off_by_the_viewport_edge_keeps_that_end_square() {
+    fn a_run_that_reaches_the_drawn_edge_keeps_that_end_square() {
         // A cap where the block does not end reads as "the block starts here",
-        // which would be a lie on every scroll. Only an end the run actually
-        // reached is rounded.
-        let p = palette();
-        let grid = lined(3, 10);
-        // The band starts two lines above the first visible one and ends past
-        // the last: neither end is on screen.
-        let bands = [band(0, 99)];
-        let mut scene = Scene::default();
-        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
-        emit_bands(&mut scene, &grid, &vp);
-        let rail = scene
-            .rects
-            .iter()
-            .find(|r| (r.rect[2] - RAIL_PX).abs() < f32::EPSILON)
-            .expect("a rail");
-        assert_eq!(rail.radii[0], RAIL_PX * 0.5, "line 0 is the band's start, so it caps");
-        assert_eq!(rail.radii[2], 0.0, "but its end is off-screen, so that stays square");
-        assert_eq!(rail.radii[3], 0.0);
+        // which would be a lie on every scroll. Asserted against the rule
+        // rather than through a grid: with an overscan row either side, a band
+        // only runs past what is drawn when there is scrollback out there to
+        // run into, and building that is a fixture about `Grid`, not about
+        // this.
+        let drawn = 5;
+
+        // Starts above the first drawn row and ends below the last.
+        let through = BandRun { band: 0, first_row: 0, end_row: drawn, first_line: 10, last_line: 14 };
+        assert_eq!(
+            through.caps(1.0, 0, 99, drawn),
+            [0.0; 4],
+            "both ends run past what is drawn, so neither is an end"
+        );
+
+        // Ends inside, on both counts.
+        let whole = BandRun { band: 0, first_row: 1, end_row: 4, first_line: 10, last_line: 12 };
+        assert_eq!(whole.caps(1.0, 10, 13, drawn), [1.0; 4], "a block wholly on screen caps twice");
+
+        // Reaches the bottom edge but is genuinely its own last line — the
+        // case that says the two tests are not the same test.
+        let ends_at_edge =
+            BandRun { band: 0, first_row: 1, end_row: drawn, first_line: 10, last_line: 13 };
+        assert_eq!(
+            ends_at_edge.caps(1.0, 10, 14, drawn),
+            [1.0; 4],
+            "landing on the edge is not the same as running past it"
+        );
     }
 
     #[test]

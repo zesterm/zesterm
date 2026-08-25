@@ -302,7 +302,7 @@ fn push_glyph(
         color,
         clip,
         layer: u32::from(e.layer),
-        flags: glyph_flags::FIXED | if e.is_color { glyph_flags::COLOR } else { 0 },
+        flags: if e.is_color { glyph_flags::COLOR } else { 0 },
     });
 }
 

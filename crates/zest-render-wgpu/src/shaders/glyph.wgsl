@@ -26,8 +26,6 @@ struct GlyphVsOut {
 };
 
 const FLAG_COLOR: u32 = 1u;
-// Kept in sync with instance::glyph_flags::FIXED by a test.
-const FLAG_FIXED: u32 = 2u;
 
 @group(1) @binding(0) var mask_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d_array<f32>;
@@ -40,12 +38,12 @@ const LAYER_SIZE: f32 = 2048.0;
 fn vs_glyph(@builtin(vertex_index) vi: u32, inst: GlyphInstance) -> GlyphVsOut {
     let corner = unit_quad(vi);
 
-    // grid_origin carries the sub-row smooth-scroll offset. It is a global
-    // uniform, so chrome text opts out per instance with FLAG_FIXED — a tab
-    // title must not move when the grid under it scrolls.
-    let scrolled = (inst.flags & FLAG_FIXED) == 0u;
-    let origin = select(vec2<f32>(0.0, 0.0), globals.grid_origin, scrolled);
-    let pixel = inst.pos + corner * inst.size + origin;
+    // No scroll offset here. The smooth-scroll debt is folded into the grid's
+    // own origin on the CPU (`scene::grid_origin`), so a glyph's `pos` already
+    // says where it goes and chrome needs nothing to opt out of. It used to be
+    // a uniform this shader added and `rect.wgsl` did not, which sheared the
+    // text off the colour under it for the length of every spring (#467).
+    let pixel = inst.pos + corner * inst.size;
 
     var out: GlyphVsOut;
     out.clip_position = pixel_to_clip(pixel);

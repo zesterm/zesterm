@@ -39,7 +39,7 @@ fn vs_decor(@builtin(vertex_index) vi: u32, inst: DecorInstance) -> DecorVsOut {
 
     let lo = inst.rect.xy - vec2<f32>(0.0, extra);
     let hi = inst.rect.xy + inst.rect.zw + vec2<f32>(0.0, extra);
-    let pixel = mix(lo, hi, corner) + globals.grid_origin;
+    let pixel = mix(lo, hi, corner);
 
     var out: DecorVsOut;
     out.clip_position = pixel_to_clip(pixel);
