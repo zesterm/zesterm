@@ -374,16 +374,30 @@ fn grid_row(drawn: usize) -> isize {
 /// is right rather than a limitation: the map *is* what the fold decided to
 /// draw.
 fn resolved_row<'g>(grid: &'g Grid, vp: &Viewport<'_>, row: isize) -> Option<&'g Row> {
-    let row = usize::try_from(row).ok()?;
     match vp.row_map {
-        Some(map) => match map.get(row) {
+        // A fold's map names the viewport's rows and nothing outside them, so
+        // the overscan has nothing to show through one — the map *is* what the
+        // fold decided to draw.
+        Some(map) => match usize::try_from(row).ok().and_then(|r| map.get(r)) {
             Some(&i) if i != usize::MAX => grid.line(i),
             _ => None,
         },
-        // Through `line`, not `row`: the overscan indexes past the viewport at
-        // both ends, and `line` is the bounds-checked one. Equal to
-        // `grid.row(row)` everywhere both are defined.
-        None => grid.line(grid.abs_index(row)),
+        // Signed all the way to the index, so that `-1` reaches the scrollback
+        // line above the viewport instead of being rejected on the way. Doing
+        // the `usize` conversion first is the obvious shape and it silently
+        // blanks the top overscan row, which is the whole of what the overscan
+        // is for.
+        //
+        // Through `line`, not `row`: this indexes past the viewport at both
+        // ends and `line` is the bounds-checked one, so the row above resolves
+        // exactly when there is scrollback to show and the row below exactly
+        // when the view is scrolled back — which are the cases that can produce
+        // a debt in that direction. Equal to `grid.row(row)` everywhere both
+        // are defined.
+        None => {
+            let abs = isize::try_from(grid.abs_index(0)).ok()? + row;
+            grid.line(usize::try_from(abs).ok()?)
+        }
     }
 }
 
@@ -1688,6 +1702,45 @@ mod tests {
     /// A grid whose visible rows carry line ids `0..rows`.
     fn lined(rows: usize, cols: usize) -> Grid {
         Grid::new(cols, rows, 100)
+    }
+
+    #[test]
+    fn the_overscan_reaches_the_rows_either_side_of_the_viewport() {
+        // What the overscan is *for*: smooth scrolling draws the grid up to a
+        // row off its own origin, and something has to fill the strip that
+        // exposes. Resolving the signed row through `usize::try_from` first is
+        // the obvious shape and it rejects `-1` before it can reach the
+        // scrollback line above — leaving the band as blank as it was before
+        // the overscan existed, and silently, since a blank strip easing away
+        // looks the same either way.
+        let p = palette();
+        let mut grid = lined(3, 10);
+        // Push three lines into scrollback, then look at the middle of history
+        // so there is content on both sides of the viewport.
+        for _ in 0..3 {
+            grid.scroll_up(1, &zest_core::Cell::default());
+        }
+        grid.scroll_display(1);
+        let vp = viewport(&grid, &p, 1.0);
+
+        let above = resolved_row(&grid, &vp, -1).map(|r| r.id);
+        let first = resolved_row(&grid, &vp, 0).map(|r| r.id).expect("the viewport's first row");
+        let last = resolved_row(&grid, &vp, grid.rows() as isize - 1).map(|r| r.id);
+        let below = resolved_row(&grid, &vp, grid.rows() as isize).map(|r| r.id);
+
+        assert_eq!(above, Some(first - 1), "the row above the viewport is the line before it");
+        assert_eq!(
+            below,
+            last.map(|l| l + 1),
+            "and the row below is the line after — the view is scrolled back, so it exists"
+        );
+
+        // A fold names the viewport's rows and nothing beyond, so there is
+        // nothing out there to show and it must not invent one.
+        let map = [0usize, 1, 2];
+        let folded = Viewport { row_map: Some(&map), ..viewport(&grid, &p, 1.0) };
+        assert!(resolved_row(&grid, &folded, -1).is_none(), "a fold draws what it mapped");
+        assert!(resolved_row(&grid, &folded, 3).is_none());
     }
 
     #[test]
