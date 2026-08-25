@@ -584,8 +584,14 @@ mod tests {
         let s = Scratch::new("fifo");
         let fifo = s.join("pipe");
         let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("cstring");
-        // SAFETY: a NUL-terminated path in a scratch directory this test owns.
-        assert_eq!(unsafe { libc_mkfifo(c.as_ptr()) }, 0, "mkfifo");
+        // SAFETY: a NUL-terminated path in a scratch directory this test owns,
+        // and a mode this call actually passes -- see the declaration below.
+        assert_eq!(
+            unsafe { libc_mkfifo(c.as_ptr(), 0o600) },
+            0,
+            "mkfifo: {}",
+            std::io::Error::last_os_error()
+        );
 
         let msg = read_file("pipe", &s.path());
         let (data, _, _, _, _, error) = contents(&msg);
@@ -603,8 +609,19 @@ mod tests {
 
     #[cfg(unix)]
     unsafe extern "C" {
+        /// `int mkfifo(const char *path, mode_t mode)` -- **both** arguments.
+        ///
+        /// Declared without the mode, this compiled, linked and mostly worked:
+        /// the callee read its second argument from whatever the ABI's second
+        /// register happened to hold, so the FIFO was created with a garbage
+        /// mode when those bits were valid and `mkfifo` returned `EINVAL` when
+        /// they were not. That is undefined behaviour rather than a wrong
+        /// value, and it presented as this test failing about three runs in
+        /// five under `cargo test --workspace` while passing every time in
+        /// isolation -- which reads as flaky infrastructure, not as a bug.
+        /// `mode_t` is `u32` on Linux and macOS alike. (#473)
         #[link_name = "mkfifo"]
-        fn libc_mkfifo(path: *const std::ffi::c_char) -> i32;
+        fn libc_mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
     }
 
     #[test]
