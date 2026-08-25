@@ -582,6 +582,240 @@ fn pane_is_covered(screen: AppScreen, settings_tab_active: bool) -> bool {
     screen != AppScreen::Terminal || settings_tab_active
 }
 
+/// The rail, the wash and the header span one pane's blocks come out with.
+///
+/// Driven through real OSC 133 transcripts rather than hand-built `BlockBand`s:
+/// what these pin is the *ladder*, and a ladder is only wrong in the arm nobody
+/// wrote down. The states are the only thing the rail says, so a state that
+/// stops reaching it goes silent — every block simply looks like every other.
+#[cfg(test)]
+mod block_band_tests {
+    use super::*;
+    use zest_core::Terminal;
+
+    fn colors() -> ChromeColors {
+        let theme = zest_theme::builtin::obsidian();
+        ChromeColors::new(&theme.ui, &theme.effects, 1.0)
+    }
+
+    /// One block per state: printed output and succeeded, failed, printed
+    /// nothing at all, and one still running.
+    fn session() -> Terminal {
+        let mut t = Terminal::new(40, 12, 200);
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\n");
+        t.advance(b"hi\r\n\x1b]133;D;0\x07");
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07nope\x1b]133;C\x07\r\n");
+        t.advance(b"not found\r\n\x1b]133;D;127\x07");
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cd ..\x1b]133;C\x07\r\n");
+        t.advance(b"\x1b]133;D;0\x07");
+        t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07\r\n");
+        t.advance(b"building\r\n");
+        t
+    }
+
+    #[test]
+    fn every_block_state_reaches_the_rail() {
+        let c = colors();
+        let t = session();
+        let bands = App::block_bands(&c, &t, None, false);
+        assert_eq!(bands.len(), 4, "one band per block that has started output");
+        assert_eq!(bands[0].rail, c.success, "exit 0");
+        assert_eq!(bands[1].rail, c.danger, "non-zero exit");
+        assert_eq!(bands[2].rail, c.text_faint, "printed nothing");
+        assert_eq!(bands[3].rail, c.warn, "still running");
+
+        // A session whose host went away: the last block is not running
+        // anywhere, and the rail is the only thing that can say so.
+        let dead = App::block_bands(&c, &t, None, true);
+        assert_eq!(dead[3].rail, c.text_faint, "interrupted");
+    }
+
+    #[test]
+    fn the_wash_belongs_to_the_output_and_a_selection_overrides_its_tint() {
+        let c = colors();
+        let t = session();
+        let bands = App::block_bands(&c, &t, None, false);
+        for (i, b) in bands.iter().enumerate() {
+            assert!(b.from <= b.header_to, "block {i}: a header cannot start before its block");
+            assert!(b.header_to <= b.to, "block {i}: nor outlast it");
+        }
+        assert!(bands[0].wash.is_some(), "a block with output is washed");
+        assert!(
+            bands[2].wash.is_none(),
+            "`cd ..` printed nothing, so there is no output to wash — the rail alone says it ran"
+        );
+        assert_eq!(bands[2].header_to, bands[2].to, "and every row it has is header");
+
+        let id = t.blocks().blocks()[0].id.0;
+        let lit = App::block_bands(&c, &t, Some(id), false);
+        assert_eq!(lit[0].rail, c.accent, "the selected block takes the accent");
+        assert_eq!(
+            lit[0].wash,
+            Some(crate::chrome::layout::washed(c.accent, 0.10)),
+            "and its wash the accent at 10%, which is the whole of the selection now"
+        );
+        assert_eq!(lit[1].rail, bands[1].rail, "its neighbours are untouched");
+    }
+
+    #[test]
+    fn a_block_wash_is_visible_in_every_builtin_theme() {
+        // The bug this exists for: a *fixed* linear-light alpha that reads
+        // correctly on `obsidian`'s near-black ground moves `paper`'s
+        // near-white one by a single 8-bit step, and a light theme ships with
+        // blocks whose only edge is the rail — which looks deliberate, so
+        // nothing reports it. Same trap `oklch::contrast_shift` documents for
+        // opaque surfaces, met by something that has to stay translucent.
+        //
+        // Asserted as a composite in sRGB, because "visible" is a fact about
+        // what reaches the screen, not about the alpha that produced it.
+        for theme in zest_theme::builtin::all() {
+            let c = ChromeColors::new(&theme.ui, &theme.effects, 1.0);
+            for (state, name) in
+                [(c.success, "success"), (c.danger, "danger"), (c.warn, "warn"), (c.text_faint, "faint")]
+            {
+                let wash = state_wash(state, &c);
+                assert!(
+                    wash.0[3] < 0.5,
+                    "{}/{name}: a wash that opaque would flatten a TUI's own colours",
+                    theme.name
+                );
+                let over = |i: usize| wash.0[i] + c.bg_opaque.0[i] * (1.0 - wash.0[3]);
+                let step = (0..3)
+                    .map(|i| (linear_to_srgb(over(i)) - linear_to_srgb(c.bg_opaque.0[i])).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    step * 255.0 >= 2.0,
+                    "{}/{name}: the wash lands {:.2} of an sRGB step from the background,                      which is a block with no edges",
+                    theme.name,
+                    step * 255.0
+                );
+            }
+        }
+    }
+
+    /// The sRGB opto-electronic transfer function, for asserting in the space
+    /// the eye is in rather than the one the blend happens in.
+    fn linear_to_srgb(v: f32) -> f32 {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.003_130_8 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    #[test]
+    fn a_header_replaces_only_the_prompt_lines_above_the_output() {
+        assert_eq!(header_span(4, Some(5), 9), 5, "a one-line prompt, replaced");
+        assert_eq!(header_span(4, Some(6), 9), 6, "a two-line prompt, both replaced");
+        assert_eq!(header_span(4, None, 9), 4, "a block that never started output has no header");
+    }
+
+    #[test]
+    fn a_block_whose_output_starts_on_its_prompt_line_replaces_nothing() {
+        // `build_block_views` widens its header to at least one row so a header
+        // is never zero rows tall. Done here that would blank the first line
+        // the command printed — better a double-printed prompt for one odd
+        // block than output that is simply not there.
+        assert_eq!(header_span(4, Some(4), 9), 4);
+        assert_eq!(header_span(4, Some(3), 9), 4, "and an output line *above* the prompt likewise");
+    }
+
+    #[test]
+    fn a_wildly_wide_header_replaces_nothing_at_all() {
+        // A corrupt index can name a wide line range; `build_block_views`
+        // clamps its header to the first contiguous run of rows for exactly
+        // that reason. Unclamped here, one bad block would blank every row
+        // between its two ends with nothing drawn over them.
+        assert_eq!(header_span(0, Some(400), 500), 0, "past any prompt anyone ships");
+        assert_eq!(header_span(0, Some(4), 500), 4, "but four lines is still a prompt");
+    }
+
+    #[test]
+    fn a_header_never_outruns_its_own_band() {
+        // `to` bounds it: a running block's end is resolved against the cursor,
+        // and a prompt whose output line has not been reached yet would
+        // otherwise name lines the band does not contain.
+        assert_eq!(header_span(4, Some(7), 6), 6, "clamped to the band's end");
+    }
+}
+
+/// The lines a block's header replaces, inside a band `[prompt_line, to)`.
+///
+/// The chrome draws a compact restatement of the command over the shell's own
+/// prompt rows, and since #465 it does that on bare background rather than on
+/// an opaque fill — so the grid must not draw those rows at all. This is how
+/// wide "those rows" is, and there are two ways `output_line` can lie about it.
+///
+/// **Output that starts on the prompt line has no prompt row to spare.**
+/// `build_block_views` widens its header to `out_line.max(prompt_line + 1)` so
+/// that a header is never zero rows tall; done here that would suppress the
+/// first line the command printed. Better a double-printed prompt for one odd
+/// block than output that is simply not there.
+///
+/// **A corrupt index can name a wide line range.** `build_block_views` clamps
+/// the header to the first contiguous *run of rows* for exactly that reason
+/// (see there) — and a block reaching this far unclamped would blank every row
+/// between its two ends, with nothing drawn over them. That clamp cannot be
+/// reused here: it is in viewport rows and this is in lines. The cap is the
+/// cheap half of it.
+///
+/// Free and pure so it can be tested without an `App`, like `next_wake` and
+/// `host_slot` above it.
+/// The selected block's wash. Louder than a state wash on purpose: it answers
+/// "what does ⌘⇧O copy", and with the header's fill gone it is the only thing
+/// left saying so.
+const SELECTED_WASH: f32 = 0.10;
+
+/// The state colour at the alpha that moves this theme's background one small
+/// perceptual step — the wash under a finished block's output.
+///
+/// **Solved, not tabulated, and deliberately not the design's flat "4%".** The
+/// mock is CSS, which composites in sRGB; this pipeline blends in linear light,
+/// where the same alpha of a bright ink over a near-black background lifts
+/// several times as far — and over a *paper-white* one lifts by nothing at all.
+/// A constant would therefore have to be wrong on one end or the other, and the
+/// end it was wrong on would be the light themes, silently: a rail with no wash
+/// still looks deliberate.
+///
+/// `ChromeColors::wash_target` is where `oklch::contrast_shift` would have put
+/// an opaque panel. This asks what alpha of `ink` reaches that luminance, which
+/// also evens the states out — `danger` is a darker ink than `warn`, and a flat
+/// alpha would make a failed block's wash the fainter of the two.
+///
+/// Clamped at both ends: an ink too close to the background in luminance (a
+/// faint rail on a mid-grey theme) would otherwise ask for an opaque wash, and
+/// this is painted over every cell background under it, so an opaque one would
+/// flatten a TUI's colours to one wash.
+fn state_wash(
+    ink: zest_render_wgpu::LinearRgba,
+    c: &ChromeColors,
+) -> zest_render_wgpu::LinearRgba {
+    /// Enough to see, on a theme whose ink barely differs from its ground.
+    const MIN: f32 = 0.004;
+    /// Past this the wash stops being a wash. `paper` asks for about half of it.
+    const MAX: f32 = 0.22;
+
+    let ink_lum = crate::chrome::theme::luminance(ink);
+    let reach = ink_lum - c.wash_from;
+    let alpha = if reach.abs() < f32::EPSILON {
+        MAX
+    } else {
+        ((c.wash_target - c.wash_from) / reach).clamp(MIN, MAX)
+    };
+    crate::chrome::layout::washed(ink, alpha)
+}
+
+fn header_span(prompt_line: u64, output_line: Option<u64>, to: u64) -> u64 {
+    /// No shipped prompt is four lines tall. Raise it when one is.
+    const MAX_HEADER_LINES: u64 = 4;
+
+    match output_line {
+        Some(o) if o > prompt_line && o - prompt_line <= MAX_HEADER_LINES => o.min(to),
+        _ => prompt_line,
+    }
+}
+
 /// How long an enrolment code is — the server's `ENROLL_CODE_LENGTH`
 /// (`cloud/packages/web/src/enroll/codes.ts`), pinned here because the two
 /// ends are separate projects and nothing compiles both. The entry clamps at
@@ -9571,6 +9805,8 @@ impl App {
                     c.success
                 };
                 let is_selected = selected == Some(b.id.0);
+                let to = b.end_line.map_or(last_line + 1, |e| e + 1);
+                let header_to = header_span(b.prompt_line, b.output_line, to);
                 Some(zest_render_wgpu::BlockBand {
                     from: b.prompt_line,
                     // Inclusive `end_line`, so `+ 1` converts to the half-open
@@ -9582,12 +9818,24 @@ impl App {
                     // row below the output too, so one running command drew a
                     // rail to the bottom of the window and the block looked
                     // like it owned the rest of the session.
-                    to: b.end_line.map_or(last_line + 1, |e| e + 1),
+                    to,
+                    header_to,
                     rail: if is_selected { c.accent } else { rail },
-                    // 10%, and it must stay well under 1.0: this is painted
-                    // beneath the glyphs but over every cell background, so an
-                    // opaque fill would flatten a TUI's colours to one wash.
-                    wash: is_selected.then(|| crate::chrome::layout::washed(c.accent, 0.10)),
+                    // The block's own edges, now that the header is not a
+                    // surface: a breath of the state colour under the output,
+                    // 10% of the accent when this is the selected block. See
+                    // `state_wash` for why the first of those is solved per
+                    // theme rather than being the design's flat 4%.
+                    //
+                    // `None` for a block that printed nothing: its rows are all
+                    // header, and the rail alone says it ran.
+                    wash: (header_to < to).then(|| {
+                        if is_selected {
+                            crate::chrome::layout::washed(c.accent, SELECTED_WASH)
+                        } else {
+                            state_wash(rail, c)
+                        }
+                    }),
                 })
             })
             .collect::<Vec<_>>();
@@ -9676,6 +9924,13 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
         let selected = self.selected_block.get(&addr).copied();
+        // What the prompt's own `ChipKind::Cwd` chip already says, live and
+        // per-prompt. A header repeats it only where it *differs* — a block
+        // that ran somewhere else — which is the one case worth the room; the
+        // pane header above carries the session's, so printing it again on
+        // every header down the scrollback is most of the "noisy metadata"
+        // complaint by itself.
+        let session_cwd = crate::status::shorten_home(term.cwd());
         // The menu belongs to the focused pane: it is opened by a pointer, and
         // only the focused pane's headers answer one. Left unscoped, a block
         // sharing an id with the menu's would hold a ⋯ open in a pane nothing
@@ -9750,9 +10005,16 @@ impl App {
                 // "printed nothing" is strictly-before.
                 let no_output = !running && b.end_line.is_some_and(|e| e < out_line);
                 let exit_label = match b.state {
-                    zest_core::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
+                    // Success prints nothing. A green rail and a green command
+                    // already say "exit 0", and a screen of finished blocks
+                    // each restating it is noise; a *failure* is the only exit
+                    // code anyone reads, so that one keeps its words.
+                    zest_core::BlockState::Finished { exit_code: Some(c) } if c != 0 => {
+                        format!("exit {c}")
+                    }
                     _ => String::new(),
                 };
+                let cwd = crate::status::shorten_home(&b.cwd);
                 Some(crate::chrome::blocks::BlockView {
                     id: b.id.0,
                     branch: b.context.as_ref().map(|c| c.branch.clone()).unwrap_or_default(),
@@ -9764,7 +10026,7 @@ impl App {
                     failed: b.failed(),
                     no_output,
                     command: b.command.clone(),
-                    cwd: crate::status::shorten_home(&b.cwd),
+                    cwd: if cwd == session_cwd { String::new() } else { cwd },
                     duration,
                     exit_label,
                     running_label,
@@ -10473,6 +10735,7 @@ impl App {
                                 gutter: crate::chrome::layout::pane_gutter(
                                     frames[i], rects[i], scale,
                                 ),
+                                scale,
                                 selection: terms[i].selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
                                 preedit: if focused { preedit } else { None },
@@ -10557,6 +10820,7 @@ impl App {
                             background,
                             blocks: &bands,
                             gutter: gutter_px,
+                            scale,
                             selection: term.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, identity),
                             preedit: self.ime.preedit().map(|p| {

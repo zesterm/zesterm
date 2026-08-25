@@ -81,10 +81,25 @@ the history behind them is in closed issues and PRs.
       focused pane's (`hit::wheel_target` swallows the rest), and a pane on a
       relayed host has no dial hint for restore, like a relayed tab.
       Every pane draws its block state since #460 — the rail down each block
-      and a header band with it — but only the focused pane's is
-      *interactive*: hover, the ⋯ menu, fold and rail-click all belong to it,
+      and, since #465, the wash under its output — but only the focused pane's
+      is *interactive*: hover, the ⋯ menu, fold and rail-click all belong to it,
       because an unfocused pane's whole frame is one click-to-focus target and
       block ids are per session, so two panes can name the same one.
+- [ ] Block chrome after #465: the native header is a row of text on the grid,
+      with the rail and a 4.5% state wash carrying the block's edges. The web
+      client has none of it — its rail is a `border-left` on `.block-header`,
+      there is no full-height rail, no wash, and no block selection state at
+      all — so `clients/web` and `docs/design/client-ui/README.md` §3 now
+      describe different pictures. Bringing the browser to parity is the open
+      half.
+- [ ] Grid rects do not ride the smooth-scroll spring. `Scene::grid_origin`
+      carries the sub-row debt and `glyph.wgsl`/`decor.wgsl` honour it, but
+      `rect.wgsl` never reads it — so during a spring the text slides while cell
+      backgrounds, the selection, the cursor and the block rail stand still and
+      snap at the end. Pre-dates #465 and is visible on every wheel notch; the
+      fix is to bake `vp.scroll_px` into the row `y` of every rect pass on the
+      CPU (each already has `vp`), leaving the glyph and decor passes alone or
+      they shear the other way.
 - [ ] Background pictures after #450: the pipeline, the three `window.background_*`
       keys and their rows in Settings and the profiles editor are in, but the
       row is a path *text field* — #144's `<image-slot>` drop target and the OS

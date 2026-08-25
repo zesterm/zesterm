@@ -6,17 +6,21 @@
 //! [`BlockView`]s from the terminal under its own lock and this module only
 //! does arithmetic, which is what makes it testable without a session.
 //!
-//! A header *replaces* the block's prompt rows visually (the shell's prompt
-//! is underneath, painted over): the command comes back from the block index
-//! in a compact, state-coloured form. The live prompt — a block still in
-//! `Prompt` state — is never overlaid; that is where the user is typing.
+//! A header *replaces* the block's prompt rows: the command comes back from
+//! the block index in a compact, state-coloured form. It used to do that by
+//! painting an opaque fill over the shell's own prompt and printing on top of
+//! it; since #465 the header is not a surface at all, and the grid simply does
+//! not draw those rows — `zest_render_wgpu::BlockBand::header_to` is the seam,
+//! and it has to name exactly the lines this pass covers or the two texts print
+//! in one place. The live prompt — a block still in `Prompt` state — is never
+//! overlaid; that is where the user is typing.
 //! Stated precisely, the rule protects **typed text and the caret**: the
 //! prompt's context chips ([`super::prompt_chips`]) do sit beside the live
 //! prompt, on the blank row above it or in the empty right margin, and hide
 //! before typing can reach them — which honours the rule rather than
 //! excepting it.
 
-use zest_render_wgpu::{border_sides, LinearRgba, RectInstance};
+use zest_render_wgpu::{LinearRgba, RectInstance};
 
 use super::hit::{ChromeHitMap, HitRegion};
 use super::layout::TextRun;
@@ -79,13 +83,11 @@ pub struct BlockChrome {
     pub menu_anchor: Option<(u32, [f32; 4])>,
 }
 
-// Geometry, logical px (design screen 3). The band runs the full grid
-// width — the design insets it 18px inside an empty pane gutter, but our
-// band covers live prompt rows, and any inset lets their first characters
-// peek out beside it.
-const INSET: f32 = 0.0;
-const RADIUS: f32 = 8.0;
-const RAIL: f32 = 2.0;
+// Geometry, logical px (design screen 3). The band runs the full grid width.
+// It is not painted — the block's edges are the state rail in the pane gutter
+// and the wash under its output, both a layer down in the grid
+// (`zest_render_wgpu::BlockBand`) — so this is a hit target and a text
+// baseline, nothing more.
 const HPAD: f32 = 12.0;
 const GAP: f32 = 10.0;
 const CHIP_RADIUS: f32 = 5.0;
@@ -124,9 +126,9 @@ pub fn layout_blocks(
             continue;
         }
         let band = [
-            area[0] + INSET * s,
+            area[0],
             area[1] + r0 as f32 * cell_h,
-            area[2] - 2.0 * INSET * s,
+            area[2],
             (r1 - r0) as f32 * cell_h,
         ];
         if band[1] >= area[1] + area[3] || band[1] + band[3] <= area[1] {
@@ -144,39 +146,15 @@ pub fn layout_blocks(
             );
         }
 
-        let fill = if v.selected {
-            colors.accent_soft
-        } else if v.running {
-            colors.panel_bg
-        } else {
-            colors.block_header_bg
-        };
-        let rail_color = if v.selected {
-            colors.accent
-        } else if v.interrupted {
-            colors.text_faint
-        } else if v.running {
-            colors.warn
-        } else if v.failed {
-            colors.danger
-        } else if v.no_output {
-            colors.text_faint
-        } else {
-            colors.success
-        };
-        // The state rail is the header's own left border, not a rect beside it:
-        // the mock is `border-radius:8px; border-left:2px solid <state>` on one
-        // box, and CSS thins that stroke to nothing as the corner arc turns into
-        // the zero-width top border. On a header barely taller than two radii
-        // the rail is therefore mostly curve — it reads as `(`, not as a bar,
-        // and a separate rect cannot produce that at any radius.
-        out.rects.push(RectInstance {
-            radii: [RADIUS * s; 4],
-            border: rail_color,
-            border_width: RAIL * s,
-            border_omit: border_sides::TOP | border_sides::RIGHT | border_sides::BOTTOM,
-            ..RectInstance::filled(band, fill, clip)
-        });
+        // Nothing is painted here. The header used to be one box — an opaque
+        // fill with the state rail as its own `border-left` — and both are gone
+        // (#465): the fill was the one surface in the window that ignored
+        // `window.chrome_opacity`, and the border was a *second* rail, at a
+        // different x and a different width from the one the grid draws in the
+        // gutter, which the fill was hiding. One rail, one layer down.
+        //
+        // `rail_color` survives as the ink the metadata and the wash are tinted
+        // with; the band survives as the click target.
         out.hit.push(band, HitRegion::BlockHeader(v.id));
 
         // Fold chevron. Its hit region is wider than its glyph — a 6px
@@ -268,17 +246,17 @@ pub fn layout_blocks(
             meta("interrupted", colors.text_faint, &mut right, &mut out);
         } else if v.running {
             // The running indicator: a thin warn ring whose gap orbits on the
-            // clock's 0.9s turn. Shared with the tab chips since #385 — same
-            // picture, and the `fill` argument is why it had to become a
-            // function: a chip's background is not a header's.
+            // clock's 0.9s turn. `arc` rather than the tab chips' `ring`, which
+            // erases its gap with a rect in whatever is behind — a header has
+            // nothing behind it any more but the grid and, through it, the
+            // wallpaper. The one place motion is the whole point.
             meta(&v.running_label, colors.warn, &mut right, &mut out);
             let d = 8.0 * s;
-            super::layout::ring(
+            super::layout::arc(
                 &mut out.rects,
                 [right - d, band[1] + (band[3] - d) / 2.0, d, d],
                 colors.warn,
-                fill,
-                super::layout::RingStyle::Spin(spin),
+                spin,
                 clip,
             );
             right -= d + GAP * s;
@@ -386,7 +364,7 @@ mod tests {
         let band_y = 100.0 + 2.0 * 20.0 + 10.0;
         assert_eq!(b.hit.hit(400.0, band_y), Some(HitRegion::BlockHeader(7)));
         assert_eq!(
-            b.hit.hit(INSET + 4.0, band_y),
+            b.hit.hit(4.0, band_y),
             Some(HitRegion::BlockFold(7)),
             "the chevron zone outranks the band it sits in"
         );
@@ -402,7 +380,7 @@ mod tests {
         let area = [0.0, 100.0, 800.0, 400.0];
         let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
         let band_y = 100.0 + 2.0 * 20.0 + 10.0;
-        for x in [INSET + 4.0, 400.0, 795.0] {
+        for x in [4.0, 400.0, 795.0] {
             assert_eq!(
                 super::super::hit::wheel_target(b.hit.hit(x, band_y), None),
                 super::super::hit::WheelTarget::Grid,
@@ -421,7 +399,7 @@ mod tests {
         let b = layout_blocks(&[v], area, 20.0, 1.0, &colors(), None, 0.0, &mut measure);
         let band_y = 100.0 + 2.0 * 20.0 + 10.0;
         assert_eq!(
-            b.hit.hit(INSET + 4.0, band_y),
+            b.hit.hit(4.0, band_y),
             Some(HitRegion::BlockHeader(7)),
             "the chevron zone must fall through to the band when nothing folds"
         );
@@ -467,11 +445,15 @@ mod tests {
         // — the exact jitter the chevron's slot is reserved to prevent on the
         // left. The slot is now reserved whether or not anything fills it.
         let area = [0.0, 0.0, 800.0, 400.0];
+        // A *failing* block: since #465 a successful one prints no exit
+        // label at all, so anchoring on "exit 0" would look for a run that is
+        // never emitted and compare None to None for ever.
         let x_of = |hover| {
-            layout_blocks(&[view(3, (0, 1))], area, 20.0, 1.0, &colors(), hover, 0.0, &mut measure)
+            let v = BlockView { failed: true, exit_label: "exit 127".into(), ..view(3, (0, 1)) };
+            layout_blocks(&[v], area, 20.0, 1.0, &colors(), hover, 0.0, &mut measure)
                 .texts
                 .iter()
-                .find(|t| t.text == "exit 0")
+                .find(|t| t.text == "exit 127")
                 .map(|t| t.pos[0])
         };
         assert_eq!(
@@ -568,15 +550,16 @@ mod tests {
             &mut measure,
         );
         assert_eq!(plain.rects.len(), lit.rects.len(), "no rect appears or leaves");
-        let c = colors();
-        assert!(
-            lit.rects.iter().any(|r| r.fill == c.accent_soft),
-            "the selected band takes accentSoft"
+        assert_eq!(
+            plain.texts.iter().map(|t| t.pos).collect::<Vec<_>>(),
+            lit.texts.iter().map(|t| t.pos).collect::<Vec<_>>(),
+            "and nothing moves: selection is colour, never layout"
         );
-        // `border`, not `fill`: the header's rail is the band's own left
-        // border rather than a rect beside it — see the comment where it is
-        // drawn for why a separate rect cannot produce that shape.
-        assert!(lit.rects.iter().any(|r| r.border == c.accent), "and its rail the accent");
+        // Selection used to be an `accentSoft` header fill and an `accent`
+        // border here. It is one rule now instead of two — the rail goes accent
+        // and the wash goes 10% accent, both from `App::block_bands` a layer
+        // down — so this module has nothing left to paint for it. That the
+        // header stays *identical* is the invariant worth keeping.
     }
 
     #[test]
@@ -587,43 +570,52 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_is_the_headers_own_left_border() {
-        // The rail used to be a second rect laid over the band's left edge,
-        // which is a straight bar with square ends however it is rounded — a
-        // 2px-wide box cannot taper into an 8px corner. The mock is one box
-        // with `border-left`, and the taper is the browser's, so the rail has
-        // to be this box's border or it cannot look right.
+    fn a_header_paints_nothing_at_all() {
+        // 2c: the header stopped being a surface. It used to be one box — an
+        // opaque fill plus the state rail as its own `border-left` — and both
+        // are gone. The fill was the one surface in the window that ignored
+        // `window.chrome_opacity`, which is what this change is for; the border
+        // was a *second* rail, at a different x and a different width from the
+        // one the grid draws in the gutter, and the fill was all that hid the
+        // jog between them.
+        //
+        // A quiet, unfoldable header therefore draws text and nothing else.
         let area = [0.0, 100.0, 800.0, 400.0];
-        let b = layout_blocks(&[view(7, (2, 3))], area, 20.0, 2.0, &colors(), None, 0.0, &mut measure);
-        let band = [0.0, 100.0 + 2.0 * 20.0, 800.0, 20.0];
-        let header: Vec<_> = b.rects.iter().filter(|r| r.rect == band).collect();
-        assert_eq!(header.len(), 1, "one box, not a band plus a rail beside it");
-        let h = header[0];
-        assert_eq!(h.border_width, RAIL * 2.0, "the rail is 2 logical px, scaled");
-        assert_eq!(h.radii, [RADIUS * 2.0; 4], "all four corners round, as `border-radius:8px` does");
-        assert_eq!(
-            h.border_omit,
-            border_sides::TOP | border_sides::RIGHT | border_sides::BOTTOM,
-            "left only — the other three sides are what the stroke tapers into"
+        let v = BlockView { foldable: false, ..view(7, (2, 3)) };
+        let b = layout_blocks(&[v], area, 20.0, 2.0, &colors(), None, 0.0, &mut measure);
+        assert!(
+            b.rects.is_empty(),
+            "a header is a row of text on the grid; every rect it used to push is one the \
+             wallpaper cannot show through"
         );
-        assert_eq!(h.border, colors().success, "exit 0 inks the rail green");
-        assert_eq!(h.fill, colors().block_header_bg);
+        assert!(!b.texts.is_empty(), "the command and its metadata still print");
     }
 
     #[test]
-    fn every_block_state_reaches_the_rail() {
-        // Read off the header's border rather than a second rect: the states
-        // are the only thing the rail says, so losing one is silent.
-        let area = [0.0, 0.0, 800.0, 400.0];
+    fn every_block_state_reaches_the_header() {
+        // The rail itself is a layer down now (`App::block_bands`), but the
+        // header still inks the command from the same ladder, and the ladder is
+        // the only thing that says which state a block is in. A state that
+        // stops reaching it goes silent — the block just looks like every
+        // other one — so each arm is named here.
         let c = colors();
-        let rail = |v: BlockView| {
+        let area = [0.0, 100.0, 800.0, 400.0];
+        let cmd = |v: BlockView| {
             let b = layout_blocks(&[v], area, 20.0, 1.0, &c, None, 0.0, &mut measure);
-            b.rects.iter().find(|r| r.border_width > 0.0 && r.rect[2] == 800.0).expect("a header").border
+            b.texts.iter().find(|t| t.text == "cargo build").expect("the command").color
         };
-        assert_eq!(rail(view(1, (0, 1))), c.success, "exit 0");
-        assert_eq!(rail(BlockView { failed: true, ..view(1, (0, 1)) }), c.danger, "non-zero exit");
-        assert_eq!(rail(BlockView { running: true, ..view(1, (0, 1)) }), c.warn, "still running");
-        assert_eq!(rail(BlockView { no_output: true, ..view(1, (0, 1)) }), c.text_faint, "printed nothing");
-        assert_eq!(rail(BlockView { interrupted: true, ..view(1, (0, 1)) }), c.text_faint, "the host went away");
+        assert_eq!(cmd(view(1, (0, 1))), c.success, "exit 0");
+        assert_eq!(cmd(BlockView { failed: true, ..view(1, (0, 1)) }), c.danger, "non-zero exit");
+        assert_eq!(cmd(BlockView { running: true, ..view(1, (0, 1)) }), c.text_active, "still running");
+        assert_eq!(
+            cmd(BlockView { no_output: true, ..view(1, (0, 1)) }),
+            c.text_inactive,
+            "printed nothing"
+        );
+        assert_eq!(
+            cmd(BlockView { interrupted: true, ..view(1, (0, 1)) }),
+            c.text_inactive,
+            "the host went away"
+        );
     }
 }

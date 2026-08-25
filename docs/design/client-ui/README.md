@@ -225,28 +225,48 @@ The header's session identity reads from the **active tab** — literal text the
 
 **Layout:** vertical scroll, 16px top padding, each block `0 18px 12px`.
 
-**Block header:** 5px/12px padding, radius 8px, 10px gap, **2px left rail** coloured by
-`BlockState` — `success` exit 0, `danger` non-zero, `warn` running, `ui.faint` for a
-block with no output. Fill `#0f1526` when finished, `ui.panel` when running.
-Contents: fold chevron (`▾`/`▸`, `ui.faint`), the command in 12.5px mono (state colour
-when finished, `ui.fg` while running), spacer, then right-aligned metadata in 11px —
-cwd (`ui.faint`), duration (`ui.faint`), and outcome: `exit 0` in `success`, `exit N`
-in `danger`, or a running indicator (8px ring, 1.5px `warn`, transparent top, 0.9s
-linear spin) plus `running 4.2s`. Folded headers additionally show `N lines`.
+**A block header is not a surface.** It is a row of text on the grid, 12px in
+from the left, with no fill and no border of its own. Contents: fold chevron
+(`▾`/`▸`, `ui.faint`), the command in 12.5px mono (state colour when finished,
+`ui.fg` while running), spacer, then right-aligned metadata in 11px — duration
+(`ui.faint`), and the outcome: nothing at all when the command succeeded, `exit N`
+in `danger` when it did not, or a running indicator (an 8px arc of `warn`
+segments with a gap orbiting on the 0.9s turn) plus `running 4.2s`. Folded
+headers additionally show `N lines`; a header shows a cwd only where the block's
+differs from the session's, which the pane header and the prompt's own chip both
+already carry.
+
+The header *replaces* the shell's own prompt rows, and it does that by the grid
+not drawing them — not their cell backgrounds, not their glyphs, not their
+underlines. It used to do it with an opaque fill instead, and that fill was the
+one surface in the window that ignored `window.chrome_opacity`: with a
+translucent window or a background image every other surface showed the
+wallpaper and the block headers did not. Removing the fill removes the exception
+rather than tuning it, and the suppression has to name exactly the lines the
+header covers or the two texts print in one place.
 
 **The state rail runs the block's full height** — header *and* output, not the
 header alone — so a block is one object you can see the edges of. It lives in the
-window padding, 2px wide with a 4px gap before the first column, and it is drawn
-**in the grid layer, beneath the glyphs**. That is not an implementation detail
-to tidy away: chrome paints over the text, so a rail drawn a layer up shaves the
-left edge off column 0 on every output row, and with no padding to live in there
-is nowhere honest to put it, so it is not drawn at all (the header keeps its own).
+window padding, 2px wide with a 4px gap before the first column, its ends
+rounded, and it is drawn **in the grid layer, beneath the glyphs**. It is
+coloured by `BlockState`: `success` exit 0, `danger` non-zero, `warn` running,
+`ui.faint` for a block with no output or one whose host went away. That the rail
+lives a layer down is not an implementation detail to tidy away: chrome paints
+over the text, so a rail drawn a layer up shaves the left edge off column 0 on
+every output row, and with no padding to live in there is nowhere honest to put
+it, so it is not drawn at all. There is exactly one rail; the header carried a
+second one until #465, six pixels to the right and a different width, and only
+the opaque fill hid the jog between them.
+
+**A wash under the output** carries the other edge: 4.5% of the state colour,
+column 0 to the right edge, radius 5px, over the block's **output** rows only.
+A block that printed nothing (`cd ..`) has no wash — the rail alone says it ran.
 
 **Selecting a block.** Clicking its rail or its header selects it: rail to
-`ui.accent`, header fill to `ui.accentSoft`, and a 10%-accent wash over the
-output rows. A press anywhere in the grid proper clears it — two selections lit
-at once, a block and a drag, would be two answers to "what does ⌘⇧O copy". Esc
-does **not** clear it; that key belongs to the shell.
+`ui.accent` and the wash to 10% accent. One rule, not two. A press anywhere in
+the grid proper clears it — two selections lit at once, a block and a drag, would
+be two answers to "what does ⌘⇧O copy". Esc does **not** clear it; that key
+belongs to the shell.
 
 **Hover / focus on a block header** reveals a single 16px `⋯`, radius 5px,
 `ui.accentSoft` fill, `ui.accent` glyph, right-aligned before the metadata. Its
@@ -278,7 +298,8 @@ cwd in `ui.accent`, `⎇ main*` in `success`, `❯` in `ui.faint`, then an 8×16
 block cursor blinking on a 1.1s step-end cycle. Since #420 the context also renders as
 **chips** above the prompt row (`.prompt-chips`): cwd in `accent`, branch in `success`,
 venv/conda/node in `info`, kube/aws/ssh in `warn` — the session's own daemon's word, so a
-remote session shows the same chips. The PS1-styled spellings in the mock remain what a
+remote session shows the same chips. A chip is a 12% wash of its own tint with no border,
+matching the wash under a block's output; only a hovered chip takes a 1px `ui.accent` rule. The PS1-styled spellings in the mock remain what a
 shell prints; once compact-PS1 mode lands the chips are the only copy and the prompt
 collapses to `❯`.
 
@@ -373,7 +394,8 @@ Header `4px 14px 12px`, bottom border `#1b2338`: back `‹` in 17px `ui.accent`,
 
 Body: block cards 10px apart, radius 11px, 1px `#1b2338` (running block `ui.line`).
 Finished blocks are header-only — 10px/12px, 2px left rail in the state colour, command
-in 11.5px mono ellipsised, duration right in 10px `ui.faint`. Tapping expands output;
+in 11.5px mono ellipsised, duration right in 10px `ui.faint`. As on the desktop (§3) the
+header carries no fill of its own; the rail and a 4.5% state wash are the block's edges. Tapping expands output;
 long-press re-runs. The running block shows its rail in `warn`, the spinner ring instead
 of a duration, and its output inline at 11px, 1.65.
 

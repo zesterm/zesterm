@@ -937,6 +937,33 @@ you need before you trip on it.
 
 ### The dev harness on this box
 
+- **Never run `cargo fmt`.** There is no `rustfmt.toml` and the workspace is not
+  written to rustfmt's defaults, so `cargo fmt --all` rewrites **169 files** —
+  a diff that buries the change it was run beside, and one no gate asks for
+  (`cargo fmt --check` is in neither the eight gates nor CI). Match the
+  surrounding style by hand. Run it by accident and the cheapest recovery is
+  `git checkout -- .` and replaying your edits, because it reformats *your*
+  files too.
+- **A screenshot cannot show a command block by itself.** `--screenshot` implies
+  `--no-daemon` and its shell has no integration loaded, so there are no blocks
+  to draw and `--screen` has no `blocks` entry. Feed it a transcript instead:
+  `-e powershell.exe -NoLogo -NoProfile -File <script>` where the script writes
+  the OSC 133 markers itself and then sleeps past `--screenshot-delay`. Emit
+  them with `[Console]::Out.Write("$([char]27)]133;A$([char]7)")` — a literal
+  ESC, never a backslash escape, for `split_command_line`'s reason above.
+- **Pixels, not the preview, decide whether a colour is wrong.** The captures
+  carry the window's alpha, and anything rendering the PNG composites it over
+  white — so on a translucent window (this box's config is ~5%) a correct frame
+  reads as washed-out and a regression reads as normal. Sample with
+  `System.Drawing.Bitmap.GetPixel` and compare against the same point in a
+  capture from `main`'s own binary, or shoot with `--opacity 1`.
+- **A design mock's alpha is an *sRGB* number and this pipeline blends in linear
+  light.** Copying a CSS `rgba(…, .045)` into `washed()` paints several times as
+  strongly over a dark background — and over a light one moves it by a single
+  8-bit step, which is how a light theme ships with an invisible surface that
+  looks deliberate. Fix the *step*, solve the alpha against the theme's own
+  background, and assert the composite in sRGB (`state_wash` in `zest-app`,
+  #465; `oklch::contrast_shift` is the same lesson for opaque surfaces).
 - **The agent shell sets `NO_COLOR=1`**, and a pty child inherits it —
   PowerShell then strips every escape *before* the pty, so a colour test looks
   like a broken renderer. `Remove-Item Env:\NO_COLOR` before any visual check,

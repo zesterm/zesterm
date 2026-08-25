@@ -161,17 +161,27 @@ pub fn layout_prompt_chips(
     for (chip, w) in view.chips.iter().zip(&widths) {
         let rect = [x, chip_y, *w, chip_h];
         let hovered = hover == Some(HitRegion::PromptChip(chip.kind));
+        let tint = chip_tint(chip.kind, colors);
+        // A wash of the chip's own tint rather than one shared `pill_bg`
+        // behind a hairline: the same 12% recipe the glyph tiles and the tab
+        // chips use, and the same recipe as the wash under a block's output, so
+        // a chip reads as belonging to the thing it labels. The hairline goes
+        // with it — a bordered pill beside an unbordered block header was the
+        // loudest thing left on the prompt row.
+        //
+        // Hover still borders, because hover has to say something the resting
+        // state does not.
         out.rects.push(RectInstance {
             radii: [CHIP_RADIUS * scale; 4],
-            border: if hovered { colors.accent } else { colors.line },
-            border_width: scale.max(1.0),
-            ..RectInstance::filled(rect, colors.pill_bg, clip)
+            border: if hovered { colors.accent } else { LinearRgba::TRANSPARENT },
+            border_width: if hovered { scale.max(1.0) } else { 0.0 },
+            ..RectInstance::filled(rect, super::layout::washed(tint, 0.12), clip)
         });
         out.texts.push(TextRun {
             text: chip.label.clone(),
             pos: [x + hpad, baseline_in(chip_y, chip_h, px)],
             max_width: *w - hpad * 2.0,
-            color: chip_tint(chip.kind, colors),
+            color: tint,
             clip,
             px,
             bold: false,
