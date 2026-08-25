@@ -194,6 +194,26 @@ Probe results on the development machine (Windows 11, hybrid graphics):
 | Dx12 | Intel Iris Xe | `Opaque` |
 | Dx12 | Microsoft Basic Render Driver | `Opaque` |
 
+Measured later on Linux (Arch, Hyprland/wlroots, Hyper-V VM with no GPU, so
+Mesa's **lavapipe** software Vulkan — the adapter is irrelevant to what the
+*window system* offers, which is what this table is about):
+
+| Session | Backend | Adapter | `alpha_modes` |
+|---|---|---|---|
+| Wayland | Vulkan | llvmpipe (LLVM 22.1.8) | `Opaque`, **`PreMultiplied`** |
+| X11 (XWayland) | Vulkan | llvmpipe (LLVM 22.1.8) | **`PreMultiplied`**, `Inherit` |
+
+Both Linux sessions reach PATH A, so Linux needs no fallback of its own and
+`alpha_mode_for` needs no `Inherit` arm — which was worth measuring rather than
+assuming, because the natural guess is that X11 offers only `Inherit`.
+
+**Read this table as a property of the surface, not of the adapter.** The X11
+row has no `Opaque` in it: `alpha_probe` creates a *transparent* window, which
+on X11 selects a 32-bit ARGB visual, and the capabilities follow the visual.
+The same adapter under an opaque window reports `Opaque` normally. That is why
+`alpha_mode_for` is asked per surface and why `window.opacity` is fixed at
+creation on X11 — the visual is chosen once, when the window is built.
+
 Two conclusions:
 
 1. **DX12 cannot deliver per-pixel alpha through wgpu's ordinary surface path**, on any
