@@ -668,6 +668,21 @@ you need before you trip on it.
   this (#285). Spell no backslashes in a command line — embed the literal
   byte, ESC included; #408 tracks whether the splitter should learn sh's
   double-quote rule.
+- **An `extern "C"` declaration missing an argument links fine and mostly
+  works.** `mkfifo` was declared `fn(path) -> i32` where POSIX is
+  `mkfifo(const char *path, mode_t mode)`, so the call passed one argument and
+  the callee read its second from whatever the ABI's second register held.
+  Garbage that happened to be a valid mode made the FIFO; garbage that did not
+  returned `EINVAL`. Nothing warns — the signature is asserted by the
+  programmer, and the linker only matches the *name*. It presented as
+  `a_fifo_is_refused_rather_than_opened` failing about three runs in five under
+  `cargo test --workspace` while passing every time in isolation, which reads
+  as flaky infrastructure rather than as undefined behaviour, and which makes
+  the one gate you are told to trust untrustworthy. When a test's *setup* line
+  is what fails, suspect the declaration before the environment: print
+  `std::io::Error::last_os_error()` rather than asserting on the return code
+  alone, which is what turned this from "mkfifo returned -1" into a one-line
+  fix. (#473)
 - **macOS's `/bin/sh` does not pass `SIGINT` on when non-interactive**, so a
   `sh -c 'sleep 30'` test child survives a `^C` a working pty delivered
   correctly. Spawn the binary directly in tests.
