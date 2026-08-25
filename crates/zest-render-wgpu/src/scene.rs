@@ -169,6 +169,26 @@ impl BandRun {
     fn rows(&self) -> usize {
         self.end_row - self.first_row
     }
+
+    /// Corner radii for this run: `[tl, tr, br, bl]`, matching
+    /// [`RectInstance::radii`].
+    ///
+    /// Rounded at every end the run really *ends* at, square only where the
+    /// **viewport edge** cut it off — a cap where the block continues reads as
+    /// "the block starts here", which would be a lie on every scroll.
+    ///
+    /// Reaching `first..end` is not the only honest ending, which is the part
+    /// that is easy to get wrong: under a fold the hidden lines are simply
+    /// absent, so a folded block's run stops at its header rows with output
+    /// lines still to come, and a blank filler row ends one with history still
+    /// to come. Both are the end of the block *as drawn*, and both sit well
+    /// inside the viewport — so the test is where the run stopped, not which
+    /// line it stopped on.
+    fn caps(&self, r: f32, first: u64, end: u64, rows: usize) -> [f32; 4] {
+        let top = if self.first_line == first || self.first_row > 0 { r } else { 0.0 };
+        let bottom = if self.last_line + 1 == end || self.end_row < rows { r } else { 0.0 };
+        [top, top, bottom, bottom]
+    }
 }
 
 /// Extend `run` onto `row`, or close it and start the next.
@@ -195,14 +215,6 @@ fn advance(run: &mut Option<BandRun>, row: usize, at: Option<(u32, u64)>) -> Opt
             ended
         }
     }
-}
-
-/// Corner radii for a run: rounded only at the ends it actually reached.
-///
-/// `[tl, tr, br, bl]`, matching [`RectInstance::radii`].
-fn caps(r: f32, top: bool, bottom: bool) -> [f32; 4] {
-    let (t, b) = (if top { r } else { 0.0 }, if bottom { r } else { 0.0 });
-    [t, t, b, b]
 }
 
 /// One terminal view: a grid, where to draw it, and how it is coloured.
@@ -1110,10 +1122,8 @@ impl Scene {
     ///
     /// **One rect per block, not one per row.** A run of rows coalesces while
     /// the band is unchanged and the rows keep touching, which is what lets the
-    /// rail and the wash have rounded ends at all — and a cap is only honest on
-    /// an end the run actually *reached*. A run cut off by the viewport edge
-    /// keeps that end square: a cap where the block does not end reads as "the
-    /// block starts here", which would be a lie on every scroll.
+    /// rail and the wash have rounded ends at all. Only the **viewport edge**
+    /// leaves an end square — see [`BandRun::caps`].
     ///
     /// Contiguity is tested on **rows**, never on lines. A fold compacts the
     /// hidden lines away, so the rows that survive touch even where their line
@@ -1170,7 +1180,7 @@ impl Scene {
                         // Half its own width is the only honest radius for a
                         // rule; the shader clamps it against the short side, so
                         // a one-row run cannot invert.
-                        radii: caps(rail_w * 0.5, run.first_line == b.from, run.last_line + 1 == b.to),
+                        radii: run.caps(rail_w * 0.5, b.from, b.to, rows.len()),
                         ..RectInstance::filled(rect, b.rail, rail_clip)
                     });
                 }
@@ -1180,11 +1190,7 @@ impl Scene {
                 if let Some(fill) = b.wash {
                     let rect = [ox, oy + run.first_row as f32 * ch, wash_w, run.rows() as f32 * ch];
                     self.rects.push(RectInstance {
-                        radii: caps(
-                            WASH_RADIUS * vp.scale,
-                            run.first_line == b.header_to,
-                            run.last_line + 1 == b.to,
-                        ),
+                        radii: run.caps(WASH_RADIUS * vp.scale, b.header_to, b.to, rows.len()),
                         ..RectInstance::filled(rect, fill, clip)
                     });
                 }
@@ -1877,6 +1883,39 @@ mod tests {
         assert_eq!(rail.radii[0], RAIL_PX * 0.5, "line 0 is the band's start, so it caps");
         assert_eq!(rail.radii[2], 0.0, "but its end is off-screen, so that stays square");
         assert_eq!(rail.radii[3], 0.0);
+    }
+
+    #[test]
+    fn a_folded_blocks_rail_ends_rounded_where_it_stops_being_drawn() {
+        // Reaching `to` is not the only honest ending. A fold hides a block's
+        // output lines outright, so its run stops at the header rows with the
+        // rest of `[from, to)` still to come — well inside the viewport. Keyed
+        // on the line alone that end squares off, and a folded block reads as
+        // cut in half by the row below it.
+        let p = palette();
+        let grid = lined(4, 10);
+        // Line 0 is the block's header; lines 1..6 are its folded-away output,
+        // and the rows below it belong to nothing.
+        let map = [0usize, usize::MAX, usize::MAX, usize::MAX];
+        let bands = [header_band(0, 1, 6)];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            blocks: &bands,
+            gutter: 16.0,
+            row_map: Some(&map),
+            ..viewport(&grid, &p, 1.0)
+        };
+        emit_bands(&mut scene, &grid, &vp);
+        let rail = scene
+            .rects
+            .iter()
+            .find(|r| (r.rect[2] - RAIL_PX).abs() < f32::EPSILON)
+            .expect("a folded block still rails its header");
+        assert_eq!(rail.rect[3], 16.0, "one row: the output rows are not drawn");
+        assert!(
+            rail.radii.iter().all(|r| *r == RAIL_PX * 0.5),
+            "both ends are ends — nothing below it is this block's, so neither was cut off              by the viewport"
+        );
     }
 
     #[test]
