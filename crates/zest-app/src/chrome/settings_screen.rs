@@ -649,8 +649,8 @@ pub fn settings_screen(
                 if *restart {
                     chip("needs a restart".into(), colors.pill_warn_text, Some(colors.pill_warn_bg));
                 }
-                if *inert {
-                    chip("not applied yet".into(), colors.text_faint, None);
+                if let Some(text) = inert.label() {
+                    chip(text.into(), colors.text_faint, None);
                 }
 
                 // The control column: right-aligned beside the text, or on
@@ -1844,7 +1844,7 @@ mod tests {
             value,
             provenance: None,
             restart: false,
-            inert: false,
+            inert: crate::chrome::model::Inert::No,
             modified,
         }
     }

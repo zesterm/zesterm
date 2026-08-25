@@ -5233,7 +5233,7 @@ mod tests {
                 value: SettingsValueCell::Select { value: "acrylic".into() },
                 provenance: None,
                 restart: false,
-                inert: false,
+                inert: crate::chrome::model::Inert::No,
                 modified: false,
             }];
             let mut screen = settings_screen_model(rows, 0, false);
@@ -5293,7 +5293,7 @@ mod tests {
             value: SettingsValueCell::Text { text: "pwsh -NoLogo".into(), placeholder: false },
             provenance: None,
             restart: false,
-            inert: false,
+            inert: crate::chrome::model::Inert::No,
             modified: false,
         }];
         mo.settings = Some(settings_screen_model(rows, 0, false));
@@ -5323,7 +5323,7 @@ mod tests {
                 value: SettingsValueCell::Toggle { on: i % 2 == 0 },
                 provenance: None,
                 restart: false,
-                inert: false,
+                inert: crate::chrome::model::Inert::No,
                 modified: false,
             })
             .collect()
@@ -5446,7 +5446,7 @@ mod tests {
                 value: SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
                 provenance: None,
                 restart: false,
-                inert: false,
+                inert: crate::chrome::model::Inert::No,
                 modified: false,
             }],
             0,

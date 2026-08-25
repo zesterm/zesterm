@@ -186,7 +186,7 @@ pub fn build_profile_rows(
                 // tuple's bool means *warn*, which no profile chip is.
                 provenance: None,
                 restart: false,
-                inert: false,
+                inert: crate::chrome::model::Inert::No,
                 modified,
             });
             chips.push(chip);

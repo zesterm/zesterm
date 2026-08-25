@@ -1020,8 +1020,8 @@ pub enum SettingsRowModel {
         provenance: Option<(String, bool)>,
         /// Changing this applies on the next launch.
         restart: bool,
-        /// Declared in the schema but not consumed by the app yet.
-        inert: bool,
+        /// Why this row refuses input, if it does.
+        inert: Inert,
         /// Differs from the schema default.
         modified: bool,
     },
@@ -1033,6 +1033,43 @@ pub enum SettingsRowModel {
     Unknown { key: String, source: String, suggestion: Option<String> },
 }
 
+/// Why a settings row is dimmed and takes no clicks.
+///
+/// One value rather than a `bool` beside a label, because the two would have to
+/// agree and the pair is the whole point: a control the platform *cannot*
+/// deliver was being tagged "not applied yet", which promises it eventually
+/// will. The dimming and the reason are one fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inert {
+    /// It works; the row takes clicks.
+    No,
+    /// Declared in the schema but not consumed by the app yet -- a bug to fix.
+    NotWired,
+    /// Consumed, but this platform cannot deliver it. Not a bug and never
+    /// going to change here, so it must not read as pending (ADR-003's
+    /// "never silently ignored", and issue #9's "grey out the toggle").
+    Unsupported,
+}
+
+impl Inert {
+    /// Whether the row is dimmed and refuses hit regions.
+    #[must_use]
+    pub fn is_inert(self) -> bool {
+        !matches!(self, Self::No)
+    }
+
+    /// The chip's text, or `None` when there is nothing to say.
+    #[must_use]
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::No => None,
+            Self::NotWired => Some("not applied yet"),
+            Self::Unsupported => Some("not on this platform"),
+        }
+    }
+}
+
+    
 /// One category of the settings tab's rail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsCategoryModel {

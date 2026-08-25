@@ -2316,6 +2316,10 @@ pub struct App {
     /// system tracks this anyway, so turning the setting on takes effect
     /// without waiting for the next appearance change.
     system_light: bool,
+    /// Which display server this process connected to, asked of the display
+    /// handle once the event loop exists. Decides whether `window.opacity`
+    /// can move without a relaunch.
+    session: crate::platform::Session,
     mouse: MouseState,
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
@@ -2566,6 +2570,7 @@ impl App {
             // There is no window yet to ask, and guessing light would flash a
             // light theme on a dark desktop. `resumed` seeds it for real.
             system_light: false,
+            session: crate::platform::Session::default(),
             mouse: MouseState::default(),
             pointer_cell: (0, 0),
             theme_import_error: None,
@@ -6250,6 +6255,9 @@ impl App {
         // Taken before the &mut borrow below, and taken *once*: opening the
         // menu again on every rebuild would make it impossible to dismiss.
         let start_menu_key = self.start_menu_key.take();
+        // Read before the closure: it borrows `self.settings_ui` mutably, and
+        // the capability answer is about the surface, not the form.
+        let caps = self.capabilities();
         let settings_model = self.settings_ui.as_mut().zip(settings_inputs).map(
             |(ui, (values, provenance, restart_pending, error, unknown_keys, visible_cats))| {
                 use crate::settings_ui as sui;
@@ -6315,6 +6323,7 @@ impl App {
                         &restart_pending,
                         error.as_deref(),
                         &ui.installed,
+                        caps,
                     );
                     let empty = rows
                         .is_empty()
@@ -12375,6 +12384,27 @@ impl App {
     /// `Fonts::set_grid_antialias`; the chrome is pinned to whatever the
     /// renderer can actually do, so that turning the grid down to grayscale
     /// does not drag the window's own furniture with it.
+    /// What this process can actually deliver, for the settings form.
+    ///
+    /// Every field is observed rather than assumed. `transparency` reads the
+    /// `alpha_mode` the surface was *configured* with, which is the only thing
+    /// that knows whether `alpha_mode_for` had to fall back -- on Windows it is
+    /// adapter-dependent (ADR-003) and on X11 it follows the window's visual.
+    /// Before a surface exists there is nothing to report, and claiming a limit
+    /// we have not seen would grey out a control that turns out to be fine.
+    fn capabilities(&self) -> crate::platform::Capabilities {
+        let transparency = self.gpu.as_ref().is_none_or(|g| {
+            g.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque || self.config.opacity >= 1.0
+        });
+        crate::platform::Capabilities {
+            transparency,
+            live_opacity: self.session != crate::platform::Session::X11,
+            // Compile-time: there is no Linux implementation to probe for, and
+            // probing would be inventing one.
+            backdrop: cfg!(windows) || cfg!(target_os = "macos"),
+        }
+    }
+
     fn antialias_for(config: &Config) -> zest_font::TextAntialias {
         if config.translucent_surface() {
             return zest_font::TextAntialias::Grayscale;
@@ -12421,8 +12451,10 @@ impl App {
     /// relaunch:
     ///
     /// 1. The window's own `transparent` attribute. winit can change this after
-    ///    creation on macOS and Windows; **X11 can only take it at build time**,
-    ///    so there it is logged rather than pretended.
+    ///    creation on macOS, Windows **and Wayland**, where it updates the
+    ///    surface's opaque region; **X11 can only take it at build time** —
+    ///    `set_transparent` is an empty function there — so on X11 alone it is
+    ///    logged rather than pretended.
     /// 2. The surface's `alpha_mode`. It is an ordinary field on the
     ///    configuration the app already owns, and the capability to decide it
     ///    with is now kept on [`Gpu`] rather than dropped inside `init_gpu`.
@@ -12451,11 +12483,17 @@ impl App {
         // that silently does nothing is the bug this whole sweep is closing,
         // but a line repeated on every unrelated reload is how a log stops
         // being read at all.
-        if cfg!(all(unix, not(target_os = "macos"))) {
+        // The session, not the `cfg`: this used to fire for every non-macOS
+        // unix and say "on X11", which is wrong on Wayland -- where
+        // `set_transparent` really does update the surface's opaque region and
+        // the change takes effect now. On X11 winit's `set_transparent` is an
+        // empty function and the ARGB visual is fixed when the window is
+        // built, so there the relaunch is real.
+        if self.session == crate::platform::Session::X11 {
             tracing::info!(
-                "window transparency is fixed at creation on X11; \
-                 window.opacity and window.chrome_opacity apply on the \
-                 next launch here"
+                "window.opacity and window.chrome_opacity apply at the next \
+                 launch on X11: the visual carrying the alpha is chosen when \
+                 the window is created"
             );
         }
         w.set_transparent(want);
@@ -12645,6 +12683,10 @@ impl App {
             .then(|| self.window_size_in_cells(el))
             .flatten();
 
+        // Asked of the event loop's display handle before the window exists,
+        // because `ActiveEventLoop` already knows and the answer decides what
+        // `window.opacity` is allowed to promise.
+        self.session = crate::platform::Session::of(el);
         let attrs = Window::default_attributes()
             .with_title("zesterm")
             // The cross-platform builder, deliberately: this is the whole of

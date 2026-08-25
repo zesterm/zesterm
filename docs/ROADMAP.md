@@ -286,6 +286,22 @@ the history behind them is in closed issues and PRs.
       copy-on-select off, read the right way round. `clipboard_probe` answers
       what a given session supports, since PRIMARY needs wlr data-control v2
       and many compositors do not offer it.
+- [x] **Linux: transparency, and honest degradation where it stops** (#476).
+      The ARGB visual half already worked and is now measured: `--opacity 0.7`
+      lands alpha 178 with the background premultiplied to exactly 0.7, on
+      Wayland and X11 alike (ADR-003 carries both rows). What was missing was
+      the honesty. `window.backdrop` warned into a log nobody reads while the
+      dropdown accepted the value, which is the "silently ignored" ADR-003
+      forbids; blur still has no portable path and is not attempted. The
+      `Capabilities` that ADR promised now exists at the size the problem
+      turned out to be — three observed facts feeding `Inert::Unsupported` and
+      the `Notice` row the settings screen already drew — so the control is
+      dimmed, unclickable, tagged *not on this platform* rather than *not
+      applied yet*, and the banner says what does work: the compositor blurs.
+      The variants are **not** filtered per platform, because `ui-fields.json`
+      is a `check-export-web` artifact that must be byte-identical on all three
+      legs, `field.variants` is read by index in four places, and one config
+      spans a fleet.
 - [x] **Linux packaging** (#482) — an Arch `PKGBUILD`, a desktop entry and an
       icon under `packaging/linux/`, plus the two `LICENSE-*` files the repo
       declared in `Cargo.toml` and `README.md` and had never actually carried.

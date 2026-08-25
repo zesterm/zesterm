@@ -110,6 +110,162 @@ pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::Window
 #[cfg(any(windows, target_os = "macos"))]
 pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
     attrs
+/// Which display server this process actually connected to.
+///
+/// Read from the display handle, never from `XDG_SESSION_TYPE` or
+/// `WAYLAND_DISPLAY`: an XWayland run has both set and *is* X11, which is
+/// precisely the case where the answer changes what `window.opacity` can do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Session {
+    /// Windows, macOS, or a unix display server we do not distinguish.
+    #[default]
+    Other,
+    Wayland,
+    X11,
+}
+
+impl Session {
+    /// Ask the display handle what it is.
+    pub fn of(h: &impl raw_window_handle::HasDisplayHandle) -> Self {
+        use raw_window_handle::RawDisplayHandle;
+        match h.display_handle().map(|d| d.as_raw()) {
+            Ok(RawDisplayHandle::Wayland(_)) => Self::Wayland,
+            Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)) => Self::X11,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What this process cannot honour, in the settings form's own terms.
+///
+/// ADR-003 promised a `Capabilities` value reported to the settings layer, and
+/// said the fallback must be visible rather than silent. This is that promise
+/// at the size the problem turned out to be: three observed facts, feeding the
+/// `inert` flag and the `Notice` row the settings screen already draws. A
+/// variant-per-capability enum would have identical call sites and one more
+/// table to keep in step with the schema.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Capabilities {
+    /// The surface actually composites per-pixel alpha. **Observed** from the
+    /// configured `alpha_mode`, not guessed from the platform: on Windows this
+    /// is adapter-dependent (ADR-003) and on X11 it depends on the visual the
+    /// window was built with.
+    pub transparency: bool,
+    /// `window.opacity` takes effect without a relaunch. False on X11, where
+    /// winit's `set_transparent` is an empty function and the ARGB visual is
+    /// fixed when the window is created.
+    pub live_opacity: bool,
+    /// A platform backdrop material exists at all. Compile-time: there is no
+    /// Linux implementation to probe, and probing for one would be inventing
+    /// it.
+    pub backdrop: bool,
+}
+
+impl Default for Capabilities {
+    /// Everything works. The honest default for a process that has not yet
+    /// built a surface — claiming a limit we have not observed would grey out
+    /// a control that turns out to be fine.
+    fn default() -> Self {
+        Self { transparency: true, live_opacity: true, backdrop: true }
+    }
+}
+
+impl Capabilities {
+    /// Whether this platform can deliver what the key promises.
+    ///
+    /// Only keys that are *wired and undeliverable* answer `false`; a key this
+    /// build simply does not read is `NOT_YET_WIRED`'s business, which is a
+    /// different fact and a different list.
+    #[must_use]
+    pub fn honours(&self, key: &str) -> bool {
+        match key {
+            "window.backdrop" => self.backdrop,
+            "window.opacity" => self.transparency,
+            _ => true,
+        }
+    }
+
+    /// The Window category's banner, or `None` when everything it offers works.
+    ///
+    /// Says what *does* work rather than only what does not: on the platform
+    /// where the backdrop is missing, the compositor is usually the thing that
+    /// blurs, and a notice that only refuses leaves the user with nowhere to
+    /// go.
+    #[must_use]
+    pub fn window_notice(&self) -> Option<String> {
+        let mut out: Vec<&str> = Vec::new();
+        if !self.backdrop {
+            out.push(
+                "`window.backdrop` has no effect here: no Wayland protocol offers a blur \
+                 material and X11's are compositor-specific. Hyprland and KWin blur behind \
+                 translucent windows themselves -- set `window.opacity` below 1 and turn \
+                 blur on in the compositor.",
+            );
+        }
+        if !self.transparency {
+            out.push(
+                "`window.opacity` is ignored: this surface cannot composite per-pixel alpha, \
+                 so the window is opaque whatever the value says.",
+            );
+        } else if !self.live_opacity {
+            out.push(
+                "`window.opacity` applies at the next launch: the visual carrying the alpha \
+                 is chosen when the window is created, and X11 cannot swap it afterwards.",
+            );
+        }
+        (!out.is_empty()).then(|| out.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::Capabilities;
+
+    /// A banner that is always up is wallpaper; one that never appears is the
+    /// warn-only status quo this replaces.
+    #[test]
+    fn a_notice_appears_exactly_when_something_is_ignored() {
+        assert_eq!(Capabilities::default().window_notice(), None, "nothing to say when all of it works");
+        let no_blur = Capabilities { backdrop: false, ..Capabilities::default() };
+        assert!(no_blur.window_notice().is_some_and(|t| t.contains("window.backdrop")));
+        let opaque = Capabilities { transparency: false, ..Capabilities::default() };
+        assert!(opaque.window_notice().is_some_and(|t| t.contains("window.opacity")));
+    }
+
+    /// The two opacity sentences are mutually exclusive: a surface that cannot
+    /// composite alpha at all must not also be told it will work next launch.
+    #[test]
+    fn an_opaque_surface_is_not_promised_a_relaunch() {
+        let c = Capabilities { transparency: false, live_opacity: false, backdrop: true };
+        let t = c.window_notice().expect("something is ignored");
+        assert!(t.contains("is ignored"), "{t}");
+        assert!(!t.contains("next launch"), "an opaque surface gains nothing by relaunching: {t}");
+    }
+
+    /// `inert` must follow the capability, and must not spread to keys the
+    /// platform can perfectly well deliver.
+    #[test]
+    fn only_the_undeliverable_keys_are_refused() {
+        let c = Capabilities { transparency: false, live_opacity: false, backdrop: false };
+        assert!(!c.honours("window.backdrop"));
+        assert!(!c.honours("window.opacity"));
+        assert!(c.honours("window.padding"), "an unrelated key must stay live");
+        assert!(c.honours("appearance.theme"));
+    }
+
+    /// Every dotted key the notice names has to be a real setting, or the
+    /// banner is nonsense pointing at nothing.
+    #[test]
+    fn the_notice_names_real_settings() {
+        let c = Capabilities { transparency: false, live_opacity: false, backdrop: false };
+        let text = c.window_notice().expect("something is ignored");
+        let keys = zest_config::schema::keys();
+        for word in text.split('`').skip(1).step_by(2) {
+            if word.contains('.') && !word.contains(' ') {
+                assert!(keys.iter().any(|k| k == word), "notice names `{word}`, which is not a setting");
+            }
+        }
+    }
 }
 
 /// Give the window a solid background in the theme colour, painted by the OS.

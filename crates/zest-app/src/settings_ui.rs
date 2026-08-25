@@ -228,6 +228,7 @@ pub fn build_category_rows(
     restart_pending: &std::collections::BTreeSet<String>,
     error: Option<&str>,
     installed: &[String],
+    caps: crate::platform::Capabilities,
 ) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
     // Both sides of the "modified" comparison have to be spelled the same way.
     // Every float in `Settings` is an `f32` and JSON has only `f64`, so a live
@@ -246,6 +247,16 @@ pub fn build_category_rows(
         rows.push(SettingsRowModel::Notice { text: error.to_string() });
         actions.push(RowAction::None);
     }
+    // Under any parse error, which is about the file rather than the machine.
+    // A dimmed control with no explanation is its own bug, so the greying and
+    // this line ship together -- ADR-003's "never silently ignored" is only
+    // half-kept by an `inert` nobody can account for.
+    if group == "Window" {
+        if let Some(text) = caps.window_notice() {
+            rows.push(SettingsRowModel::Notice { text });
+            actions.push(RowAction::None);
+        }
+    }
     if !restart_pending.is_empty() {
         let text = if restart_pending.len() == 1 {
             format!("{} applies on the next launch", restart_pending.iter().next().expect("len 1"))
@@ -262,7 +273,7 @@ pub fn build_category_rows(
         .filter(|(_, f)| f.group == group && matches_filter(f, &filter))
     {
         let editing = editing.filter(|e| e.field_idx == index);
-        rows.push(setting_row(field, values, provenance, editing, installed));
+        rows.push(setting_row(field, values, provenance, editing, installed, caps));
         actions.push(RowAction::Field(index));
     }
     (rows, actions)
@@ -304,6 +315,7 @@ pub fn build_unknown_rows(
 /// a time via [`build_category_rows`]; this is that, concatenated, so the
 /// two cannot disagree about which rows exist.
 #[allow(dead_code, reason = "the coverage tests' whole-schema view; production renders per category")]
+#[allow(clippy::too_many_arguments, reason = "forwards `build_category_rows`'s parameters verbatim")]
 #[must_use]
 pub fn build_rows(
     fields: &[UiField],
@@ -313,6 +325,7 @@ pub fn build_rows(
     editing: Option<&EditBuffer>,
     restart_pending: &std::collections::BTreeSet<String>,
     error: Option<&str>,
+    caps: crate::platform::Capabilities,
 ) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
     let mut rows = Vec::new();
     let mut actions = Vec::new();
@@ -338,6 +351,7 @@ pub fn build_rows(
             &banner_pending,
             banner_error,
             &[],
+            caps,
         );
         first = false;
         let banners =
@@ -373,6 +387,7 @@ fn setting_row(
     provenance: &BTreeMap<String, Source>,
     editing: Option<&EditBuffer>,
     installed: &[String],
+    caps: crate::platform::Capabilities,
 ) -> SettingsRowModel {
     let value = zest_config::ui::value_at(values, &field.key);
     // Warn when the winning layer outranks the user's file: an edit written
@@ -398,7 +413,19 @@ fn setting_row(
         value: cell,
         provenance,
         restart: zest_config::invalidate::class_of(&field.key) == zest_config::Invalidation::Restart,
-        inert: NOT_YET_WIRED.contains(&field.key.as_str()),
+        // Two different facts, deliberately ORed rather than merged into one
+        // list: `NOT_YET_WIRED` means "declared and nothing reads it", which is
+        // a bug to fix, while a capability means "read, and this platform
+        // cannot deliver it", which is the truth about the machine. A key in
+        // the second set must not be added to the first -- `settings_ui`'s own
+        // test asserts that list stays empty.
+        inert: if NOT_YET_WIRED.contains(&field.key.as_str()) {
+            crate::chrome::model::Inert::NotWired
+        } else if caps.honours(&field.key) {
+            crate::chrome::model::Inert::No
+        } else {
+            crate::chrome::model::Inert::Unsupported
+        },
         modified: value.is_some_and(|v| *v != field.default),
     }
 }
@@ -923,6 +950,58 @@ mod tests {
             .collect()
     }
 
+    /// The greying and the explanation ship together: `inert` without a notice
+    /// is a control that refuses clicks for no stated reason, which is its own
+    /// bug. Rows and actions are index-parallel, so the banner must occupy a
+    /// slot in both or every setting below it answers the wrong click.
+    #[test]
+    fn the_window_category_says_why_it_greyed_something_out() {
+        let all = fields();
+        let values = serde_json::to_value(zest_config::Settings::default()).expect("serializes");
+        let caps = crate::platform::Capabilities {
+            transparency: true,
+            live_opacity: true,
+            backdrop: false,
+        };
+        let (rows, actions) = build_category_rows(
+            &all, &values, &BTreeMap::new(), "Window", "", None, &no_pending(), None, &[], caps,
+        );
+        assert_eq!(rows.len(), actions.len(), "parallel by construction");
+        assert!(
+            matches!(&rows[0], SettingsRowModel::Notice { text } if text.contains("window.backdrop")),
+            "the Window category must lead with the reason, got {:?}",
+            rows.first()
+        );
+        let backdrop = rows
+            .iter()
+            .find(|r| matches!(r, SettingsRowModel::Setting { key, .. } if key == "window.backdrop"))
+            .expect("window.backdrop is in the Window category");
+        let SettingsRowModel::Setting { inert, .. } = backdrop else { unreachable!() };
+        assert_eq!(*inert, crate::chrome::model::Inert::Unsupported,
+            "a backdrop this platform cannot draw is unsupported, not merely unwired");
+    }
+
+    /// And the converse, which is what keeps the banner from becoming
+    /// wallpaper: a platform that can do all of it says nothing.
+    #[test]
+    fn a_capable_platform_gets_no_banner_and_no_dimming() {
+        let all = fields();
+        let values = serde_json::to_value(zest_config::Settings::default()).expect("serializes");
+        let (rows, _) = build_category_rows(
+            &all, &values, &BTreeMap::new(), "Window", "", None, &no_pending(), None, &[],
+            crate::platform::Capabilities::default(),
+        );
+        assert!(
+            !rows.iter().any(|r| matches!(r, SettingsRowModel::Notice { .. })),
+            "nothing is ignored, so there is nothing to announce"
+        );
+        for r in &rows {
+            if let SettingsRowModel::Setting { key, inert, .. } = r {
+                assert_eq!(*inert, crate::chrome::model::Inert::No, "{key} was dimmed on a platform that supports it");
+            }
+        }
+    }
+
     fn no_pending() -> std::collections::BTreeSet<String> {
         std::collections::BTreeSet::new()
     }
@@ -932,7 +1011,8 @@ mod tests {
         provenance: &BTreeMap<String, Source>,
         filter: &str,
     ) -> (Vec<SettingsRowModel>, Vec<RowAction>) {
-        build_rows(&fields(), values, provenance, filter, None, &no_pending(), None)
+        build_rows(&fields(), values, provenance, filter, None, &no_pending(), None,
+            crate::platform::Capabilities::default())
     }
 
     #[test]
@@ -1009,7 +1089,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("'{key}' renders a row"));
-            assert!(!inert, "'{key}' is wired, so its row must not say otherwise");
+            assert!(!inert.is_inert(), "'{key}' is wired, so its row must not say otherwise");
         }
     }
 
@@ -1219,6 +1299,7 @@ mod tests {
             None,
             &pending,
             Some("could not save"),
+            crate::platform::Capabilities::default(),
         );
         assert!(
             matches!(&rows[0], SettingsRowModel::Notice { text } if text.contains("could not save")),
@@ -1256,6 +1337,7 @@ mod tests {
             Some(&edit),
             &no_pending(),
             None,
+            crate::platform::Capabilities::default(),
         );
         let cell = rows
             .iter()
@@ -1477,6 +1559,7 @@ mod tests {
             &no_pending(),
             None,
             &[],
+            crate::platform::Capabilities::default(),
         );
         assert_eq!(rows.len(), actions.len(), "parallel by construction");
         for row in &rows {
@@ -1532,6 +1615,7 @@ mod tests {
             &no_pending(),
             None,
             &[],
+            crate::platform::Capabilities::default(),
         );
         let row = rows
             .iter()

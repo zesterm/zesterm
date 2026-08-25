@@ -320,7 +320,8 @@ pub enum Backdrop {
     Mica,
     /// Windows 11 Mica Alt, the tabbed-app variant.
     MicaAlt,
-    /// Acrylic blur. Undocumented on Windows; best-effort on Linux.
+    /// Acrylic blur. Undocumented on Windows; no effect on Linux, where no
+    /// Wayland protocol offers a blur material.
     Acrylic,
     /// macOS `NSVisualEffectView` vibrancy.
     Vibrancy,

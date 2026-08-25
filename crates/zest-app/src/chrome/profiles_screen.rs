@@ -959,7 +959,7 @@ mod tests {
             value,
             provenance: None,
             restart: false,
-            inert: false,
+            inert: crate::chrome::model::Inert::No,
             modified,
         }
     }

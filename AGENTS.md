@@ -947,6 +947,25 @@ you need before you trip on it.
   every drag; and a Wayland selection is owned by the **live process**, so a
   short-lived probe's PRIMARY vanishes on exit and reads as broken when it is
   not. `cargo run -p zest-app --example clipboard_probe` answers both. (#477)
+- **A `tracing::warn!` is not "degrading honestly"; it is failing silently with
+  extra steps.** `window.backdrop` had no Linux implementation and said so in a
+  log, while the settings dropdown accepted the value and the user's only
+  feedback was that nothing happened. ADR-003 had promised a `Capabilities`
+  reported to the settings layer and it was never built. What made the fix
+  small was that the mechanism already existed: `inert` on the value cell dims
+  a control to 35% and drops its hit regions, and `Notice` is the banner row.
+  Crucially `inert` is built **per render** in `settings_ui.rs`, on the value
+  cell rather than on the `UiField` — so honesty per platform costs nothing
+  from `check-export-web`, which requires the generated `ui-fields.json` to be
+  byte-identical on all three CI legs.
+  **Do not filter the variants** to hide what a platform cannot do: it breaks
+  that gate, `field.variants` is read *by index* in four places (filter one and
+  clicking "Vibrancy" writes "Acrylic"), and a config spans a fleet, so a value
+  set for the Windows box must stay visible from the Linux one. Show it, dim
+  it, say why.
+  And say why *accurately*: the dimmed chip read "not applied yet", which
+  promises a platform limit will lift. `Inert` carries its own reason, because
+  a bool beside a label is two facts that have to agree. (#476)
 
 ### Rendering and fonts
 
