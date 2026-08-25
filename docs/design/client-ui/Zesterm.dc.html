@@ -213,39 +213,39 @@ a:hover{color:#9cc4ff}
       <sc-if value="{{ isBlocks }}" hint-placeholder-val="{{ true }}">
         <div style="flex:1;overflow:hidden;background:#0b0f1a;padding:16px 0 0;display:flex;flex-direction:column;gap:2px;font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.62">
 
-          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
-            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#0f1526;border-left:2px solid #5fd17f">
+          <div style="position:relative;padding:0 18px 12px;display:flex;flex-direction:column">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:1px;background:#5fd17f"></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px">
               <span style="color:#4a516a">▾</span>
               <span style="color:#5fd17f;font-weight:500">cargo build --workspace</span>
               <div style="flex:1"></div>
-              <span style="color:#4a516a;font-size:11px">~/dev/zesterm</span>
               <span style="color:#4a516a;font-size:11px">51.2s</span>
-              <span style="color:#5fd17f;font-size:11px">exit 0</span>
             </div>
-            <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">   Compiling zest-core v0.4.0 (crates/zest-core)
+            <div style="border-radius:5px;background:rgba(95,209,127,.045);padding:8px 12px 8px 24px;color:#8b93a7;white-space:pre">   Compiling zest-core v0.4.0 (crates/zest-core)
    Compiling zest-theme v0.4.0 (crates/zest-theme)
    Compiling zest-render-wgpu v0.4.0 (crates/zest-render-wgpu)
     <span style="color:#5fd17f">Finished</span> `dev` profile [unoptimized] in 51.20s</div>
           </div>
 
-          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
-            <div onClick="{{ toggleFold }}" style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#0f1526;border-left:2px solid #5fd17f;cursor:pointer" style-hover="background:#121829">
+          <div style="position:relative;padding:0 18px 12px;display:flex;flex-direction:column">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:1px;background:#5fd17f"></div>
+            <div onClick="{{ toggleFold }}" style="display:flex;align-items:center;gap:10px;padding:5px 12px;cursor:pointer">
               <span style="color:#4a516a">{{ foldGlyph }}</span>
               <span style="color:#5fd17f;font-weight:500">cargo xtask check-deps</span>
               <div style="flex:1"></div>
               <span style="color:#4a516a;font-size:11px">3 lines</span>
               <span style="color:#4a516a;font-size:11px">0.41s</span>
-              <span style="color:#5fd17f;font-size:11px">exit 0</span>
             </div>
             <sc-if value="{{ folded }}" hint-placeholder-val="{{ false }}">
-              <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">zest-core: no forbidden deps (wgpu, winit, windows, tokio)
+              <div style="border-radius:5px;background:rgba(95,209,127,.045);padding:8px 12px 8px 24px;color:#8b93a7;white-space:pre">zest-core: no forbidden deps (wgpu, winit, windows, tokio)
 zest-core: builds for wasm32-unknown-unknown
 <span style="color:#5fd17f">ok</span> · 1 boundary checked</div>
             </sc-if>
           </div>
 
-          <div style="padding:0 18px 12px;display:flex;flex-direction:column">
-            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;background:#121829;border-left:2px solid #e0b341">
+          <div style="position:relative;padding:0 18px 12px;display:flex;flex-direction:column">
+            <div style="position:absolute;left:0;top:0;bottom:0;width:2px;border-radius:1px;background:#e0b341"></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:5px 12px">
               <span style="color:#4a516a">▾</span>
               <span style="color:#d7dcea;font-weight:500">cargo run -p zest-render-wgpu --example render_dump</span>
               <div style="flex:1"></div>
@@ -258,14 +258,14 @@ zest-core: builds for wasm32-unknown-unknown
                 <span style="padding:1px 7px;border-radius:5px;background:#16203a;color:#6ea8ff;font-size:10px">re-run ⌘⇧R</span>
               </div>
             </div>
-            <div style="padding:8px 12px 0 24px;color:#8b93a7;white-space:pre">   <span style="color:#5fc4e0">adapter</span> Apple M3 Max · Metal
+            <div style="border-radius:5px;background:rgba(224,179,65,.045);padding:8px 12px 8px 24px;color:#8b93a7;white-space:pre">   <span style="color:#5fc4e0">adapter</span> Apple M3 Max · Metal
    atlas 2048×2048 · 3 pipelines
    rendering grid 120×34 …</div>
           </div>
 
           <div style="padding:4px 30px 18px;display:flex;align-items:center;gap:8px;color:#d7dcea">
-            <span style="color:#b07cff">zesterm</span><span style="color:#4a516a">/</span><span style="color:#6ea8ff">~/dev/zesterm</span>
-            <span style="color:#5fd17f">⎇ main*</span>
+            <span style="color:#b07cff">zesterm</span><span style="color:#4a516a">/</span><span style="padding:1px 8px;border-radius:6px;background:rgba(110,168,255,.12);color:#6ea8ff">~/dev/zesterm</span>
+            <span style="padding:1px 8px;border-radius:6px;background:rgba(95,209,127,.12);color:#5fd17f">⎇ main*</span>
             <span style="color:#4a516a">❯</span>
             <span style="display:inline-block;width:8px;height:16px;background:#6ea8ff;animation:zcaret 1.1s step-end infinite"></span>
           </div>
@@ -1750,19 +1750,19 @@ PS C:\src\zesterm&gt; <span style="color:#4a516a">▍</span></div>
             </div>
             <div style="flex:1;overflow:hidden;padding:12px 12px 0;display:flex;flex-direction:column;gap:10px;font-family:'JetBrains Mono',monospace">
               <div style="border-radius:11px;overflow:hidden;border:1px solid #1b2338">
-                <div style="background:#0f1526;padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
+                <div style="padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
                   <span style="font-size:11.5px;color:#5fd17f;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">cargo build --workspace</span>
                   <span style="font-size:10px;color:#4a516a">51.2s</span>
                 </div>
               </div>
               <div style="border-radius:11px;overflow:hidden;border:1px solid #1b2338">
-                <div style="background:#0f1526;padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
+                <div style="padding:10px 12px;border-left:2px solid #5fd17f;display:flex;align-items:center;gap:8px">
                   <span style="font-size:11.5px;color:#5fd17f;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">cargo xtask check-deps</span>
                   <span style="font-size:10px;color:#4a516a">0.4s</span>
                 </div>
               </div>
               <div style="border-radius:11px;overflow:hidden;border:1px solid #2a3350">
-                <div style="background:#121829;padding:10px 12px;border-left:2px solid #e0b341;display:flex;align-items:center;gap:8px">
+                <div style="padding:10px 12px;border-left:2px solid #e0b341;display:flex;align-items:center;gap:8px">
                   <span style="font-size:11.5px;color:#d7dcea;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">render_dump --grid 120x34</span>
                   <div style="width:8px;height:8px;border-radius:50%;border:1.5px solid #e0b341;border-top-color:transparent;animation:zspin .9s linear infinite"></div>
                 </div>

@@ -369,6 +369,47 @@ pub(super) fn ring(
     }
 }
 
+/// A spinning ring drawn as the arc that is lit, rather than as a full ring
+/// with a bite erased out of it.
+///
+/// [`ring`] needs an opaque `bg` because its gap is a rect painted in whatever
+/// is behind — which works on a tab chip, and does not work anywhere the thing
+/// behind is the wallpaper. A block header has no fill since #465, so its
+/// spinner cannot erase anything: the gap here is an *absence*, so there is
+/// nothing to match and the picture is right over a background image, a
+/// translucent window, or a TUI's own colours.
+///
+/// Segments rather than one swept shape for [`ring`]'s reason: an SDF box
+/// cannot draw an arc, and one wide rect would be a chord — past a few degrees
+/// a chord cuts across the ring instead of running along it.
+pub(super) fn arc(
+    rects: &mut Vec<RectInstance>,
+    rect: [f32; 4],
+    ink: LinearRgba,
+    phase: f32,
+    clip: [f32; 4],
+) {
+    let d = rect[2].min(rect[3]);
+    let r = d / 2.0;
+    let (cx, cy) = (rect[0] + r, rect[1] + r);
+    let seg = (d * 0.28).max(1.5);
+    // Twelve reads as a circle and leaves a gap wide enough to see turning;
+    // fewer reads as a dotted ring, more closes the gap up.
+    const STEPS: usize = 12;
+    /// How much of the turn is dark, in steps. Two is the bite `ring` takes.
+    const GAP: usize = 2;
+    for i in GAP..STEPS {
+        let t = phase + i as f32 / STEPS as f32;
+        let angle = (t - 0.25) * core::f32::consts::TAU;
+        rects.push(RectInstance::rounded(
+            [cx + angle.cos() * r - seg / 2.0, cy + angle.sin() * r - seg / 2.0, seg, seg],
+            seg / 2.0,
+            ink,
+            clip,
+        ));
+    }
+}
+
 fn dot(rects: &mut Vec<RectInstance>, cx: f32, cy: f32, d: f32, color: LinearRgba, clip: [f32; 4]) {
     rects.push(RectInstance::rounded([cx - d / 2.0, cy - d / 2.0, d, d], d / 2.0, color, clip));
 }

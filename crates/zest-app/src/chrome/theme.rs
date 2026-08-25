@@ -33,7 +33,11 @@ pub struct ChromeColors {
     pub tab_active_bg: LinearRgba,
     /// Hover fill on rows and tabs — `ui.selSoft`.
     pub tab_hover_bg: LinearRgba,
-    /// A finished block header's fill — `zest_theme::derived::block_header_fill`.
+    /// A sunken surface inside the terminal's own —
+    /// `zest_theme::derived::block_header_fill`. Named for the block header it
+    /// used to fill; since #465 that is a row of text and this is the settings
+    /// and profiles rails, their footers, an unfocused pane's header band and
+    /// the picker's footer.
     pub block_header_bg: LinearRgba,
     /// The active tab's label.
     pub text_active: LinearRgba,
@@ -71,6 +75,21 @@ pub struct ChromeColors {
     pub panel_bg: LinearRgba,
     /// The scrim behind modal chrome.
     pub scrim: LinearRgba,
+    /// Relative luminance the wash under a block's output should reach, and the
+    /// luminance of the background it starts from.
+    ///
+    /// A block's wash is the state colour at some alpha, blended in **linear
+    /// light** — and no single alpha serves every theme. The alpha that lifts
+    /// `obsidian`'s near-black background into a visible panel moves `paper`'s
+    /// near-white one by a single 8-bit step, which is the same trap
+    /// `zest_theme::oklch::contrast_shift` documents for opaque surfaces, met
+    /// one layer down by something that has to stay translucent.
+    ///
+    /// So the *step* is fixed and the alpha is solved: this is where
+    /// `contrast_shift` would have landed, and `App::block_bands` asks what
+    /// alpha of the state colour over [`Self::bg_opaque`] reaches it.
+    pub wash_target: f32,
+    pub wash_from: f32,
     /// Drop-shadow alpha for floating chrome (the picker panel).
     pub shadow_alpha: f32,
 }
@@ -81,6 +100,12 @@ fn fill(c: Rgba8, chrome_opacity: f32) -> LinearRgba {
 }
 
 /// Text: token alpha only. Chrome opacity never applies to glyphs (ADR-003).
+/// Relative luminance of an opaque linear colour (Rec. 709).
+#[must_use]
+pub fn luminance(c: LinearRgba) -> f32 {
+    0.2126 * c.0[0] + 0.7152 * c.0[1] + 0.0722 * c.0[2]
+}
+
 fn text(c: Rgba8) -> LinearRgba {
     LinearRgba::from_srgb(c.r, c.g, c.b, f32::from(c.a) / 255.0)
 }
@@ -103,9 +128,18 @@ impl ChromeColors {
             bg: fill(ui.bg, chrome_opacity),
             tab_active_bg: fill(ui.bg, chrome_opacity),
             tab_hover_bg: text(ui.sel_soft),
-            // Always opaque, like the picker's panel: a block header
-            // *replaces* the prompt rows it covers, and a translucent one
-            // double-prints the very text it exists to reword.
+            // Not a block header's any more, despite the name — #465 made the
+            // header a row of text on the grid, and the rule this alpha used to
+            // keep ("a header *replaces* the prompt rows it covers, and a
+            // translucent one double-prints the very text it exists to reword")
+            // is kept by `zest_render_wgpu::BlockBand::header_to` instead, which
+            // stops the grid drawing those rows at all.
+            //
+            // Still opaque, and still `1.0` on purpose: its remaining callers
+            // are sunken *surfaces* — the settings and profiles rails and
+            // footers, an unfocused pane's header band, the picker's footer —
+            // and those are structure, not glass. Renaming it is a bigger sweep
+            // than this change earns.
             block_header_bg: fill(zest_theme::derived::block_header_fill(ui), 1.0),
             text_active: text(ui.fg),
             text_inactive: text(ui.dim),
@@ -132,6 +166,13 @@ impl ChromeColors {
             // 3px backdrop blur the rect pipeline cannot express; the heavier
             // scrim alone carries the separation.
             scrim: fill(ui.shadow, 0.66),
+            // 0.045 of perceptual lightness: a step you can see the edge of
+            // without reading as a surface. Measured against the design's mock
+            // on `obsidian`, then checked on the other four —
+            // `a_block_wash_is_visible_in_every_builtin_theme` is what keeps a
+            // new theme from shipping with invisible blocks.
+            wash_target: luminance(fill(zest_theme::oklch::contrast_shift(ui.bg, 0.045), 1.0)),
+            wash_from: luminance(fill(ui.bg, 1.0)),
             shadow_alpha: effects.chrome_shadow_alpha.unwrap_or(0.35).clamp(0.0, 1.0),
         }
     }

@@ -193,6 +193,7 @@ async fn run() {
             // one layer below anything that knows what a command block is.
             blocks: &[],
             gutter: 0.0,
+            scale: 1.0,
             // Select part of the SGR line so the highlight is exercised too.
             selection: term.abs_pos(3, 0).zip(term.abs_pos(3, 18)).map(|(a, b)| {
                 zest_core::Selection { anchor: a, head: b, mode: zest_core::SelectionMode::Simple }

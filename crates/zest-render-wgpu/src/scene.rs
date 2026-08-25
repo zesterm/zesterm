@@ -14,9 +14,13 @@ use crate::instance::{
     glyph_flags, DecorInstance, DecorKind, GlyphInstance, ImageInstance, LinearRgba, RectInstance,
 };
 
-/// The block rail's width, physical px. Matches the header band's own rail
-/// (`chrome::blocks::RAIL`) so the two read as one rule down the block —
-/// they are drawn in different layers and cannot share a constant.
+/// The block rail's width, *logical* px — scaled by [`Viewport::scale`] where
+/// it is drawn.
+///
+/// There is one rail. The block header used to carry a second one as its own
+/// `border-left`, six physical px to the right of this and a different width;
+/// the opaque header fill made the jog invisible, and removing that fill is
+/// what made it a bug rather than a detail (#465).
 ///
 /// Public because it is also the *threshold*: below this much
 /// [`Viewport::gutter`] there is nowhere honest to put the rail and it is
@@ -50,12 +54,155 @@ pub struct BlockBand {
     /// Half-open absolute line range, `[from, to)`.
     pub from: u64,
     pub to: u64,
+    /// Where the block's *output* starts: `[from, header_to)` are the shell's
+    /// own prompt rows, which the chrome's block header draws over instead.
+    ///
+    /// The grid draws none of those rows — not their cell backgrounds, not
+    /// their glyphs, not their underlines. A block header used to be an opaque
+    /// fill built at alpha `1.0` on purpose, and the thing that alpha bought
+    /// was hiding the prompt the header rewords; with the fill gone (#465) two
+    /// texts would print in one place. **Suppression is the replacement for
+    /// that fill**, and has to be exactly as wide as it was.
+    ///
+    /// `header_to == from` means no header covers this band. Callers keep
+    /// `from <= header_to <= to`, the way they keep the bands themselves
+    /// ascending and disjoint: the row loop trusts it rather than checking it.
+    pub header_to: u64,
     pub rail: LinearRgba,
-    /// The selected block's wash over its rows; `None` for every other block.
+    /// The state wash over the block's **output** rows, `[header_to, to)` —
+    /// every block that printed something, not only the selected one. `None`
+    /// for a block with no output (`cd ..`): the rail alone says it ran, and a
+    /// wash over the header rows would tint cells nobody draws.
     ///
     /// Kept translucent by its caller: this is painted *under* the glyphs, but
     /// an opaque fill would still flatten every cell background it covers.
     pub wash: Option<LinearRgba>,
+}
+
+/// What one visible row is, as far as block decoration is concerned.
+///
+/// Computed once per viewport per frame ([`row_bands`]), because three passes
+/// ask about it — the two row loops and [`Scene::emit_block_bands`] — and
+/// `scrollback` goes to ten million lines at sixty frames a second. One
+/// `resolved_row` and one `partition_point` per row, then everything
+/// downstream is an array index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RowBand {
+    /// Index into [`Viewport::blocks`], or [`NO_BAND`].
+    band: u32,
+    /// The line this row shows. Kept so the band pass needs neither the grid
+    /// nor a second resolve — and so a coalesced run can tell whether it
+    /// reached its band's true end or was cut off by the viewport edge.
+    line: u64,
+    /// The chrome's block header covers this row, so the grid draws none of it.
+    header: bool,
+}
+
+/// No band covers this row.
+const NO_BAND: u32 = u32::MAX;
+
+/// Whether the grid draws this row at all.
+///
+/// `false` where the chrome's block header replaces it — see
+/// [`BlockBand::header_to`]. A function rather than a closure at each of the
+/// two call sites, so a test asserts the rule the row loops actually use
+/// instead of a second copy of it.
+fn grid_draws(rows: &[RowBand], row: usize) -> bool {
+    !rows.get(row).is_some_and(|b| b.header)
+}
+
+/// Resolve every visible row against the bands, into `out`.
+///
+/// Empty when there are none, so the everyday path and every session without
+/// shell integration pays nothing — the promise [`Viewport::blocks`] makes.
+fn row_bands(grid: &Grid, vp: &Viewport<'_>, out: &mut Vec<RowBand>) {
+    out.clear();
+    if vp.blocks.is_empty() {
+        return;
+    }
+    out.reserve(grid.rows());
+    for row in 0..grid.rows() {
+        let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else {
+            out.push(RowBand { band: NO_BAND, line: 0, header: false });
+            continue;
+        };
+        // Binary search, not a scan: this runs per visible row per frame,
+        // and `scrollback` goes to ten million lines — so a linear `find`
+        // multiplies the block count by the row count sixty times a
+        // second. `zest_core::BlockIndex::block_at` deliberately stays
+        // linear for the same shape, and the reason it gives does not
+        // apply here: its list has "an open end" on the last entry, while
+        // a band's `to` is always a concrete line (a running block's is
+        // resolved against the cursor before it ever gets here).
+        //
+        // Sound because the bands are non-overlapping and ascending —
+        // `the_band_lookup_finds_the_same_answer_a_scan_would` pins that,
+        // since it is the precondition rather than a coincidence of
+        // construction.
+        let i = vp.blocks.partition_point(|b| b.to <= line);
+        let hit = vp.blocks.get(i).filter(|b| line >= b.from);
+        out.push(RowBand {
+            band: hit.map_or(NO_BAND, |_| i as u32),
+            line,
+            header: hit.is_some_and(|b| line < b.header_to),
+        });
+    }
+}
+
+/// The wash's corner radius, logical px — the design's number, scaled where it
+/// is drawn.
+const WASH_RADIUS: f32 = 5.0;
+
+/// One coalesced stretch of rows: same band, rows touching.
+#[derive(Debug, Clone, Copy)]
+struct BandRun {
+    band: u32,
+    first_row: usize,
+    /// One past the last row, so [`BandRun::rows`] is a subtraction and an empty
+    /// run cannot be spelled.
+    end_row: usize,
+    first_line: u64,
+    last_line: u64,
+}
+
+impl BandRun {
+    fn rows(&self) -> usize {
+        self.end_row - self.first_row
+    }
+}
+
+/// Extend `run` onto `row`, or close it and start the next.
+///
+/// Returns the run that just ended, if one did. A run extends only while the
+/// band is the same *and* the rows touch; `at == None` — past the end, or a row
+/// no band covers — closes whatever was open.
+fn advance(run: &mut Option<BandRun>, row: usize, at: Option<(u32, u64)>) -> Option<BandRun> {
+    match (run.as_mut(), at) {
+        (Some(r), Some((band, line))) if r.band == band && r.end_row == row => {
+            r.end_row = row + 1;
+            r.last_line = line;
+            None
+        }
+        (_, at) => {
+            let ended = run.take();
+            *run = at.map(|(band, line)| BandRun {
+                band,
+                first_row: row,
+                end_row: row + 1,
+                first_line: line,
+                last_line: line,
+            });
+            ended
+        }
+    }
+}
+
+/// Corner radii for a run: rounded only at the ends it actually reached.
+///
+/// `[tl, tr, br, bl]`, matching [`RectInstance::radii`].
+fn caps(r: f32, top: bool, bottom: bool) -> [f32; 4] {
+    let (t, b) = (if top { r } else { 0.0 }, if bottom { r } else { 0.0 });
+    [t, t, b, b]
 }
 
 /// One terminal view: a grid, where to draw it, and how it is coloured.
@@ -102,6 +249,16 @@ pub struct Viewport<'a> {
     /// no cell can ever occupy. `0.0` (padding turned off, a grid that fits
     /// exactly) means no rail — the header band still carries its own.
     pub gutter: f32,
+    /// Device pixels per logical pixel, for the decoration this crate draws in
+    /// its own right.
+    ///
+    /// The grid needs none of it — a cell's size already arrives in physical
+    /// px through [`CellMetrics`] — but the block rail and its wash are design
+    /// constants in *logical* px, and a 2px rule that does not thicken with the
+    /// display is a hairline beside 12.5pt text at 2x. It arrives pre-computed
+    /// for the same reason [`Self::gutter`] does: the caller owns the window,
+    /// this crate owns the pixels in one rect.
+    pub scale: f32,
     /// The active selection, if any.
     pub selection: Option<zest_core::Selection>,
     /// Colour of the selection highlight.
@@ -252,6 +409,12 @@ pub struct Scene {
     /// [`Chrome::overlay_rects_at`]).
     pub overlay_rects_at: usize,
     pub overlay_glyphs_at: usize,
+    /// Scratch, not part of the frame: which band covers each visible row.
+    ///
+    /// It never reaches the GPU. It lives here for the reason the instance
+    /// vectors do — allocating it per viewport per frame at 60 Hz would show up
+    /// in the profile, and `clear` keeps its capacity.
+    pub(crate) row_bands: Vec<RowBand>,
 }
 
 impl Scene {
@@ -368,7 +531,20 @@ impl Scene {
 
         self.push_window_background(vp);
 
+        // Taken, not borrowed: every emit below needs `&mut self` to push, so
+        // reading a field of `self` alongside them is a borrowck fight rather
+        // than a design. Returned at the end with its capacity intact.
+        let mut rows = core::mem::take(&mut self.row_bands);
+        row_bands(grid, vp, &mut rows);
+
+        // A header row belongs to the chrome, whole: no cell backgrounds, no
+        // glyphs, and — because they hang off the glyph pass — no underlines.
+        // The header used to be an opaque fill hiding exactly these; it is not
+        // a surface any more, so this is what hides them (#465).
         for row in 0..grid.rows() {
+            if !grid_draws(&rows, row) {
+                continue;
+            }
             let y = oy + row as f32 * ch;
             self.emit_row_backgrounds(grid, row, vp, ox, y, cw, ch, clip);
         }
@@ -376,17 +552,34 @@ impl Scene {
         // Block decoration first, then the selection over it: a dragged
         // selection is the more specific answer about the same rows, and the
         // one the user is making right now.
-        self.emit_block_bands(grid, vp, ox, oy, cw, ch, clip);
+        self.emit_block_bands(vp, &rows, grid.cols(), ox, oy, cw, ch, clip);
 
         // Selection sits above cell backgrounds but below the glyphs, so text
-        // stays readable through it.
+        // stays readable through it. **Not** suppressed on a header row:
+        // `Grid::selection_text` walks the retained lines and knows nothing
+        // about this scene, so the prompt row's text is in the clipboard
+        // either way — a highlight that skipped it would make the selection lie
+        // about what it will paste.
         self.emit_selection(grid, vp, ox, oy, cw, ch, clip);
 
         for row in 0..grid.rows() {
+            if !grid_draws(&rows, row) {
+                continue;
+            }
             let y = oy + row as f32 * ch;
             self.emit_row_glyphs(device, queue, atlas, fonts, metrics, grid, row, vp, ox, y, clip);
         }
 
+        self.row_bands = rows;
+
+        // Neither the caret nor a composition is ever suppressed. A finished
+        // block's prompt row cannot hold the cursor — both band builders skip a
+        // block with no `output_line`, which is the one the user is typing in —
+        // so this costs nothing today and is the safe default if that ever
+        // stops being true: a rule that *can* hide the caret is worse than the
+        // double-print it would prevent (`chrome::blocks`' never-overlay rule
+        // protects typed text and the caret above all).
+        //
         // The preedit covers the cursor cell and the ones after it, so the block
         // cursor is skipped while composing: the input method draws its own
         // caret inside the composing text, and two caret-like blocks in the same
@@ -906,7 +1099,8 @@ impl Scene {
         }
     }
 
-    /// Rail and wash each visible row that belongs to a command block.
+    /// One rail and one wash per visible block, from the rows [`row_bands`]
+    /// already resolved.
     ///
     /// Keyed on the absolute line id, like [`Self::emit_selection`] — so the
     /// decoration moves with the text under a scroll, compacts through a fold
@@ -914,13 +1108,23 @@ impl Scene {
     /// draws a block whose header has scrolled off the top of the viewport
     /// without that being a case anybody had to think about.
     ///
-    /// The rail is a fixed 2 physical px rather than a fraction of a cell: it
-    /// is a rule, and a rule that thickens with the font stops reading as one.
+    /// **One rect per block, not one per row.** A run of rows coalesces while
+    /// the band is unchanged and the rows keep touching, which is what lets the
+    /// rail and the wash have rounded ends at all — and a cap is only honest on
+    /// an end the run actually *reached*. A run cut off by the viewport edge
+    /// keeps that end square: a cap where the block does not end reads as "the
+    /// block starts here", which would be a lie on every scroll.
+    ///
+    /// Contiguity is tested on **rows**, never on lines. A fold compacts the
+    /// hidden lines away, so the rows that survive touch even where their line
+    /// ids jump; a `usize::MAX` filler row lands on [`NO_BAND`] and breaks the
+    /// run by itself.
     #[allow(clippy::too_many_arguments)]
     fn emit_block_bands(
         &mut self,
-        grid: &Grid,
         vp: &Viewport<'_>,
+        rows: &[RowBand],
+        cols: usize,
         ox: f32,
         oy: f32,
         cw: f32,
@@ -933,36 +1137,57 @@ impl Scene {
         // The rail sits in the gutter, clear of every cell — see `Viewport::gutter`.
         // Its clip has to be widened to match, since the viewport's own rect
         // stops at the grid.
-        let reach = (RAIL_PX + RAIL_GAP).min(vp.gutter.max(0.0));
+        let rail_w = RAIL_PX * vp.scale;
+        let reach = (rail_w + RAIL_GAP * vp.scale).min(vp.gutter.max(0.0));
         let rail_x = ox - reach;
         let rail_clip = [clip[0] - reach, clip[1], clip[2] + reach, clip[3]];
-        let cols = grid.cols();
-        for row in 0..grid.rows() {
-            let Some(line) = resolved_row(grid, vp, row).map(|r| r.id) else { continue };
-            // Binary search, not a scan: this runs per visible row per frame,
-            // and `scrollback` goes to ten million lines — so a linear `find`
-            // multiplies the block count by the row count sixty times a
-            // second. `zest_core::BlockIndex::block_at` deliberately stays
-            // linear for the same shape, and the reason it gives does not
-            // apply here: its list has "an open end" on the last entry, while
-            // a band's `to` is always a concrete line (a running block's is
-            // resolved against the cursor before it ever gets here).
-            //
-            // Sound because the bands are non-overlapping and ascending —
-            // `blocks_are_ascending_and_disjoint` pins that, since it is the
-            // precondition rather than a coincidence of construction.
-            let i = vp.blocks.partition_point(|b| b.to <= line);
-            let Some(band) = vp.blocks.get(i).filter(|b| line >= b.from) else { continue };
-            let y = oy + row as f32 * ch;
-            if let Some(wash) = band.wash {
-                self.rects.push(RectInstance::filled([ox, y, cols as f32 * cw, ch], wash, clip));
+        let wash_w = cols as f32 * cw;
+
+        // Two accumulators, one pass. The rail runs a band's whole height and
+        // the wash starts at its output, so they close on different conditions;
+        // one shared accumulator would have to be the stricter of the two,
+        // splitting the rail at every header boundary — and one rect per block
+        // was the point.
+        let mut rail: Option<BandRun> = None;
+        let mut wash: Option<BandRun> = None;
+
+        // One past the end, so the last run closes without a duplicated tail.
+        for row in 0..=rows.len() {
+            let here = rows.get(row).filter(|b| b.band != NO_BAND);
+            let rail_at = here.map(|b| (b.band, b.line));
+            // The wash belongs to the output, so a header row closes its run —
+            // as does a band with no wash to draw.
+            let wash_at = here
+                .filter(|b| !b.header && vp.blocks[b.band as usize].wash.is_some())
+                .map(|b| (b.band, b.line));
+
+            if let Some(run) = advance(&mut rail, row, rail_at) {
+                if reach >= rail_w {
+                    let b = &vp.blocks[run.band as usize];
+                    let rect =
+                        [rail_x, oy + run.first_row as f32 * ch, rail_w, run.rows() as f32 * ch];
+                    self.rects.push(RectInstance {
+                        // Half its own width is the only honest radius for a
+                        // rule; the shader clamps it against the short side, so
+                        // a one-row run cannot invert.
+                        radii: caps(rail_w * 0.5, run.first_line == b.from, run.last_line + 1 == b.to),
+                        ..RectInstance::filled(rect, b.rail, rail_clip)
+                    });
+                }
             }
-            if reach >= RAIL_PX {
-                self.rects.push(RectInstance::filled(
-                    [rail_x, y, RAIL_PX, ch],
-                    band.rail,
-                    rail_clip,
-                ));
+            if let Some(run) = advance(&mut wash, row, wash_at) {
+                let b = &vp.blocks[run.band as usize];
+                if let Some(fill) = b.wash {
+                    let rect = [ox, oy + run.first_row as f32 * ch, wash_w, run.rows() as f32 * ch];
+                    self.rects.push(RectInstance {
+                        radii: caps(
+                            WASH_RADIUS * vp.scale,
+                            run.first_line == b.header_to,
+                            run.last_line + 1 == b.to,
+                        ),
+                        ..RectInstance::filled(rect, fill, clip)
+                    });
+                }
             }
         }
     }
@@ -1330,6 +1555,7 @@ mod tests {
             background: None,
             blocks: &[],
             gutter: 0.0,
+            scale: 1.0,
             selection: None,
             selection_bg: Rgb::new(0x33, 0x44, 0x55),
             preedit: None,
@@ -1339,18 +1565,57 @@ mod tests {
         }
     }
 
-    /// The rail rects a build emitted, as `(x, y)`, in order.
-    fn rails(scene: &Scene) -> Vec<(f32, f32)> {
+    /// The rail rects a build emitted, as `(x, y, height)`, in order.
+    ///
+    /// The height matters now that runs coalesce: counting rects would turn
+    /// "the rail stops where the block does" into "there is a rail", which is
+    /// not what the tests below were written to catch.
+    fn rails(scene: &Scene) -> Vec<(f32, f32, f32)> {
         scene
             .rects
             .iter()
             .filter(|r| (r.rect[2] - RAIL_PX).abs() < f32::EPSILON)
-            .map(|r| (r.rect[0], r.rect[1]))
+            .map(|r| (r.rect[0], r.rect[1], r.rect[3]))
             .collect()
     }
 
+    /// The wash rects a build emitted, as `(y, height)`, in order. Keyed on the
+    /// full ten-column width the fixtures use.
+    fn washes(scene: &Scene) -> Vec<(f32, f32)> {
+        scene
+            .rects
+            .iter()
+            .filter(|r| (r.rect[2] - 80.0).abs() < f32::EPSILON)
+            .map(|r| (r.rect[1], r.rect[3]))
+            .collect()
+    }
+
+    /// A band with no header: every line it names is the grid's to draw.
     fn band(from: u64, to: u64) -> BlockBand {
-        BlockBand { from, to, rail: LinearRgba::opaque(0x40, 0xd0, 0x80), wash: None }
+        BlockBand {
+            from,
+            to,
+            header_to: from,
+            rail: LinearRgba::opaque(0x40, 0xd0, 0x80),
+            wash: None,
+        }
+    }
+
+    /// A band whose header replaces `[from, header_to)`, with a wash under the
+    /// output rows below it.
+    fn header_band(from: u64, header_to: u64, to: u64) -> BlockBand {
+        BlockBand {
+            header_to,
+            wash: Some(LinearRgba([0.05, 0.05, 0.1, 0.1])),
+            ..band(from, to)
+        }
+    }
+
+    /// Resolve the rows and emit the bands, the way `build_viewport` does.
+    fn emit_bands(scene: &mut Scene, grid: &Grid, vp: &Viewport<'_>) {
+        let mut rows = Vec::new();
+        row_bands(grid, vp, &mut rows);
+        scene.emit_block_bands(vp, &rows, grid.cols(), vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
     }
 
     /// A grid whose visible rows carry line ids `0..rows`.
@@ -1372,9 +1637,9 @@ mod tests {
 
         let mut with = Scene::default();
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
-        with.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        emit_bands(&mut with, &grid, &vp);
         assert!(!rails(&with).is_empty(), "a gutter is room enough for the rail");
-        for (x, _) in rails(&with) {
+        for (x, ..) in rails(&with) {
             assert!(
                 x + RAIL_PX <= vp.rect[0],
                 "the rail must end before the first column begins, not overlap it"
@@ -1383,7 +1648,7 @@ mod tests {
 
         let mut without = Scene::default();
         let vp = Viewport { blocks: &bands, gutter: 0.0, ..viewport(&grid, &p, 1.0) };
-        without.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        emit_bands(&mut without, &grid, &vp);
         assert!(
             rails(&without).is_empty(),
             "with no padding there is nowhere honest to put it, so it is not drawn"
@@ -1401,8 +1666,11 @@ mod tests {
         let bands = [band(1, 3)];
         let mut scene = Scene::default();
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
-        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
-        assert_eq!(rails(&scene).len(), 2, "lines 1 and 2, and nothing else");
+        emit_bands(&mut scene, &grid, &vp);
+        let r = rails(&scene);
+        assert_eq!(r.len(), 1, "one rect for the block, not one per row");
+        assert_eq!(r[0].1, vp.rect[1] + 16.0, "starting on the row line 1 landed on");
+        assert_eq!(r[0].2, 32.0, "and covering lines 1 and 2, and nothing else");
     }
 
     #[test]
@@ -1448,10 +1716,11 @@ mod tests {
             row_map: Some(&map),
             ..viewport(&grid, &p, 1.0)
         };
-        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        emit_bands(&mut scene, &grid, &vp);
         let rails = rails(&scene);
         assert_eq!(rails.len(), 1, "only the one line the band names is drawn");
         assert_eq!(rails[0].1, vp.rect[1], "and it rails the row that line landed on");
+        assert_eq!(rails[0].2, 16.0, "one row tall — the rows either side are not its");
     }
 
     #[test]
@@ -1464,7 +1733,7 @@ mod tests {
         let bands = [band(0, 3)];
         let mut scene = Scene::default();
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
-        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
+        emit_bands(&mut scene, &grid, &vp);
         scene.append_chrome(&Chrome::default());
         assert!(
             scene.chrome_rects_at >= scene.rects.len(),
@@ -1482,12 +1751,144 @@ mod tests {
         let bands = [BlockBand { wash: Some(wash), ..band(0, 2) }];
         let mut scene = Scene::default();
         let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
-        scene.emit_block_bands(&grid, &vp, vp.rect[0], vp.rect[1], 8.0, 16.0, vp.rect);
-        let washes: Vec<_> =
-            scene.rects.iter().filter(|r| (r.rect[2] - 80.0).abs() < f32::EPSILON).collect();
-        assert_eq!(washes.len(), 2, "one per line, spanning all ten columns");
-        assert!(washes[0].fill.0[3] < 0.2, "a wash that opaque would erase the output");
+        emit_bands(&mut scene, &grid, &vp);
+        let w = washes(&scene);
+        assert_eq!(w.len(), 1, "one per block, spanning all ten columns");
+        assert_eq!(w[0].1, 32.0, "and both its rows");
+        let fill = scene.rects.iter().find(|r| (r.rect[2] - 80.0).abs() < f32::EPSILON).unwrap();
+        assert!(fill.fill.0[3] < 0.2, "a wash that opaque would erase the output");
     }
+
+    #[test]
+    fn a_header_row_is_the_chromes_and_the_grid_draws_none_of_it() {
+        // The rule the opaque header fill used to keep. `theme.rs` built that
+        // fill at alpha 1.0 on purpose, because a header *replaces* the prompt
+        // rows it covers and a translucent one double-prints the very text it
+        // exists to reword. The fill is gone (#465); this is what replaces it,
+        // and it has to be exactly as wide.
+        let p = palette();
+        let mut grid = lined(3, 10);
+        for row in 0..3 {
+            for col in 0..10 {
+                grid.row_mut(row).get_mut(col).unwrap().bg = Color::Rgb(0x80, 0x00, 0x00);
+            }
+        }
+        let bands = [header_band(0, 1, 3)];
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        let mut rows = Vec::new();
+        row_bands(&grid, &vp, &mut rows);
+        assert!(rows[0].header, "line 0 is the header's");
+        assert!(!rows[1].header && !rows[2].header, "the output rows are the grid's");
+
+        let mut scene = Scene::default();
+        for row in 0..grid.rows() {
+            // The same predicate `build_viewport`'s two row loops call, not a
+            // second copy of the rule.
+            if !grid_draws(&rows, row) {
+                continue;
+            }
+            let y = vp.rect[1] + row as f32 * 16.0;
+            scene.emit_row_backgrounds(&grid, row, &vp, vp.rect[0], y, 8.0, 16.0, vp.rect);
+        }
+        assert_eq!(scene.rects.len(), 2, "one background run per output row, none for the header");
+        for r in &scene.rects {
+            assert!(r.rect[1] >= vp.rect[1] + 16.0, "nothing is painted on the header's row");
+        }
+    }
+
+    #[test]
+    fn a_bands_wash_starts_where_its_output_does() {
+        // The wash says "this is the command's output". Over the header rows it
+        // would be tinting cells nobody draws, and it would read as the block
+        // starting a row higher than the rail says it does.
+        let p = palette();
+        let grid = lined(6, 10);
+        let bands = [header_band(0, 2, 6)];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        emit_bands(&mut scene, &grid, &vp);
+
+        let w = washes(&scene);
+        assert_eq!(w.len(), 1, "one wash for the block");
+        assert_eq!(w[0].0, vp.rect[1] + 32.0, "starting on the first output row");
+        assert_eq!(w[0].1, 64.0, "and covering the four output rows");
+
+        let r = rails(&scene);
+        assert_eq!(r.len(), 1, "one rail for the block");
+        assert_eq!(r[0].1, vp.rect[1], "which starts at the header, not below it");
+        assert_eq!(r[0].2, 96.0, "and runs the whole block — the header is part of it");
+    }
+
+    #[test]
+    fn a_block_that_printed_nothing_gets_a_rail_and_no_wash() {
+        // `cd ..`: every row it has is header. The rail alone says it ran.
+        let p = palette();
+        let grid = lined(4, 10);
+        let bands = [BlockBand { wash: None, ..header_band(0, 1, 1) }];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        emit_bands(&mut scene, &grid, &vp);
+        assert_eq!(rails(&scene).len(), 1, "it still gets its rail");
+        assert!(washes(&scene).is_empty(), "and nothing to wash");
+    }
+
+    #[test]
+    fn a_run_breaks_where_the_rows_stop_touching() {
+        // Coalescing is keyed on rows, not lines — a fold compacts the hidden
+        // lines away, so the rows that survive touch even where the ids jump.
+        // A blank filler row belongs to no band and must split the run, or the
+        // rail bridges a gap the block does not own.
+        let p = palette();
+        let grid = lined(5, 10);
+        let map = [0usize, 1, usize::MAX, 2, 3];
+        let bands = [band(0, 4)];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            blocks: &bands,
+            gutter: 16.0,
+            row_map: Some(&map),
+            ..viewport(&grid, &p, 1.0)
+        };
+        emit_bands(&mut scene, &grid, &vp);
+        let r = rails(&scene);
+        assert_eq!(r.len(), 2, "one run either side of the filler row");
+        assert_eq!((r[0].1, r[0].2), (vp.rect[1], 32.0), "rows 0 and 1");
+        assert_eq!((r[1].1, r[1].2), (vp.rect[1] + 48.0, 32.0), "rows 3 and 4");
+    }
+
+    #[test]
+    fn a_band_cut_off_by_the_viewport_edge_keeps_that_end_square() {
+        // A cap where the block does not end reads as "the block starts here",
+        // which would be a lie on every scroll. Only an end the run actually
+        // reached is rounded.
+        let p = palette();
+        let grid = lined(3, 10);
+        // The band starts two lines above the first visible one and ends past
+        // the last: neither end is on screen.
+        let bands = [band(0, 99)];
+        let mut scene = Scene::default();
+        let vp = Viewport { blocks: &bands, gutter: 16.0, ..viewport(&grid, &p, 1.0) };
+        emit_bands(&mut scene, &grid, &vp);
+        let rail = scene
+            .rects
+            .iter()
+            .find(|r| (r.rect[2] - RAIL_PX).abs() < f32::EPSILON)
+            .expect("a rail");
+        assert_eq!(rail.radii[0], RAIL_PX * 0.5, "line 0 is the band's start, so it caps");
+        assert_eq!(rail.radii[2], 0.0, "but its end is off-screen, so that stays square");
+        assert_eq!(rail.radii[3], 0.0);
+    }
+
+    #[test]
+    fn a_bands_header_lies_inside_its_own_range() {
+        // The invariant the row loop trusts rather than checks, beside the
+        // ascending-and-disjoint one it already trusted.
+        for b in [band(0, 3), header_band(4, 5, 9), header_band(10, 10, 10)] {
+            assert!(b.from <= b.header_to, "a header cannot start before its block");
+            assert!(b.header_to <= b.to, "nor outlast it");
+        }
+    }
+
 
     #[test]
     fn a_cleared_scene_carries_no_backdrop() {
