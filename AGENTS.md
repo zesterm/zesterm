@@ -869,6 +869,18 @@ you need before you trip on it.
   capitalized convention gives you a rule that works in one session and
   silently does nothing in the other. (#472)
 
+- **A helper that exists for one platform makes its constants dead code on the
+  other two, and CI treats that as an error.** `APP_ID` is read only by the
+  unix `identify`, so Windows and macOS saw an unused `pub const` — and
+  `dead_code` is denied by the workspace's `-D warnings`, so
+  `cargo build --workspace` *failed to compile* on both while Linux was green.
+  `pub` does not save you: in a **binary** crate nothing outside can reach it,
+  so the lint fires anyway. Reproduce the rule in five lines rather than
+  guessing at a red CI — an unused `pub const` in a private module of a bin
+  crate is `error: constant is never used`. And prefer `cfg`-scoping the item
+  to `#[allow(dead_code)]` when the *concept* is platform-specific, which
+  Wayland's app_id and X11's WM_CLASS are. (#472)
+
 ### Rendering and fonts
 
 - **swash hard-codes an LCD hinting target you cannot select** — the symptom is
