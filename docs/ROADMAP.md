@@ -92,14 +92,13 @@ the history behind them is in closed issues and PRs.
       all — so `clients/web` and `docs/design/client-ui/README.md` §3 now
       describe different pictures. Bringing the browser to parity is the open
       half.
-- [ ] Grid rects do not ride the smooth-scroll spring. `Scene::grid_origin`
-      carries the sub-row debt and `glyph.wgsl`/`decor.wgsl` honour it, but
-      `rect.wgsl` never reads it — so during a spring the text slides while cell
-      backgrounds, the selection, the cursor and the block rail stand still and
-      snap at the end. Pre-dates #465 and is visible on every wheel notch; the
-      fix is to bake `vp.scroll_px` into the row `y` of every rect pass on the
-      CPU (each already has `vp`), leaving the glyph and decor passes alone or
-      they shear the other way.
+- [ ] Smooth scroll after #467: the grid moves in one piece and the debt is
+      clamped to the single row the overscan can cover, so a fast spin arrives
+      in one eased row rather than lagging three behind the wheel. Easing over
+      the *full* multi-row distance is the open half, and it is a bigger job
+      than it sounds: the row loops, the fold row-map, the selection and the
+      block bands would all have to accept rows well outside the viewport, and
+      `OVERSCAN` would have to grow with whatever replaces the clamp.
 - [ ] Background pictures after #450: the pipeline, the three `window.background_*`
       keys and their rows in Settings and the profiles editor are in, but the
       row is a path *text field* — #144's `<image-slot>` drop target and the OS
