@@ -13998,6 +13998,24 @@ fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path: &std::pat
 /// Free-standing because this decision is now made twice: once at startup, and
 /// again whenever `window.opacity` changes on a live window. Two copies of it
 /// would be two chances to disagree about what the adapter can do.
+/// The backends to try, in order, on this platform.
+///
+/// A free function so a test can hold it against
+/// [`wgpu::Instance::enabled_backend_features`]: a rung naming a backend whose
+/// wgpu feature is not compiled in enumerates zero adapters no matter what
+/// drivers the machine has, which is how Linux advertised a GL fallback that
+/// could only ever panic (#468). The list and the manifests have to move
+/// together, and nothing but a test makes them.
+fn preferred_backends() -> &'static [wgpu::Backends] {
+    if cfg!(target_os = "macos") {
+        &[wgpu::Backends::METAL]
+    } else if cfg!(windows) {
+        &[wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+    } else {
+        &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
+    }
+}
+
 fn alpha_mode_for(
     want_transparency: bool,
     supported: &[wgpu::CompositeAlphaMode],
@@ -14058,13 +14076,7 @@ async fn init_gpu(
     // Vulkan leads on Windows because it is the only backend that reports
     // `PreMultiplied` alpha there (ADR-003); DX12 reports `Opaque` on every
     // adapter, so preferring it would silently cost transparency.
-    let preferred: &[wgpu::Backends] = if cfg!(target_os = "macos") {
-        &[wgpu::Backends::METAL]
-    } else if cfg!(windows) {
-        &[wgpu::Backends::VULKAN, wgpu::Backends::DX12]
-    } else {
-        &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
-    };
+    let preferred: &[wgpu::Backends] = preferred_backends();
 
     // `ZESTERM_BACKEND=dx12|vulkan|gl` forces one, for measuring.
     let forced = std::env::var("ZESTERM_BACKEND").ok().and_then(|s| {
@@ -14101,7 +14113,39 @@ async fn init_gpu(
         tracing::debug!(?backends, "no adapter; trying the next backend");
     }
 
-    let (surface, adapter) = found.expect("no suitable GPU adapter on any backend");
+    let Some((surface, adapter)) = found else {
+        // Not `expect`: "no suitable GPU adapter" is the most common way for
+        // this to fail on Linux and the bare message told the user nothing
+        // they could act on -- not which backends were tried, and above all
+        // not that a backend can be *listed and absent*, which is exactly what
+        // #468 was. Naming the compiled set beside the tried set is what makes
+        // a missing driver tell itself apart from a missing cargo feature.
+        let compiled = wgpu::Instance::enabled_backend_features();
+        // The driver advice is per-platform because the panic is not: a
+        // headless CI runner reaches it on every OS, and Arch package names
+        // are noise on a Mac.
+        let advice = if cfg!(target_os = "macos") {
+            "Metal is the only backend here; a machine that cannot provide it \
+             is usually a VM or a session with no window server."
+        } else if cfg!(windows) {
+            "Install or update the GPU driver; `ZESTERM_BACKEND=vulkan|dx12` \
+             forces a single backend."
+        } else {
+            "Install a Vulkan ICD (mesa's `vulkan-radeon` / `vulkan-intel` / \
+             `nvidia-utils`, or `vulkan-swrast` for a software one), or a GL \
+             driver for the GL rung; `ZESTERM_BACKEND=vulkan|gl` forces a \
+             single backend."
+        };
+        panic!(
+            "no suitable GPU adapter.\n\
+             tried, in order: {preferred:?}\n\
+             compiled into this binary: {compiled:?}\n\
+             A backend listed above but missing from the compiled set can never \
+             produce an adapter -- that is a build configuration bug, not a \
+             driver problem. Otherwise this machine has no driver for any of \
+             them. {advice}"
+        );
+    };
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "adapter");
     tracing::info!(adapter = %adapter.get_info().name, backend = ?adapter.get_info().backend, "gpu");
 
@@ -14867,6 +14911,47 @@ mod motion_settings_tests {
         }
         assert!(!spring.moving(), "a settled spring must stop asking for frames");
         assert_eq!(spring.value(), 0.0, "and land exactly home, so scroll_px is exactly zero");
+    }
+}
+
+#[cfg(test)]
+mod backend_ladder_tests {
+    use super::preferred_backends;
+
+    /// A rung naming a backend that was never compiled in enumerates zero
+    /// adapters however many drivers the machine has -- so it is not a
+    /// fallback, it is a panic with extra steps. That is what shipped on Linux
+    /// (#468): `init_gpu` offered `[VULKAN, GL]` while `zest-render-wgpu`
+    /// enabled only `vulkan` for unix, making `ZESTERM_BACKEND=gl` an option
+    /// that could only ever fail.
+    ///
+    /// The list lives in this crate and the features live in
+    /// `zest-render-wgpu`'s manifest, so nothing but this test makes the two
+    /// move together -- and it checks whichever platform it is compiled for,
+    /// which is the only way the Linux answer gets checked at all.
+    #[test]
+    fn every_advertised_backend_is_compiled_in() {
+        let compiled = wgpu::Instance::enabled_backend_features();
+        for &b in preferred_backends() {
+            assert!(
+                compiled.contains(b),
+                "the backend ladder offers {b:?}, but this binary compiled only \
+                 {compiled:?} -- add its wgpu feature in zest-render-wgpu's \
+                 manifest for this target, or stop advertising the rung"
+            );
+        }
+    }
+
+    /// The ladder is a preference order, so a duplicate would mean silently
+    /// paying for a second instance of a backend that already failed.
+    #[test]
+    fn the_ladder_names_each_backend_once() {
+        let ladder = preferred_backends();
+        for (i, a) in ladder.iter().enumerate() {
+            for b in &ladder[i + 1..] {
+                assert_ne!(a, b, "{a:?} appears twice in the backend ladder");
+            }
+        }
     }
 }
 

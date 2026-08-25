@@ -27,8 +27,15 @@ wgpu = { workspace = true, features = ["dx12", "vulkan"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 
+# `gles` is not decoration beside `vulkan`: `init_gpu`'s ladder here is
+# `[VULKAN, GL]`, and a rung whose backend was never compiled in enumerates
+# zero adapters however many drivers the box has. Without it, a machine with a
+# working GL driver and no Vulkan ICD panics at the `expect` where the ladder
+# was written to degrade, and `ZESTERM_BACKEND=gl` can only ever panic.
+# Windows already carries both of its rungs; this was the one platform that
+# advertised a fallback it could not reach.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-wgpu = { workspace = true, features = ["vulkan"] }
+wgpu = { workspace = true, features = ["vulkan", "gles"] }
 
 # The spike that decides whether every shader in this crate premultiplies.
 # Kept as an example rather than a test: it needs a real window and a real

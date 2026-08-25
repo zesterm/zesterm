@@ -805,6 +805,25 @@ you need before you trip on it.
   last delta", so stopping on the exit needs a bounded drain after it. Both were
   found by driving the built binary by hand. (#274)
 
+### Linux
+
+- **A backend named in the ladder but not compiled in is invisible, and reads
+  as a driver problem.** `init_gpu`'s Linux preference is `[VULKAN, GL]`, but
+  `zest-render-wgpu`'s unix target enabled only wgpu's `vulkan` feature — so
+  the GL rung enumerated zero adapters on every machine, `ZESTERM_BACKEND=gl`
+  was an option that could only panic, and a box with a working GL driver and
+  no Vulkan ICD died at the `expect` the ladder was written to avoid. Nothing
+  warns: a backend with no compiled support and a backend with no driver both
+  simply return no adapter. Linux was the only platform missing its fallback
+  (Windows carries `dx12` *and* `vulkan`; macOS's one rung is `metal`), and
+  the reason it survived is that **CI compiles `zest-app` on ubuntu and never
+  opens an adapter** — the whole GPU path is built and never executed. The
+  panic now names the tried set beside
+  `wgpu::Instance::enabled_backend_features()`, because that difference is what
+  tells a missing driver from a missing cargo feature, and
+  `every_advertised_backend_is_compiled_in` holds the list against the
+  manifests on whichever platform it compiles for. (#468)
+
 ### Rendering and fonts
 
 - **swash hard-codes an LCD hinting target you cannot select** — the symptom is

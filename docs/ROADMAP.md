@@ -133,7 +133,20 @@ the history behind them is in closed issues and PRs.
 ### Unix hosts
 
 - [ ] The remaining macOS polish tail.
-- [ ] Linux: Vulkan surface, fontconfig fallback verification.
+- [x] **Linux: the Vulkan surface, and the GL rung behind it** (#468). The
+      surface works, on Wayland and X11, and
+      the measured `alpha_modes` for both are now rows in ADR-003 — where the
+      whole table had been Windows adapters. What was actually broken was the
+      *fallback*: `init_gpu` offered `[VULKAN, GL]` while `zest-render-wgpu`
+      compiled only `vulkan` for unix, so the GL rung could never produce an
+      adapter and a box with a GL driver and no Vulkan ICD panicked instead of
+      degrading. A backend listed and not compiled in is indistinguishable
+      from one with no driver, which is why it survived: CI builds `zest-app`
+      on ubuntu and never opens an adapter.
+- [ ] Linux: fontconfig fallback verification via `font_dump` — CJK, emoji and
+      a Nerd Font discovered by name. `zest-font` has no `cfg(target_os)` in
+      it at all and routes through fontique to fontconfig, so this is
+      confirming a path rather than writing one.
 - [ ] Linux: negotiate `zxdg_toplevel_decoration_v1` or KDE gives you *two*
       titlebars.
 - [ ] Linux: transparency via an ARGB visual. **Blur has no portable path** —
