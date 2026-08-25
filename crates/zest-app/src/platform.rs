@@ -18,6 +18,11 @@
 /// app_id for a Wayland window and against WM_CLASS's *class* for an XWayland
 /// one, so two spellings is a rule that works in one session and silently does
 /// nothing in the other.
+///
+/// Unix-only, because the concept is: Windows and macOS identify a window by
+/// its executable and bundle, so there is no string to carry and an
+/// unconditional constant would be dead code on two of the three legs.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub const APP_ID: &str = "zesterm";
 
 /// Stamp [`APP_ID`] onto the window attributes.
