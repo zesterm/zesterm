@@ -966,6 +966,20 @@ you need before you trip on it.
   And say why *accurately*: the dimmed chip read "not applied yet", which
   promises a platform limit will lift. `Inert` carries its own reason, because
   a bool beside a label is two facts that have to agree. (#476)
+- **"Dimmed" is a claim the pointer can disprove, and the keyboard never
+  touches a hit region at all.** The first cut of the above set `Inert` and
+  drew the tag while `draw_control` still pushed every hit region, so an
+  "unsupported" toggle looked disabled, said *not on this platform*, and
+  flipped and wrote anyway. The `inert` that *does* drop hit regions was
+  `AccentSwatches`'s, one arm away — reading a comment on the neighbouring
+  variant and assuming it covered this one is the whole mistake. Two rules
+  fell out: suppress the regions in `draw_control` (13 of them, so a new arm
+  cannot forget), **and** gate `apply_edit`, because selection-plus-arrow-keys
+  reaches a row without going near the pointer surface — regions alone leave
+  the same silent write in a different costume. Assert it by sweeping the
+  rendered surface for hit regions, never by asserting the model: the model
+  just restates the flag you set, which is exactly why the first version
+  looked tested. (#476)
 
 ### Rendering and fonts
 

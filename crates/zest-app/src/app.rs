@@ -8088,6 +8088,22 @@ impl App {
     /// synchronous reload here is what makes a toggle feel like a switch
     /// rather than a request.
     fn apply_edit(&mut self, field_idx: usize, new_value: serde_json::Value) {
+        // The one door every edit arrives at, which is why the capability
+        // check lives here rather than beside each control. Suppressing the
+        // hit regions stops the *pointer*, but the keyboard reaches a row by
+        // selection and never touches them -- so a control that is dimmed and
+        // unclickable was still adjustable with the arrow keys, which is the
+        // same silent write in a different costume.
+        let refused = self
+            .settings_ui
+            .as_ref()
+            .and_then(|ui| ui.fields.get(field_idx))
+            .filter(|f| !self.capabilities().honours(&f.key))
+            .map(|f| f.key.clone());
+        if let Some(key) = refused {
+            self.settings_report(format!("{key} has no effect on this platform, so it was not written"));
+            return;
+        }
         let Some((key, value)) = self.settings_ui.as_ref().and_then(|ui| {
             let field = ui.fields.get(field_idx)?;
             Some((field.key.clone(), crate::settings_ui::to_toml(field, &new_value)?))
