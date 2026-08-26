@@ -121,6 +121,14 @@ pub enum Wakeup {
     /// A `Wakeup` stays `Copy`; the picker drops a stale answer by
     /// comparing the cell's `path` against where it has since navigated.
     DirListingReady,
+    /// A host answered [`ClientMessage::ReadFile`] (#464); the answer is
+    /// parked in the session's cell (`SessionSource::take_file_contents`).
+    ///
+    /// [`Self::DirListingReady`]'s shape for its reasons. Last-write-wins is
+    /// right here too — a pane asks for one file at a time, and a second ask
+    /// means the first no longer matters — and the pane drops an answer whose
+    /// path is not the one it is waiting for.
+    FileContentsReady,
     /// A session's `OSC 9;4` progress moved.
     ///
     /// Carries nothing: the value is already on that tab's terminal, where

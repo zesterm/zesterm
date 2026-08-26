@@ -62,3 +62,44 @@ mod tests {
         assert_eq!(shorten_home(&sibling), sibling);
     }
 }
+
+/// A byte count as a person reads one — "812 B", "4.2 KB", "1.4 MB" (#464).
+///
+/// Powers of 1024 with the short names, which is what every file manager on
+/// every platform shows; the pedantically-correct KiB is not what the person
+/// comparing this against their editor's status bar will see.
+#[must_use]
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit + 1 < UNITS.len() {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else if v < 10.0 {
+        format!("{v:.1} {}", UNITS[unit])
+    } else {
+        format!("{v:.0} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod human_bytes_tests {
+    use super::human_bytes;
+
+    #[test]
+    fn a_size_reads_the_way_a_file_manager_says_it() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(812), "812 B");
+        // One decimal below ten, none above: "1.4 MB" is useful, "1.4 KB" of a
+        // 1434-byte file is too, and "687 KB" does not need a fraction.
+        assert_eq!(human_bytes(1434), "1.4 KB");
+        assert_eq!(human_bytes(703_594), "687 KB");
+        assert_eq!(human_bytes(1_468_006), "1.4 MB");
+        // The last unit does not roll over into one that has no name here.
+        assert!(human_bytes(u64::MAX).ends_with(" GB"));
+    }
+}

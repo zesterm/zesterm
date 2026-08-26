@@ -349,12 +349,26 @@ pub struct Tab {
     pending_input: Option<Vec<u8>>,
 }
 
-/// One extra pane of a split tab: a session with the little state a pane
-/// needs, and none of a tab's (a pane is not a hit target in the strip,
+/// What a split pane holds (#464).
+///
+/// Only a *split* pane may be a non-session: `Tab.session` keeps its type, so
+/// pane 0 is always a shell and a tab is still named by one. That is what
+/// keeps `close_focused_pane`'s promotion representable and stops a tab
+/// existing with no terminal in it at all.
+pub enum PaneContent {
+    Session(TabSession),
+    /// A file, open for reading. It has no terminal, so every path that
+    /// reaches for one has to ask first — which is the whole cost of this
+    /// enum, and is paid by the compiler rather than at runtime.
+    Editor(Box<crate::editor::EditorPane>),
+}
+
+/// One extra pane of a split tab: a session *or a file*, with the little state
+/// a pane needs and none of a tab's (a pane is not a hit target in the strip,
 /// does not persist, and cannot be dragged).
 pub struct SplitPane {
     pub addr: SessionAddr,
-    session: TabSession,
+    content: PaneContent,
     pub local: bool,
     pub dead: bool,
     /// A worker is still dialling this pane's host — the same treatment a
@@ -368,7 +382,7 @@ impl SplitPane {
     pub fn daemon(remote: RemoteSession, local: bool, sized: (u16, u16)) -> Self {
         Self {
             addr: remote.addr(),
-            session: TabSession::Daemon(remote),
+            content: PaneContent::Session(TabSession::Daemon(remote)),
             local,
             dead: false,
             connecting: false,
@@ -379,7 +393,7 @@ impl SplitPane {
     pub fn in_process(session: Session, addr: SessionAddr, sized: (u16, u16)) -> Self {
         Self {
             addr,
-            session: TabSession::InProcess(session),
+            content: PaneContent::Session(TabSession::InProcess(session)),
             local: true,
             dead: false,
             connecting: false,
@@ -393,7 +407,7 @@ impl SplitPane {
     pub fn connecting(addr: SessionAddr, pending: PendingSession, sized: (u16, u16)) -> Self {
         Self {
             addr,
-            session: TabSession::Pending(pending),
+            content: PaneContent::Session(TabSession::Pending(pending)),
             // Remote until proven otherwise: closing a connecting pane must
             // never kill anything, because there is nothing of ours to kill.
             local: false,
@@ -406,7 +420,7 @@ impl SplitPane {
     /// The worker's session arrived: swap it in under the same frame.
     pub fn resolve_live(&mut self, remote: RemoteSession, local: bool) {
         self.addr = remote.addr();
-        self.session = TabSession::Daemon(remote);
+        self.content = PaneContent::Session(TabSession::Daemon(remote));
         self.local = local;
         self.connecting = false;
     }
@@ -415,7 +429,7 @@ impl SplitPane {
     pub fn resolve_failed(&mut self, error: &str) {
         self.connecting = false;
         self.dead = true;
-        if let TabSession::Pending(p) = &self.session {
+        if let PaneContent::Session(TabSession::Pending(p)) = &self.content {
             p.show_error(error);
         }
     }
@@ -425,22 +439,69 @@ impl SplitPane {
         Self::connecting(addr, PendingSession::blank(), (80, 24))
     }
 
-    pub fn source(&self) -> &dyn SessionSource {
-        match &self.session {
-            TabSession::Daemon(r) => r,
-            TabSession::InProcess(s) => s,
-            TabSession::Pending(p) => p,
+    /// A pane holding a file (#464), under a placeholder address so it is a
+    /// distinct hit region and persistence skips it.
+    pub fn editor(editor: crate::editor::EditorPane) -> Self {
+        Self {
+            addr: editor.addr,
+            content: PaneContent::Editor(Box::new(editor)),
+            // Not local, so `Tab::kill` and `close_focused_pane` do not try to
+            // end something that was never started. A file has nothing to kill.
+            local: false,
+            dead: false,
+            connecting: false,
+            sized: (0, 0),
+        }
+    }
+
+    /// This pane's terminal, or `None` when it holds a file.
+    pub fn session(&self) -> Option<&dyn SessionSource> {
+        match &self.content {
+            PaneContent::Session(TabSession::Daemon(r)) => Some(r),
+            PaneContent::Session(TabSession::InProcess(s)) => Some(s),
+            PaneContent::Session(TabSession::Pending(p)) => Some(p),
+            PaneContent::Editor(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_session(&self) -> bool {
+        matches!(self.content, PaneContent::Session(_))
+    }
+
+    #[must_use]
+    pub fn editor_ref(&self) -> Option<&crate::editor::EditorPane> {
+        match &self.content {
+            PaneContent::Editor(e) => Some(e),
+            PaneContent::Session(_) => None,
+        }
+    }
+
+    pub fn editor_mut(&mut self) -> Option<&mut crate::editor::EditorPane> {
+        match &mut self.content {
+            PaneContent::Editor(e) => Some(e),
+            PaneContent::Session(_) => None,
+        }
+    }
+
+    /// The session this pane holds, taken — for the promotion in
+    /// [`Tab::close_focused_pane`], which can only put a session in a tab.
+    fn into_session(self) -> Option<TabSession> {
+        match self.content {
+            PaneContent::Session(s) => Some(s),
+            PaneContent::Editor(_) => None,
         }
     }
 
     /// End the pane's session for good (local close); dropping detaches.
     pub fn kill(self) {
-        match self.session {
-            TabSession::Daemon(r) => r.kill(),
-            TabSession::InProcess(s) => drop(s),
+        match self.content {
+            PaneContent::Session(TabSession::Daemon(r)) => r.kill(),
+            PaneContent::Session(TabSession::InProcess(s)) => drop(s),
             // Nothing exists to kill; a session the worker later delivers
             // for a closed pane is dropped by the resolution path.
-            TabSession::Pending(p) => drop(p),
+            PaneContent::Session(TabSession::Pending(p)) => drop(p),
+            PaneContent::Editor(e) => drop(e),
         }
     }
 }
@@ -580,8 +641,12 @@ impl Tab {
 
     /// The pane the keyboard belongs to — what input, selection, IME and the
     /// status bar all act on. The primary pane unless a split holds focus.
-    pub fn focused_source(&self) -> &dyn SessionSource {
-        self.pane_source(self.focus)
+    ///
+    /// `None` when that pane holds a file rather than a shell (#464). Every
+    /// caller is a session question — a block, a selection, a cwd probe — so
+    /// the honest answer for a file pane is "there is nothing to ask".
+    pub fn focused_session(&self) -> Option<&dyn SessionSource> {
+        self.pane_session(self.focus)
     }
 
     /// The focused pane's session address.
@@ -605,11 +670,39 @@ impl Tab {
     /// Pane `i`'s terminal; `0` is the primary. Out of range clamps to the
     /// primary rather than panicking — a stale hit region or a focus index
     /// a frame behind a pane close must draw something, never crash.
-    pub fn pane_source(&self, i: usize) -> &dyn SessionSource {
+    ///
+    /// `None` only for a pane holding a file: index 0 is `Tab.session`, which
+    /// is a session by construction.
+    pub fn pane_session(&self, i: usize) -> Option<&dyn SessionSource> {
         match i.checked_sub(1).and_then(|j| self.panes.get(j)) {
-            Some(pane) => pane.source(),
-            None => self.source(),
+            Some(pane) => pane.session(),
+            None => Some(self.source()),
         }
+    }
+
+    /// Pane `i`'s open file, if it holds one.
+    #[must_use]
+    pub fn pane_editor(&self, i: usize) -> Option<&crate::editor::EditorPane> {
+        i.checked_sub(1).and_then(|j| self.panes.get(j)).and_then(SplitPane::editor_ref)
+    }
+
+    pub fn pane_editor_mut(&mut self, i: usize) -> Option<&mut crate::editor::EditorPane> {
+        i.checked_sub(1).and_then(|j| self.panes.get_mut(j)).and_then(SplitPane::editor_mut)
+    }
+
+    /// Every open file in this tab, with the pane index each sits in.
+    pub fn editors_mut(&mut self) -> impl Iterator<Item = (usize, &mut crate::editor::EditorPane)> {
+        self.panes
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(j, p)| p.editor_mut().map(|e| (j + 1, e)))
+    }
+
+    /// Any pane of this tab holds something that is not a shell — the question
+    /// `refresh_chrome` asks before deciding it has no chrome to build.
+    #[must_use]
+    pub fn has_editor_pane(&self) -> bool {
+        self.panes.iter().any(|p| !p.is_session())
     }
 
     #[must_use]
@@ -617,6 +710,8 @@ impl Tab {
         i.checked_sub(1).and_then(|j| self.panes.get(j)).map_or(self.addr, |p| p.addr)
     }
 
+    /// Whether pane `i`'s shell has ended. A pane holding a file is never
+    /// dead: nothing of its was running.
     #[must_use]
     pub fn pane_dead(&self, i: usize) -> bool {
         i.checked_sub(1).and_then(|j| self.panes.get(j)).map_or(self.dead, |p| p.dead)
@@ -655,14 +750,31 @@ impl Tab {
             return false;
         }
         if self.focus == 0 {
-            let next = self.panes.remove(0);
+            // The promotion has to find a pane that *is* a session: a tab is
+            // named by its shell and an editor cannot become one (#464). With
+            // only files left there is nothing to promote, so this answers
+            // `false` and the caller closes the whole tab — which takes the
+            // files with it, and is what closing the last shell should mean.
+            let Some(j) = self.panes.iter().position(SplitPane::is_session) else {
+                return false;
+            };
+            let next = self.panes.remove(j);
+            let next_addr = next.addr;
+            let (next_local, next_dead, next_connecting, next_sized) =
+                (next.local, next.dead, next.connecting, next.sized);
+            let Some(session) = next.into_session() else {
+                unreachable!("the pane was chosen by `is_session`")
+            };
             let was_local = self.local;
-            let old = core::mem::replace(&mut self.session, next.session);
-            self.addr = next.addr;
-            self.local = next.local;
-            self.dead = next.dead;
-            self.connecting = next.connecting;
-            self.sized = next.sized;
+            let old = core::mem::replace(&mut self.session, session);
+            self.addr = next_addr;
+            self.local = next_local;
+            self.dead = next_dead;
+            self.connecting = next_connecting;
+            self.sized = next_sized;
+            // Removing pane `j` shifts everything after it down one; focus is
+            // 0 either way, so only a `j` past the focus could matter and
+            // there is none.
             if was_local {
                 match old {
                     TabSession::Daemon(r) => r.kill(),
@@ -851,8 +963,12 @@ impl TabStrip {
     /// the keyboard is in — which is what makes a split tab route by
     /// changing one function instead of twenty call sites.
     #[must_use]
+    /// `None` when there is no tab, and also when the focused pane holds a
+    /// file rather than a shell (#464). The signature did not have to change
+    /// for that second case, which is what kept the refactor to one function:
+    /// every one of its callers already handled the empty-strip `None`.
     pub fn active_source(&self) -> Option<&dyn SessionSource> {
-        self.active().map(Tab::focused_source)
+        self.active().and_then(Tab::focused_session)
     }
 
     /// Whether `addr` names the tab holding the keyboard. `close_tab` asks

@@ -13,6 +13,10 @@ name = "zesterm"
 path = "src/main.rs"
 
 [dependencies]
+# An open file is measured in the same columns the grid uses, so a file and the
+# terminal beside it line up on a wide character (#464). Already in the tree via
+# zest-core, so this costs no build time.
+unicode-width.workspace = true
 zest-core.workspace = true
 zest-pty.workspace = true
 zest-theme.workspace = true
