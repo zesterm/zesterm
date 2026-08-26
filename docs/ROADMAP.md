@@ -177,7 +177,17 @@ the history behind them is in closed issues and PRs.
       copy-on-select off, read the right way round. `clipboard_probe` answers
       what a given session supports, since PRIMARY needs wlr data-control v2
       and many compositors do not offer it.
-- [ ] Linux packaging.
+- [x] **Linux packaging** (#482) — an Arch `PKGBUILD`, a desktop entry and an
+      icon under `packaging/linux/`, plus the two `LICENSE-*` files the repo
+      declared in `Cargo.toml` and `README.md` and had never actually carried.
+      The entry's `StartupWMClass` and `Icon` are held to `platform::APP_ID` by
+      a test, because on Wayland the icon is found by matching `app_id` against
+      an installed desktop file and a mismatch is invisible until someone
+      notices a blank square. The Vulkan *driver* is an optdepend, not a
+      dependency: the loader is required, a driver is the user's, and the GL
+      rung serves a machine with no Vulkan at all. Deliberately not a release
+      pipeline — AppImage, flatpak, `.deb` and a tag trigger are a distribution
+      decision, and this is the "can a Linux user install it" one.
 
 ### Shell integration & blocks
 

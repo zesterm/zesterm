@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=zesterm
+GenericName=Terminal
+Comment=GPU-accelerated themable terminal, and a fleet
+Exec=zesterm
+TryExec=zesterm
+Icon=zesterm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;
+# Must equal `platform::APP_ID`, the Wayland app_id and X11 WM_CLASS the window
+# sets. This is not cosmetic: on Wayland the taskbar icon is found by matching
+# app_id against an installed desktop file, so a mismatch here means no icon at
+# all, and `with_window_icon` cannot rescue it (winit ignores it on Wayland).
+# `the_app_id_and_the_desktop_file_agree` asserts the two match.
+StartupWMClass=zesterm

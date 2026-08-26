@@ -94,13 +94,41 @@ Use rustup rather than Homebrew's `rust` formula: only rustup honours the
 `rust-toolchain.toml` pin, and a mismatched compiler against a workspace that
 sets `rust-version` fails in ways that look like code errors.
 
-Then, on either platform:
+On Linux the build needs the development headers winit and fontique link
+against — the same ones CI installs:
+
+```
+# Debian / Ubuntu
+sudo apt install libxkbcommon-dev libwayland-dev libfontconfig1-dev
+# Arch
+sudo pacman -S --needed libxkbcommon wayland fontconfig
+```
+
+Running it also needs a **Vulkan driver**; the loader alone is not one. That is
+`vulkan-radeon`, `vulkan-intel` or `nvidia-utils` on real hardware, and
+`vulkan-swrast` (lavapipe) on a VM or a box with no GPU driver at all. A machine
+with a working GL driver and no Vulkan can fall back with `ZESTERM_BACKEND=gl`;
+if neither is there, zesterm reports which backends it tried and which were
+compiled in.
+
+Then, on any of the three:
 
 ```
 cargo build --workspace
 cargo xtask check-deps
 cargo xtask check-spawn
 ```
+
+## Packaging
+
+`packaging/linux/` carries an Arch `PKGBUILD`, a desktop entry and an icon. The
+entry's `StartupWMClass` and `Icon` must both equal `platform::APP_ID`: on
+Wayland the taskbar icon is found by matching the window's `app_id` against an
+installed desktop file, so a mismatch means no icon and nothing to point at.
+`the_app_id_and_the_desktop_entry_agree` fails the build rather than letting the
+two drift.
+
+Nothing is packaged for Windows or macOS yet, and there is no release workflow.
 
 ## Theming
 

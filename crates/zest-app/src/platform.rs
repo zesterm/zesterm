@@ -25,6 +25,52 @@
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const APP_ID: &str = "zesterm";
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(test)]
+mod identity_tests {
+    /// The desktop entry and the window must agree, or the window has no icon.
+    ///
+    /// winit exposes **no getter** for `app_id` or `WM_CLASS`, so this contract
+    /// cannot be asserted against a live window at all — the packaged file is
+    /// the only other end of it. Reading the entry at compile time is what
+    /// makes "rename one, forget the other" a build failure instead of a
+    /// missing icon nobody traces back here.
+    #[test]
+    fn the_app_id_and_the_desktop_entry_agree() {
+        const ENTRY: &str = include_str!("../../../packaging/linux/zesterm.desktop");
+
+        let wm_class = ENTRY
+            .lines()
+            .find_map(|l| l.strip_prefix("StartupWMClass="))
+            .expect("the entry declares StartupWMClass");
+        assert_eq!(
+            wm_class,
+            super::APP_ID,
+            "StartupWMClass must equal APP_ID, or a Wayland compositor matches the \
+             window against no desktop file and shows no icon"
+        );
+
+        let icon = ENTRY
+            .lines()
+            .find_map(|l| l.strip_prefix("Icon="))
+            .expect("the entry declares an Icon");
+        assert_eq!(
+            icon, super::APP_ID,
+            "the icon is looked up by this name under hicolor; PKGBUILD installs \
+             it as APP_ID.svg"
+        );
+
+        // The basename matters as much as the contents: the lookup is
+        // `app_id` -> `<app_id>.desktop`, so a renamed file breaks it silently.
+        assert!(
+            std::path::Path::new("packaging/linux/zesterm.desktop")
+                .file_stem()
+                .is_some_and(|s| s == super::APP_ID),
+            "the entry's basename is what the compositor looks up"
+        );
+    }
+}
+
 /// Stamp [`APP_ID`] onto the window attributes.
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
