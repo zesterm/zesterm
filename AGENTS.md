@@ -927,6 +927,18 @@ you need before you trip on it.
 
 ### mDNS
 
+- **Binding UDP 5353 beside `avahi-daemon` works on Linux, and our own browser
+  cannot tell you that.** The module analysed the collision for macOS
+  (`mDNSResponder` holds it) and Windows (`SO_REUSEADDR` steals it) and said
+  nothing about Linux, where avahi is the analogue and runs by default.
+  Measured: `mesh_probe` reports `self-visible: yes` with avahi active, and
+  `avahi-browse -rpt _zesterm._tcp` resolves the instance, SRV target, address
+  and TXT. Use `avahi-browse` for that check — multicast loopback is on
+  deliberately, so hearing our own advertisement proves only that we can hear
+  ourselves. The `#[ignore]`d multicast test stays ignored; CI runners still
+  lack reliable multicast. (#480)
+
+
 - **A DNS-SD *instance name* is not a *host name*.** The instance may contain
   spaces and parentheses; the SRV target must be a DNS label. Derive one from
   the other and the service publishes fine while no A record ever resolves —

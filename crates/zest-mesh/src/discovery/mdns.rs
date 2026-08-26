@@ -23,7 +23,13 @@
 //!    discovery sharing a single `ServiceDaemon`. Two of them in one process
 //!    means two threads and two binds of UDP 5353 — which macOS tolerates
 //!    because `mDNSResponder` already holds it, and Windows' `SO_REUSEADDR`
-//!    treats as stealing rather than sharing.
+//!    treats as stealing rather than sharing. **Linux, measured** (#480):
+//!    `avahi-daemon` is the analogue there and holds `0.0.0.0:5353` on a
+//!    default desktop, and binding beside it is fine — `mesh_probe` reports
+//!    `self-visible: yes`, and `avahi-browse -rpt _zesterm._tcp` resolves our
+//!    instance, SRV target, address and TXT. Check interoperability with
+//!    `avahi-browse`, never with our own browser: hearing ourselves only
+//!    proves multicast loopback, which point 3 turns on deliberately.
 //! 3. **Multicast loopback stays on.** We hear our own advertisement, and
 //!    [`MdnsDiscovery::self_seen`] reports it. Without that, "a firewall is
 //!    eating my multicast" and "nothing else is running" are the same empty
