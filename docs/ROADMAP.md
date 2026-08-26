@@ -297,11 +297,15 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       `gitcmd::run_git` is the bounded-subprocess skeleton, extracted from the
       context engine's dirty probe so there is one copy of "run git without
       letting it hang the daemon".
-- [ ] **A pane can be something other than a session.** `PaneContent` becomes a
-      sum type so a tab can hold an editor beside its shell; no runtime change.
-- [ ] **A file opens in a pane**: the buffer, gutter, ⌘S, and the conflict
-      answer that offers reload-or-overwrite rather than picking one. Design
-      §13.
+- [x] **A pane can hold a file, not just a shell** (#464). `PaneContent` is a
+      sum type; only a *split* pane may be a non-session, so pane 0 is always a
+      shell and a tab is still named by one. Read-only: the gutter, the scroll
+      and the states (opening, refused, binary, empty), reached by ⌘G — not
+      ⌘O, which a Desktop letter's Ctrl+Shift folding had already spent on
+      copy-block-output. Design §13.
+- [ ] **Editing and ⌘S**: the caret, selection, undo, and the conflict answer
+      that offers reload-or-overwrite rather than picking one. The wire half
+      (`WriteFile`, and a refusal carrying the disk's hash) landed in #446.
 - [ ] **Syntax highlighting**, coloured from the theme's own tokens and ANSI
       row in OKLCH rather than from a bundled highlighter theme that would
       clash with every zesterm palette.

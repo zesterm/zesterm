@@ -385,12 +385,69 @@ pub struct ThemeCard {
 /// One pane's header facts (design screen 5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneModel {
+    /// The pane's name in its header: a host for a shell, a filename for a
+    /// file (#464).
     pub host: String,
-    /// Mono sub-label: cwd, and the path cost for a remote pane.
+    /// Mono sub-label: cwd and the path cost for a remote pane; the
+    /// containing directory for a file.
     pub sub: String,
     pub focused: bool,
     /// Host-accent slot for the header dot.
     pub accent: usize,
+    /// What the pane holds, for the parts of the header that differ.
+    pub kind: PaneKind,
+}
+
+/// What a pane is showing — the header's only branch, and the reason the
+/// layout pass does not have to ask the tab anything.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneKind {
+    Session,
+    Editor(EditorView),
+}
+
+/// Everything the layout pass needs to draw an open file, and nothing it does
+/// not (#464).
+///
+/// The lines are the **visible** ones, already sliced and tab-expanded by the
+/// app: the layout pass is pure and measure-injected, and handing it a hundred
+/// thousand lines to skip past every frame would make it the wrong kind of
+/// pure. Slicing where the geometry is known also keeps the gutter's numbers
+/// and the rows they sit beside in one place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorView {
+    /// Line number of `lines[0]`, 1-based as a gutter counts.
+    pub first_line: usize,
+    pub lines: Vec<String>,
+    /// Lines in the whole file, which is what the gutter is sized for — a file
+    /// scrolled to line 9 must not have the gutter narrow under it.
+    pub total: usize,
+    pub scroll_x: f32,
+    /// Shown as a badge, before someone tries to type rather than after.
+    pub readonly: bool,
+    /// More file exists than arrived.
+    pub truncated: bool,
+    /// There is nothing to draw but a reason: still opening, refused by the
+    /// host, or not text. Drawn instead of the lines, never beside them.
+    pub notice: Option<String>,
+}
+
+/// The "Open file…" prompt (#464): one path entry and, after a refusal, the
+/// reason it did not open.
+///
+/// No completion list yet — #449's `ListDir` lists directories only, and half
+/// a completion (folders but not files) is worse than none, because the
+/// missing half looks like the file is not there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenFileModel {
+    pub path: String,
+    pub caret: Caret,
+    /// The directory a relative path will resolve against, shown so the
+    /// person can tell which machine and which directory they are typing
+    /// into — the two things a path alone does not say.
+    pub cwd: String,
+    /// The machine that will do the reading.
+    pub host: String,
 }
 
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).
@@ -1002,6 +1059,8 @@ pub struct ChromeModel {
     /// The settings chord ("⌘,"), for the vertical sidebar's pinned row.
     pub settings_chord: String,
     /// The fleet picker, drawn over everything when open.
+    /// The "Open file…" prompt, while it is up (#464).
+    pub open_file: Option<OpenFileModel>,
     pub picker: Option<PickerModel>,
     /// The command palette, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.
@@ -1121,6 +1180,15 @@ pub struct ChromeMetrics {
     /// The grid font's size, physical pixels — the default for any text run
     /// the design does not size explicitly.
     pub font_px: f32,
+    /// Width of one grid cell, physical (#464).
+    ///
+    /// `line_height` has always been the cell's *height*; a file pane needs
+    /// the other axis too, so its gutter is a whole number of columns wide and
+    /// a sideways flick moves it the same distance it moves a terminal.
+    pub cell_w: f32,
+    /// `window.padding`, logical — what `pane_body` insets by, so the layout
+    /// pass can find a pane's body without being handed the config.
+    pub padding: u32,
 }
 
 impl ChromeMetrics {

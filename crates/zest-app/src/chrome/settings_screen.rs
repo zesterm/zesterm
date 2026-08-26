@@ -1808,6 +1808,8 @@ mod tests {
             line_height: 18.0,
             baseline: 14.0,
             font_px: 13.0,
+            cell_w: 8.0,
+            padding: 0,
         }
     }
 

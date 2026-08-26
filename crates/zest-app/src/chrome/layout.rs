@@ -521,6 +521,9 @@ pub fn layout(
     if let Some(picker) = &model.dir_picker {
         dir_picker_overlay(picker, colors, m, measure, &mut out);
     }
+    if let Some(open_file) = &model.open_file {
+        open_file_overlay(open_file, colors, m, measure, &mut out);
+    }
     if let Some(launcher) = &model.launcher {
         // Anchored to the `+` the strip pass just recorded; exclusive with
         // the other overlays by the app's rule, so its place in this list
@@ -692,6 +695,7 @@ fn panes_overlay(
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
 ) {
+    use super::model::PaneKind;
     let s = m.scale;
     let frames = pane_frames(area, s, panes.len());
     for (i, (pane, frame)) in panes.iter().zip(frames).enumerate() {
@@ -726,6 +730,31 @@ fn panes_overlay(
             out.hit.push(header, HitRegion::Pane(i));
         } else {
             out.hit.push(frame, HitRegion::Pane(i));
+        }
+
+        // A file pane's body is chrome all the way down — there is no grid
+        // beneath it — so it draws here and claims the wheel for itself,
+        // focused or not. Pushed *after* the `Pane` region so it wins inside
+        // the body while the header still moves the keyboard.
+        if let PaneKind::Editor(view) = &pane.kind {
+            let body = pane_body(frame, s, m.padding);
+            let ed = super::editor::layout_editor(
+                view,
+                body,
+                super::editor::EditorMetrics {
+                    cell_w: m.cell_w,
+                    cell_h: m.line_height,
+                    scale: s,
+                    // The grid's own size: a file beside a terminal should be
+                    // the same text at the same scale, not a UI label about it.
+                    px: m.font_px,
+                },
+                colors,
+                measure,
+            );
+            out.rects.extend(ed.rects);
+            out.texts.extend(ed.texts);
+            out.hit.push(body, HitRegion::EditorBody(i));
         }
 
         let mut x = frame[0] + 10.0 * s;
@@ -1585,6 +1614,97 @@ fn picker_overlay(
 /// with a listing where the command table was. Rows are uniform, every one
 /// selectable; the `..` row (row 0 when the path has a parent) draws faint
 /// because it navigates where the rest switch.
+/// The "Open file…" prompt (#464), in the palette's shape: a scrim, a rounded
+/// panel, one path entry, and a line naming where a relative path will land.
+///
+/// The `where` line is not decoration. A path prompt in a fleet terminal is
+/// ambiguous in two directions at once — which directory, and which *machine*
+/// — and neither is recoverable from what the person typed.
+fn open_file_overlay(
+    model: &super::model::OpenFileModel,
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let no_clip = [0.0, 0.0, m.width, m.height];
+
+    out.rects.push(RectInstance::filled(no_clip, colors.scrim, no_clip));
+    out.hit.push(no_clip, HitRegion::OpenFileScrim);
+
+    let w = (PALETTE_W * s).min(m.width - PICKER_MARGIN * s);
+    let field_h = m.line_height + 2.0 * PICKER_PAD * s;
+    let where_h = m.line_height + PICKER_PAD * s;
+    let h = field_h + HAIRLINE * s + where_h;
+    let panel = [(m.width - w) / 2.0, (m.height - h) / 2.5, w, h];
+    let mut panel_rect = RectInstance::rounded(panel, PICKER_RADIUS * s, colors.panel_bg, no_clip);
+    panel_rect.shadow_blur = 24.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+    // Swallows a near-miss, so a click just outside the entry does not dismiss
+    // a path someone has half-typed.
+    out.hit.push(panel, HitRegion::OpenFilePanel);
+
+    let (text, color) = if model.path.is_empty() {
+        ("path to a file".to_string(), colors.text_faint)
+    } else {
+        (model.path.clone(), colors.text_active)
+    };
+    let x = panel[0] + PICKER_PAD * s;
+    if let Some((lo, hi)) = model.caret.selection {
+        let (a, b) = (
+            measure(&model.path[..lo], m.font_px, false, 0.0),
+            measure(&model.path[..hi], m.font_px, false, 0.0),
+        );
+        out.rects.push(RectInstance::rounded(
+            [x + a, panel[1] + PICKER_PAD * s, b - a, m.line_height],
+            2.0 * s,
+            colors.accent_soft,
+            panel,
+        ));
+    }
+    out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
+        tracking: 0.0,
+        text,
+        pos: [x, text_baseline(m, panel[1], field_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color,
+        clip: panel,
+    });
+    if !model.path.is_empty() {
+        let at = measure(&model.path[..model.caret.at], m.font_px, false, 0.0);
+        out.rects.push(RectInstance::filled(
+            [x + at, panel[1] + PICKER_PAD * s, (1.5 * s).max(1.0), m.line_height],
+            colors.text_active,
+            panel,
+        ));
+    }
+    out.rects.push(RectInstance::filled(
+        [panel[0], panel[1] + field_h, w, HAIRLINE * s],
+        colors.line,
+        no_clip,
+    ));
+
+    let hint = if model.cwd.is_empty() {
+        format!("on {}", model.host)
+    } else {
+        format!("in {} on {}", model.cwd, model.host)
+    };
+    out.texts.push(TextRun {
+        px: UI_STATUS * s,
+        bold: false,
+        tracking: 0.0,
+        text: hint,
+        pos: [x, text_baseline(m, panel[1] + field_h, where_h)],
+        max_width: w - 2.0 * PICKER_PAD * s,
+        color: colors.text_faint,
+        clip: panel,
+    });
+}
+
 fn dir_picker_overlay(
     picker: &super::model::DirPickerModel,
     colors: &ChromeColors,
@@ -3359,6 +3479,8 @@ mod tests {
             line_height: 20.0 * scale,
             baseline: 15.0 * scale,
             font_px: GRID_PX * scale,
+            cell_w: 8.0,
+            padding: 0,
         }
     }
 
@@ -3382,6 +3504,7 @@ mod tests {
             picker: None,
             palette: None,
             dir_picker: None,
+            open_file: None,
             settings: None,
             launcher: None,
             block_menu: None,
@@ -3519,6 +3642,7 @@ mod tests {
         let m = metrics(1200.0, 800.0, 1.0);
         let mut model = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
         let pane = |focused| super::super::model::PaneModel {
+            kind: super::super::model::PaneKind::Session,
             host: "local".into(),
             sub: "~/dev".into(),
             focused,
@@ -4051,8 +4175,8 @@ mod tests {
         let m = metrics(1200.0, 800.0, 1.0);
         let mut mo = model(tabs, TabsPosition::Top);
         mo.panes = Some(vec![
-            PaneModel { host: "studio".into(), sub: "~/dev".into(), focused: true, accent: 0 },
-            PaneModel { host: "forge".into(), sub: "C:\\src".into(), focused: false, accent: 2 },
+            PaneModel { host: "studio".into(), sub: "~/dev".into(), focused: true, accent: 0, kind: super::super::model::PaneKind::Session },
+            PaneModel { host: "forge".into(), sub: "C:\\src".into(), focused: false, accent: 2, kind: super::super::model::PaneKind::Session },
         ]);
         let l = layout(&mo, &colors(), &m, &mut measure);
 
@@ -4097,6 +4221,7 @@ mod tests {
             mo.panes = Some(
                 (0..n)
                     .map(|i| PaneModel {
+                        kind: super::super::model::PaneKind::Session,
                         host: format!("host{i}"),
                         sub: String::new(),
                         focused: i == 2 % n,

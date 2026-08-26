@@ -82,6 +82,23 @@ pub trait SessionSource {
         None
     }
 
+    /// Ask the session's host to read a file, for a pane showing one (#464).
+    ///
+    /// [`Self::request_dirs`]'s shape and its bargain: `true` means the
+    /// question is on the wire and a
+    /// [`crate::session::Wakeup::FileContentsReady`] will follow; `false` is
+    /// every in-process source's answer, and means the caller reads the file
+    /// itself — which for an in-process session *is* the host's filesystem
+    /// (#434). `cwd` is what a relative `path` resolves against, on that host.
+    fn request_file(&self, _path: &str, _cwd: &str) -> bool {
+        false
+    }
+
+    /// Take the parked answer to [`Self::request_file`], clearing it.
+    fn take_file_contents(&self) -> Option<crate::editor::FileReply> {
+        None
+    }
+
     /// Where this session actually runs.
     ///
     /// Surfaced rather than hidden, so a slow keystroke has an explanation. See

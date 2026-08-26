@@ -18,7 +18,7 @@ use crate::pipeline_cache;
 use crate::chrome::hit::{self, CaptionButton, HitRegion, WheelTarget};
 use crate::chrome::layout::ChromeLayout;
 use crate::chrome::model::{
-    ChromeMetrics, ChromeModel, TabModel, TabOrigin, TabPresence, WindowControls,
+    ChromeMetrics, ChromeModel, PaneKind, TabModel, TabOrigin, TabPresence, WindowControls,
 };
 use crate::chrome::theme::ChromeColors;
 use crate::chrome::Insets;
@@ -2030,6 +2030,11 @@ pub struct App {
     client_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
     /// Distinct placeholder addresses for sessions with no real one.
     next_placeholder: u64,
+    /// Answers to a *local* file read (#464), each carrying the pane it was
+    /// for. A remote answer parks on its own session instead; these come from
+    /// a worker thread, so they need somewhere of their own to land.
+    local_file_replies:
+        Arc<parking_lot::Mutex<Vec<(zest_proto::SessionAddr, crate::editor::FileReply)>>>,
     /// Hosts, presence, and session lists — the picker's data source.
     fleet: Option<crate::fleet::FleetModel>,
     /// The fleet picker's transient state, while open.
@@ -2037,6 +2042,9 @@ pub struct App {
     palette_ui: Option<PaletteState>,
     /// The cwd chip's directory browser, when open (#439).
     dir_picker: Option<DirPickerState>,
+    /// The "Open file…" prompt, while it is up (#464). One of the
+    /// mutually-exclusive overlays the app allows at most one of.
+    open_file: Option<TextField>,
     settings_ui: Option<SettingsUiState>,
     /// The Profiles tab's editor state, while that tab exists (§12).
     profiles_ui: Option<ProfilesUiState>,
@@ -2316,6 +2324,13 @@ pub enum StartScreen {
     /// name is a click, and a review of a rename affordance that cannot be
     /// photographed is a review of the diff only.
     ProfilesRename,
+    /// The "Open file…" prompt (#464) — `settings-menu`'s argument: a prompt
+    /// that takes a keystroke to reach cannot otherwise be photographed.
+    OpenFile,
+    /// A pane holding a file, opened on this repository's own `README.md`, so
+    /// the gutter, the wrapping-free long lines and the header all have real
+    /// content in the picture rather than a fixture's.
+    Editor,
 }
 
 impl App {
@@ -2375,10 +2390,12 @@ impl App {
             route: None,
             client_identity: None,
             next_placeholder: 0,
+            local_file_replies: Arc::default(),
             fleet: None,
             picker: None,
             palette_ui: None,
             dir_picker: None,
+            open_file: None,
             settings_ui: None,
             profiles_ui: None,
             launcher: None,
@@ -3077,6 +3094,212 @@ impl App {
         }
     }
 
+    /// Open the "Open file…" prompt (#464).
+    ///
+    /// Exclusive with the other overlays, like every one of them: the app
+    /// enforces at most one open, which is what lets `layout` never rank them.
+    fn open_file_prompt(&mut self) {
+        self.dir_picker = None;
+        self.block_menu = None;
+        self.open_file = Some(TextField::default());
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// The prompt as the layout pass wants it, with where a relative path
+    /// would land.
+    fn open_file_model(&self) -> Option<crate::chrome::model::OpenFileModel> {
+        let field = self.open_file.as_ref()?;
+        let (cwd, host) = self.tabs.active().map_or_else(
+            || (String::new(), "this machine".to_string()),
+            |tab| {
+                let session = tab.focused_session().unwrap_or_else(|| tab.source());
+                let host = match session.origin() {
+                    crate::source::Origin::Daemon { host, local: false } => host,
+                    _ => "this machine".to_string(),
+                };
+                let term = session.terminal();
+                let term = term.lock();
+                let cwd = if term.cwd().is_empty() {
+                    term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
+                } else {
+                    term.cwd().to_string()
+                };
+                (crate::status::shorten_home(&cwd), host)
+            },
+        );
+        Some(crate::chrome::model::OpenFileModel {
+            path: field.text().to_string(),
+            caret: crate::chrome::model::Caret {
+                at: field.caret(),
+                selection: field.selection(),
+            },
+            cwd,
+            host,
+        })
+    }
+
+    /// A fresh placeholder address.
+    fn next_placeholder(&mut self) -> u64 {
+        self.next_placeholder += 1;
+        self.next_placeholder
+    }
+
+    /// A closure a worker thread can post a wakeup through.
+    fn wakeup_sender(&self) -> impl Fn(Wakeup) + Send + 'static {
+        let proxy = self.proxy.clone();
+        move |w| {
+            let _ = proxy.send_event(w);
+        }
+    }
+
+    /// Open `path` in a new pane of the active tab, read from the focused
+    /// session's host (#464).
+    ///
+    /// A relative path resolves against that session's cwd, on *its* machine —
+    /// which is the whole reason this goes through the wire rather than
+    /// `std::fs`: the tab may be a shell on the build box, and reading the
+    /// local file of the same name would be a confident wrong answer.
+    fn open_file_pane(&mut self, path: &str) {
+        let Some(tab) = self.tabs.active() else { return };
+        // Read through the focused pane when it is a shell, and through the
+        // tab's own session when the focus is already on a file — opening a
+        // second file from the first should not need a trip back to a terminal.
+        let (origin_addr, cwd) = {
+            let session = tab.focused_session().unwrap_or_else(|| tab.source());
+            let addr = tab.focused_session().map_or(tab.addr, |_| tab.focused_addr());
+            let term = session.terminal();
+            let term = term.lock();
+            let mut cwd = if term.cwd().is_empty() {
+                term.blocks().last().map(|b| b.cwd.clone()).unwrap_or_default()
+            } else {
+                term.cwd().to_string()
+            };
+            // A shell that has not run a prompt yet has reported no cwd, and
+            // a relative path would be refused for a reason that is true but
+            // useless — "no working directory" a second after the window
+            // opened. For a session in *this* process the answer is known:
+            // the directory this process was started in, which is where its
+            // shell was spawned. A remote session gets no such guess; the
+            // refusal is the honest answer there, since the directory that
+            // matters is on another machine.
+            if cwd.is_empty() && matches!(session.origin(), crate::source::Origin::InProcess) {
+                cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+            (addr, cwd)
+        };
+
+        let addr = crate::tabs::placeholder_addr(self.next_placeholder());
+        let editor = crate::editor::EditorPane::loading(addr, origin_addr, path, &cwd);
+        self.adopt_pane(crate::tabs::SplitPane::editor(editor));
+        self.request_file_for(addr);
+    }
+
+    /// Put the question for pane `addr` on the wire, or answer it here when
+    /// the session runs in this process (#434: a window hosting its own
+    /// session reads its own filesystem, rather than asking itself over a
+    /// socket).
+    fn request_file_for(&mut self, addr: zest_proto::SessionAddr) {
+        let Some(tab) = self.tabs.active() else { return };
+        let Some((_, editor)) = tab
+            .panes
+            .iter()
+            .enumerate()
+            .find_map(|(j, p)| p.editor_ref().filter(|e| e.addr == addr).map(|e| (j, e)))
+        else {
+            return;
+        };
+        let (asked, cwd) = (editor.asked.clone(), editor.cwd.clone());
+
+        // The source that owns the file's host: the pane the read was opened
+        // from, falling back to the tab's own shell.
+        let origin = editor.origin;
+        let source = (0..tab.pane_count())
+            .find(|&i| tab.pane_addr(i) == origin)
+            .and_then(|i| tab.pane_session(i))
+            .unwrap_or_else(|| tab.source());
+
+        if source.request_file(&asked, &cwd) {
+            return;
+        }
+        // No host to ask: this window *is* the host. Off the UI thread, since
+        // a read is a disk and `files::read_file` is the daemon's own — one
+        // implementation of the cap, the hash and the binary sniff rather than
+        // a second that drifts from it.
+        let waker = self.wakeup_sender();
+        let cell = std::sync::Arc::clone(&self.local_file_replies);
+        let spawned = std::thread::Builder::new().name("zest-file-read".into()).spawn(move || {
+            let msg = zest_daemon::files::read_file(&asked, &cwd);
+            if let Some(reply) = crate::editor::FileReply::from_host(msg) {
+                cell.lock().push((addr, reply));
+                waker(crate::session::Wakeup::FileContentsReady);
+            }
+        });
+        if let Err(e) = spawned {
+            if let Some(tab) = self.tabs.active_mut() {
+                for (_, editor) in tab.editors_mut().filter(|(_, e)| e.addr == addr) {
+                    editor.state =
+                        crate::editor::LoadState::Failed(format!("no thread to read it: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Move every answer that has landed onto the pane waiting for it.
+    fn drain_file_replies(&mut self) {
+        // Local reads carry the pane they were for, so they route exactly.
+        let local: Vec<_> = std::mem::take(&mut *self.local_file_replies.lock());
+
+        // A remote answer is parked on the *source* that asked, and the wire
+        // has no request id — the correlation is the echoed path, which comes
+        // back canonicalized and so does not match a relative ask. So each
+        // answer is carried with the address of the session that produced it,
+        // and goes only to a pane that asked *that* session. Without the
+        // address a tab split across two machines could hand the build box's
+        // answer to a pane waiting on the laptop — the two would look alike
+        // and the file would simply be the wrong one.
+        //
+        // What remains, and is inherent to one cell per source: two files
+        // opened on the *same* host in the same instant means the second
+        // reply overwrites the first in that cell, and the first pane keeps
+        // saying it is opening. Rare enough to name rather than build a queue
+        // for.
+        let mut remote: Vec<(zest_proto::SessionAddr, crate::editor::FileReply)> = Vec::new();
+        if let Some(tab) = self.tabs.active() {
+            for i in 0..tab.pane_count() {
+                if let Some(reply) = tab.pane_session(i).and_then(|s| s.take_file_contents()) {
+                    remote.push((tab.pane_addr(i), reply));
+                }
+            }
+        }
+        if local.is_empty() && remote.is_empty() {
+            return;
+        }
+
+        if let Some(tab) = self.tabs.active_mut() {
+            for (addr, reply) in local {
+                for (_, editor) in tab.editors_mut().filter(|(_, e)| e.addr == addr) {
+                    editor.apply(reply.clone());
+                }
+            }
+            for (from, reply) in remote {
+                if let Some((_, editor)) =
+                    tab.editors_mut().find(|(_, e)| e.wants_reply_from(from))
+                {
+                    editor.apply(reply);
+                }
+            }
+        }
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// An answer landed; keep it only if it is still the question.
     fn apply_dir_listing(&mut self, listing: crate::session::DirListing) {
         let Some(p) = self.dir_picker.as_mut() else { return };
@@ -3402,6 +3625,7 @@ impl App {
             Action::OpenProfiles => self.open_profiles_tab(),
             Action::ToggleTabLayout => self.toggle_tab_layout(),
             Action::SplitRight => self.split_right(),
+            Action::OpenFile => self.open_file_prompt(),
             Action::SplitRightOnHost => self.arm_pending(Pending::Split),
             Action::FocusPaneLeft => self.cycle_pane_focus(-1),
             Action::FocusPaneRight => self.cycle_pane_focus(1),
@@ -3643,10 +3867,19 @@ impl App {
         // the granted size from the terminal -- not from `tab.sized`, which
         // records what this window *asked* -- is what keeps the letterbox
         // aligned with the pixels the renderer actually draws.
+        // Index-parallel with the panes, including the ones holding a file
+        // (#464): a file pane still occupies a frame, so dropping it here
+        // would shift every later pane's rectangle onto its neighbour. Its
+        // own entry is a placeholder — the letterbox it produces is never
+        // read, because a file pane is drawn by the chrome and gets no
+        // viewport — and one cell rather than zero keeps the arithmetic in
+        // `pane_grid_rects` away from a division by nothing.
         let grids: Vec<(usize, usize)> = (0..tab.pane_count())
             .map(|i| {
-                let term = tab.pane_source(i).terminal().lock();
-                (term.grid().cols(), term.grid().rows())
+                tab.pane_session(i).map_or((1, 1), |s| {
+                    let term = s.terminal().lock();
+                    (term.grid().cols(), term.grid().rows())
+                })
             })
             .collect();
         crate::chrome::layout::pane_grid_rects(
@@ -3699,8 +3932,12 @@ impl App {
             tab.sized = fit[0];
         }
         for (pane, d) in tab.panes.iter_mut().zip(&fit[1..]) {
+            // A file pane has no pty to tell, and no cell size to be told in:
+            // its scroll clamp is lines and pixels, and the layout pass reads
+            // its body rectangle directly.
+            let Some(session) = pane.session() else { continue };
             if pane.sized != *d {
-                pane.source().resize(d.0, d.1);
+                session.resize(d.0, d.1);
                 pane.sized = *d;
             }
         }
@@ -4107,6 +4344,85 @@ impl App {
     }
 
     /// The split tab's pane headers, when the active tab has a split.
+    /// Lines a pane body can show, for a tab of `panes` panes.
+    ///
+    /// One short of what fits, so a partially visible last row is never the
+    /// one a scroll clamp counts on — the alternative is a file that appears
+    /// to have a line left to go and does not move when you ask for it.
+    fn editor_body_rows(&self, panes: usize) -> usize {
+        let geometry = self.window.as_ref().zip(self.fonts.as_ref());
+        let Some((window, fonts)) = geometry else { return 1 };
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let area = self.insets_at(scale).grid_rect(size.width, size.height);
+        let frames = crate::chrome::layout::pane_frames(area, scale, panes);
+        let Some(frame) = frames.first() else { return 1 };
+        let body = crate::chrome::layout::pane_body(*frame, scale, self.config.padding);
+        let cell_h = fonts.cell_metrics().cell_h as f32;
+        if cell_h <= 0.0 {
+            return 1;
+        }
+        ((body[3] / cell_h).floor() as usize).saturating_sub(1).max(1)
+    }
+
+    /// One pane's cell width and body width, for a wheel landing in a file.
+    ///
+    /// The cell width is the grid's, so a sideways flick moves a file by the
+    /// same distance it moves a terminal.
+    fn editor_body_span(&self, pane: usize) -> (f32, f32) {
+        let geometry = self.window.as_ref().zip(self.fonts.as_ref());
+        let Some((window, fonts)) = geometry else { return (8.0, 0.0) };
+        let scale = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let area = self.insets_at(scale).grid_rect(size.width, size.height);
+        let n = self.tabs.active().map_or(1, Tab::pane_count);
+        let frames = crate::chrome::layout::pane_frames(area, scale, n);
+        let cell_w = fonts.cell_metrics().cell_w as f32;
+        let Some(frame) = frames.get(pane) else { return (cell_w, 0.0) };
+        let body = crate::chrome::layout::pane_body(*frame, scale, self.config.padding);
+        (cell_w, body[2])
+    }
+
+    /// The visible slice of an open file, ready for the layout pass.
+    fn editor_view(
+        &self,
+        e: &crate::editor::EditorPane,
+        rows: usize,
+    ) -> crate::chrome::model::EditorView {
+        use crate::chrome::model::EditorView;
+        use crate::editor::LoadState;
+
+        let notice = match &e.state {
+            LoadState::Loading => Some("opening…".to_string()),
+            LoadState::Failed(why) => Some(why.clone()),
+            LoadState::Ready if e.binary => {
+                Some(format!("{} of binary, not shown", crate::status::human_bytes(e.size)))
+            }
+            LoadState::Ready if e.line_count() == 0 => Some("empty file".to_string()),
+            LoadState::Ready => None,
+        };
+        let first = e.scroll_line;
+        let lines = if notice.is_some() {
+            Vec::new()
+        } else {
+            e.lines()
+                .iter()
+                .skip(first)
+                .take(rows)
+                .map(|l| crate::editor::expand_tabs(l).into_owned())
+                .collect()
+        };
+        EditorView {
+            first_line: first + 1,
+            lines,
+            total: e.line_count(),
+            scroll_x: e.scroll_x,
+            readonly: e.readonly,
+            truncated: e.truncated,
+            notice,
+        }
+    }
+
     fn build_panes_model(
         &self,
         fleet_hosts: &[crate::fleet::FleetHost],
@@ -4116,6 +4432,10 @@ impl App {
         if !tab.is_split() {
             return None;
         }
+        // How many lines a pane body can show, worked out once: slicing where
+        // the geometry is known keeps the layout pass pure and stops it having
+        // to skip past a hundred thousand lines it will not draw.
+        let rows = self.editor_body_rows(tab.pane_count());
         let describe = |source: &dyn crate::source::SessionSource| {
             let (host, accent, remote) = match source.origin() {
                 Origin::Daemon { host, local: false } => (host, 1, true),
@@ -4161,8 +4481,25 @@ impl App {
         Some(
             (0..tab.pane_count())
                 .map(|i| {
-                    let (host, sub, accent) = describe(tab.pane_source(i));
-                    PaneModel { host, sub, focused: i == tab.focus, accent }
+                    // A file pane names the file, not a host: the header's job
+                    // is to say which pane you are looking at, and "local" on
+                    // a pane showing `main.rs` says nothing (#464).
+                    let (host, sub, accent, kind) = match tab.pane_session(i) {
+                        Some(session) => {
+                            let (host, sub, accent) = describe(session);
+                            (host, sub, accent, PaneKind::Session)
+                        }
+                        None => {
+                            let e = tab.pane_editor(i).expect("a pane is a session or a file");
+                            (
+                                e.title().to_string(),
+                                crate::status::shorten_home(e.dir()),
+                                0,
+                                PaneKind::Editor(self.editor_view(e, rows)),
+                            )
+                        }
+                    };
+                    PaneModel { host, sub, focused: i == tab.focus, accent, kind }
                 })
                 .collect(),
         )
@@ -5263,6 +5600,12 @@ impl App {
             // thrown away before it is ever built — the menu opens and nothing
             // appears, with nothing to see in any log.
             && self.block_menu.is_none()
+            && self.open_file.is_none()
+            // The same trap as the block menu, one surface along: a file pane
+            // *is* chrome, so with the strip hidden its whole body would be
+            // laid out and thrown away, and the pane would show nothing with
+            // nothing in a log to say why.
+            && !self.tabs.active().is_some_and(crate::tabs::Tab::has_editor_pane)
             && !self.tabs.settings_open()
             && self.screen == AppScreen::Terminal
         {
@@ -5359,7 +5702,7 @@ impl App {
                 .folded_blocks
                 .get(&tab.focused_addr())
                 .is_some_and(|f| f.contains(&m.block));
-            let term = tab.focused_source().terminal();
+            let term = tab.focused_session()?.terminal();
             let term = term.lock();
             let block = term.blocks().get(zest_core::BlockId(m.block))?.clone();
             Some(crate::block_menu::build_rows(
@@ -5387,6 +5730,8 @@ impl App {
             }
         });
 
+        // Before the `&mut self` borrow below, since it reads the tab.
+        let open_file_model = self.open_file_model();
         let dir_picker_model = self.dir_picker.as_mut().map(|state| {
             // Rows and their answers in one pass: `..` first when there is a
             // parent, then the children the filter keeps. The parallel
@@ -5822,6 +6167,8 @@ impl App {
             line_height: cm.cell_h as f32,
             baseline: cm.baseline as f32,
             font_px: fonts.shaping_px(),
+            cell_w: cm.cell_w as f32,
+            padding: self.config.padding,
         };
         // In fullscreen the traffic lights auto-hide, so the strip reclaims
         // their reserve; everywhere else the answer comes from AppKit fresh,
@@ -6099,6 +6446,7 @@ impl App {
             // The picker wins: it opens *over* the settings tab's content.
             palette: palette_model,
             dir_picker: dir_picker_model,
+            open_file: open_file_model,
             settings: settings_model,
             launcher: launcher_model,
             block_menu: block_menu_model,
@@ -6303,7 +6651,10 @@ impl App {
             }
             // The screen's ground swallows; its cards claim their own.
             (HitRegion::ScreenPanel, _) => {}
-            (HitRegion::Pane(i), MouseButton::Left) => {
+            (HitRegion::Pane(i), MouseButton::Left)
+            // Clicking into a file moves the keyboard there too, so a wheel
+            // and a keystroke agree about which pane you are in.
+            | (HitRegion::EditorBody(i), MouseButton::Left) => {
                 if self.tabs.active_mut().is_some_and(|t| t.focus_pane(i)) {
                     self.mark_chrome_dirty();
                 }
@@ -6576,6 +6927,14 @@ impl App {
                 }
                 self.dir_picker_activate(i);
             }
+            // Outside the panel dismisses; the panel itself swallows, so a
+            // click that just misses the entry does not throw away a
+            // half-typed path.
+            (HitRegion::OpenFileScrim, MouseButton::Left) => {
+                self.open_file = None;
+                self.mark_chrome_dirty();
+            }
+            (HitRegion::OpenFilePanel, _) => {}
             (HitRegion::DirPickerScrim, MouseButton::Left) => {
                 self.dir_picker = None;
                 self.mark_chrome_dirty();
@@ -9721,7 +10080,9 @@ impl App {
                 tab.source().resize(dims.0, dims.1);
                 tab.sized = dims;
             }
-            tab.focused_source().mark_dirty();
+            if let Some(session) = tab.focused_session() {
+                session.mark_dirty();
+            }
         }
         self.mark_chrome_dirty();
         self.persist_tabs();
@@ -9785,8 +10146,9 @@ impl App {
         let Some(tab) = self.tabs.active() else { return };
         let addr = tab.focused_addr();
         let Some(&id) = self.selected_block.get(&addr) else { return };
+        let Some(session) = tab.focused_session() else { return };
         let alive = {
-            let term = tab.focused_source().terminal();
+            let term = session.terminal();
             let term = term.lock();
             term.blocks().get(zest_core::BlockId(id)).is_some()
         };
@@ -9958,8 +10320,11 @@ impl App {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
+        // A file pane has no blocks: the headers, rails and fold chevrons this
+        // builds are all facts a shell told us, and a file told us none.
+        let Some(session) = tab.pane_session(pane) else { return Vec::new() };
         let pane_dead = tab.pane_dead(pane);
-        let term = tab.pane_source(pane).terminal();
+        let term = session.terminal();
         let term = term.lock();
         // The alt screen is a separate grid whose ids restart at zero; a
         // primary-grid block would overlay whatever rows happen to collide.
@@ -10133,6 +10498,10 @@ impl App {
             return None;
         }
         let tab = self.tabs.active()?;
+        // A prompt is a shell's; a pane holding a file has none, and chips
+        // describing the tab's *other* pane over an open file would be the
+        // wrong answer confidently drawn (#464).
+        let session = tab.focused_session()?;
         let addr = tab.focused_addr();
         let context = self.fleet.as_ref().and_then(|f| f.session_context(addr)).or_else(|| {
             // An in-process session has no daemon listing to carry its
@@ -10142,7 +10511,7 @@ impl App {
             // a daemon-backed session whose listing has not arrived yet must
             // stay blank rather than have its cwd probed against the local
             // disk, which is the ssh trap wearing a race's clothes.
-            if !matches!(tab.focused_source().origin(), crate::source::Origin::InProcess) {
+            if !matches!(session.origin(), crate::source::Origin::InProcess) {
                 return None;
             }
             let engine = self.local_context.get_or_init(|| {
@@ -10152,7 +10521,7 @@ impl App {
                 // blink without a wakeup plumbed through.
                 zest_daemon::context::ContextEngine::new(std::sync::Arc::new(|| {}))
             });
-            let term = tab.focused_source().terminal();
+            let term = session.terminal();
             let term = term.lock();
             // The daemon's own merge, not a re-derivation: the probe half
             // plus the terminal's shell facts, with one copy of the rules
@@ -10164,7 +10533,7 @@ impl App {
             )
         });
 
-        let term = tab.focused_source().terminal();
+        let term = session.terminal();
         let term = term.lock();
         if term.in_alt_screen() {
             return None;
@@ -10411,7 +10780,10 @@ impl App {
                     .map(|i| {
                         let folds =
                             self.folded_blocks.get(&t.pane_addr(i)).filter(|s| !s.is_empty())?;
-                        let term = t.pane_source(i).terminal();
+                        // A file pane folds nothing: folds are per block, and
+                        // a file has none. `None` keeps its slot in the
+                        // index-parallel vector.
+                        let term = t.pane_session(i)?.terminal();
                         let term = term.lock();
                         block_actions::fold_row_map(&term, folds)
                     })
@@ -10468,12 +10840,16 @@ impl App {
 
         let selected_blocks = self.selected_block.clone();
         let predict_policy = self.predict_policy();
-        let (Some(gpu), Some(fonts), Some(session), Some(window)) = (
-            self.gpu.as_mut(),
-            self.fonts.as_mut(),
-            self.tabs.active_source(),
-            self.window.as_ref(),
-        ) else {
+        // Deliberately *not* taking the focused session here (#464). It used
+        // to be part of this tuple, which was invisible while every pane was a
+        // shell — `active_source` was only `None` on an empty strip. The
+        // moment a focused pane can hold a file it is `None` for an ordinary
+        // window, and this returned before drawing **anything**: not the file,
+        // not the other panes, not the chrome, and not the screenshot this
+        // frame was for. The one arm that needs a session takes it there.
+        let (Some(gpu), Some(fonts), Some(window)) =
+            (self.gpu.as_mut(), self.fonts.as_mut(), self.window.as_ref())
+        else {
             return;
         };
 
@@ -10728,8 +11104,13 @@ impl App {
                     // profile, so each viewport derives its own selection and
                     // opacity — today every pane reads the tab's identity.
                     let identity = active_tab.identity.as_ref();
-                    let terms: Vec<_> =
-                        (0..n).map(|i| active_tab.pane_source(i).terminal().lock()).collect();
+                    // Index-parallel with the panes, `None` where one holds a
+                    // file (#464). Keeping the slot rather than filtering here
+                    // is what lets every later index — frames, rects, bands,
+                    // fold maps — go on meaning the same pane.
+                    let terms: Vec<Option<_>> = (0..n)
+                        .map(|i| active_tab.pane_session(i).map(|s| s.terminal().lock()))
+                        .collect();
                     // Each pane letterboxes its own grid (#215); the focused
                     // one must come out equal to `focused_view_rect`, which is
                     // the rectangle the pointer and IME believe. The same
@@ -10738,8 +11119,12 @@ impl App {
                     // rendered with, because a grid the reader thread resizes
                     // mid-frame must not leave the viewport describing the
                     // size it had a moment ago.
-                    let dims: Vec<(usize, usize)> =
-                        terms.iter().map(|t| (t.grid().cols(), t.grid().rows())).collect();
+                    let dims: Vec<(usize, usize)> = terms
+                        .iter()
+                        .map(|t| {
+                            t.as_ref().map_or((1, 1), |t| (t.grid().cols(), t.grid().rows()))
+                        })
+                        .collect();
                     let rects = crate::chrome::layout::pane_grid_rects(
                         area,
                         scale,
@@ -10752,28 +11137,40 @@ impl App {
                     });
                     // The focused pane's guesses only: the keyboard feeds one
                     // pane, so only one can have any.
-                    let predicted =
-                        active_tab.pane_source(active_tab.focus).predicted(predict_policy);
+                    let predicted = active_tab
+                        .pane_session(active_tab.focus)
+                        .and_then(|s| s.predicted(predict_policy));
                     // Per pane, and each looks up its *own* address: the panes
                     // select independently, so reading `focused_addr` for all
                     // would light the same block in every one.
                     let bands: Vec<Vec<zest_render_wgpu::BlockBand>> = (0..n)
                         .map(|i| {
-                            Self::block_bands(
-                                &band_colors,
-                                &terms[i],
-                                selected_blocks.get(&active_tab.pane_addr(i)).copied(),
-                                active_tab.pane_dead(i),
-                            )
+                            // Empty for a file pane, which has no blocks —
+                            // and the slot is kept for the same reason
+                            // `terms` keeps its own.
+                            terms[i].as_ref().map_or_else(Vec::new, |term| {
+                                Self::block_bands(
+                                    &band_colors,
+                                    term,
+                                    selected_blocks.get(&active_tab.pane_addr(i)).copied(),
+                                    active_tab.pane_dead(i),
+                                )
+                            })
                         })
                         .collect();
+                    // A file pane pushes no viewport at all: `pane_is_covered`'s
+                    // rule — do not build the terminal, rather than build it and
+                    // paint over it — applied one level down, per pane. A grid
+                    // drawn underneath would leak a pixel around the chrome's
+                    // own antialiased edge (#253).
                     let viewports: Vec<Viewport> = (0..n)
-                        .map(|i| {
+                        .filter_map(|i| {
+                            let term = terms[i].as_ref()?;
                             let focused = i == active_tab.focus;
-                            Viewport {
+                            Some(Viewport {
                                 rect: rects[i],
-                                grid: terms[i].grid(),
-                                palette: terms[i].palette(),
+                                grid: term.grid(),
+                                palette: term.palette(),
                                 scroll_px,
                                 focused: self.focused && focused,
                                 opacity: pane_opacity(self.config.opacity, identity),
@@ -10794,7 +11191,7 @@ impl App {
                                     frames[i], rects[i], scale,
                                 ),
                                 scale,
-                                selection: terms[i].selection(),
+                                selection: term.selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
                                 preedit: if focused { preedit } else { None },
                                 predicted: if focused {
@@ -10808,7 +11205,7 @@ impl App {
                                 cursor_on: caret_on,
                                 features: &self.config.features,
                                 ligatures: self.config.ligatures,
-                                cursor_shape: terms[i].cursor_style().shape,
+                                cursor_shape: term.cursor_style().shape,
                                 cursor_offset: if focused { cursor_offset_px } else { [0.0, 0.0] },
                                 // Each pane's own folds: they are stored per
                                 // session address and survive a focus change,
@@ -10816,7 +11213,7 @@ impl App {
                                 // drawing it after the focus moves on — and
                                 // its headers are placed through the same map.
                                 row_map: fold_maps.get(i).and_then(|m| m.as_deref()),
-                            }
+                            })
                         })
                         .collect();
                     self.scene.build(
@@ -10832,6 +11229,10 @@ impl App {
                 }
                 Some(None) => {
                     let identity = self.tabs.active().and_then(|t| t.identity.as_ref());
+                    // Unsplit, so the focused pane is pane 0 — the tab's own
+                    // shell, which is a session by construction. `else` here
+                    // is the empty strip, and drawing nothing is right for it.
+                    let Some(session) = self.tabs.active_source() else { return };
                     let term = session.terminal().lock();
                     // A grid held smaller than this pane by another attached
                     // client sits centered in it (#215).
@@ -10928,7 +11329,12 @@ impl App {
                 // until the shell happens to print again. `Occluded(false)`
                 // below is what asks for the redraw when the window returns.
                 tracing::debug!(?other, "skipping frame");
-                session.mark_dirty();
+                // Put the damage back on whichever pane holds the keyboard;
+                // a file pane has none to put back, and its chrome flag below
+                // is what brings it round again.
+                if let Some(session) = self.tabs.active_source() {
+                    session.mark_dirty();
+                }
                 self.chrome_dirty = true;
                 return;
             }
@@ -11165,7 +11571,11 @@ impl App {
             // its unknown-scheme warn) for the same answer.
             let seed = seed_palette(&self.palette, tab.identity.as_ref());
             for pane in &tab.panes {
-                self.seed_terminal(&mut pane.source().terminal().lock(), seed.clone());
+                // A file pane has no palette to seed; its ink comes from the
+                // window's tokens, not a session's ANSI row (ADR-012).
+                if let Some(session) = pane.session() {
+                    self.seed_terminal(&mut session.terminal().lock(), seed.clone());
+                }
             }
             self.seed_terminal(&mut tab.source().terminal().lock(), seed);
         }
@@ -11763,6 +12173,14 @@ impl ApplicationHandler<Wakeup> for App {
                     .unwrap_or_else(|_| "/".to_string());
                 self.open_dir_picker(cwd);
             }
+            Some(StartScreen::OpenFile) => self.open_file_prompt(),
+            Some(StartScreen::Editor) => {
+                // A real file from wherever the binary was run, read through
+                // the in-process session's own host — which under
+                // `--screenshot` is this machine, so the picture has content
+                // without a daemon in it.
+                self.open_file_pane("README.md");
+            }
             // Over the default screen, exactly as clicking the + would.
             Some(StartScreen::Launcher) => self.toggle_launcher(),
             Some(StartScreen::Profiles) => self.open_profiles_tab(),
@@ -11908,6 +12326,9 @@ impl ApplicationHandler<Wakeup> for App {
                     self.apply_dir_listing(listing);
                 }
             }
+            Wakeup::FileContentsReady => {
+                self.drain_file_replies();
+            }
             // The link died, not the shell. The window stays open showing the
             // last state that was true -- closing it would throw away a session
             // that is still running in a daemon that does not care we went
@@ -12008,7 +12429,9 @@ impl ApplicationHandler<Wakeup> for App {
                                         tab.panes.iter_mut().find(|p| p.addr == placeholder)
                                     {
                                         pane.resolve_live(session, local);
-                                        pane.source().mark_dirty();
+                                        if let Some(s) = pane.session() {
+                                            s.mark_dirty();
+                                        }
                                     }
                                     settled_pane = true;
                                 }
@@ -12558,6 +12981,49 @@ impl ApplicationHandler<Wakeup> for App {
                             if let Some(action) = action {
                                 let shift = self.modifiers.shift_key();
                                 self.run_picker_action(action, el, shift);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // The "Open file…" prompt owns the keyboard while it is up.
+                // `command_for` is consulted **first** — the rule every text
+                // entry in this app follows (#228/#251/#270): a field that
+                // handles its own keys is a field that eats ⌘V.
+                if self.open_file.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(field) = self.open_file.as_mut() {
+                            copied = field.apply(cmd, pasted.as_deref()).copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.mark_chrome_dirty();
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.open_file = None;
+                            self.mark_chrome_dirty();
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let path = self
+                                .open_file
+                                .as_ref()
+                                .map(|f| f.text().trim().to_string())
+                                .unwrap_or_default();
+                            // An empty path is not a refusal to report — it is
+                            // someone changing their mind, and closing is what
+                            // they meant.
+                            self.open_file = None;
+                            self.mark_chrome_dirty();
+                            if !path.is_empty() {
+                                self.open_file_pane(&path);
                             }
                         }
                         _ => {}
@@ -13709,6 +14175,34 @@ impl ApplicationHandler<Wakeup> for App {
                 let pane_focus = self.tabs.active().and_then(|t| t.is_split().then_some(t.focus));
                 match hit::wheel_target(hit, pane_focus) {
                     WheelTarget::Swallow => return,
+                    // A file scrolls by whole lines vertically and by pixels
+                    // sideways — the same asymmetry the pane's own model
+                    // keeps, because a line is the unit a reader thinks in and
+                    // a column is not.
+                    WheelTarget::Editor(i) => {
+                        let rows = self
+                            .tabs
+                            .active()
+                            .map_or(1, |t| self.editor_body_rows(t.pane_count()));
+                        let (cell_w, body_w) = self.editor_body_span(i);
+                        let (dx, dy) = match delta {
+                            MouseScrollDelta::LineDelta(x, y) => (x * cell_w * 3.0, y),
+                            MouseScrollDelta::PixelDelta(p) => {
+                                (p.x as f32, p.y as f32 / cell_w.max(1.0))
+                            }
+                        };
+                        if let Some(e) =
+                            self.tabs.active_mut().and_then(|t| t.pane_editor_mut(i))
+                        {
+                            e.scroll_by(dy, rows);
+                            e.scroll_x_by(dx, cell_w, body_w);
+                        }
+                        self.mark_chrome_dirty();
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     // An open dropdown scrolls its *own* list, not the rows
                     // underneath: moving those would slide the anchor out
                     // from under it, and a 266-family roster has to be

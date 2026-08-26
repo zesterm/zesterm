@@ -57,6 +57,12 @@ pub enum Action {
     /// Split the active tab right (⌘D): one more pane, on the window's own
     /// host. No cap — two panes was the design's picture, not a rule (#436).
     SplitRight,
+    /// Open a file in a pane (#464). Prompts for a path, which resolves
+    /// against the focused session's cwd on *its* host.
+    ///
+    /// Bound to `g`, not the `o` a person would guess — see the binding for
+    /// why `o` was already spent.
+    OpenFile,
     /// Split right onto a machine of your choosing (⌘H): opens the fleet
     /// picker carrying the split, so a host row creates the pane there and
     /// a session row attaches that session as the pane.
@@ -162,6 +168,8 @@ pub enum When {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Tabs,
+    /// Opening and reading files (#464).
+    Files,
     Fleet,
     Clipboard,
     Blocks,
@@ -321,6 +329,12 @@ pub static BINDINGS: &[Binding] = &[
     // the physical chord.
     b(Mods::Desktop, ChordKey::Char("E"), Action::ToggleTabLayout, "⇧E", "Toggle vertical tabs", Category::Tabs),
     b(Mods::Desktop, ChordKey::Char("d"), Action::SplitRight, "D", "Split right", Category::Tabs),
+    // Not ⌘O, which is what a person would guess: a Desktop letter folds onto
+    // its own shifted twin's Ctrl+Shift form on Windows (the ⌘B note above), so
+    // `o` is already spent by ⌘⇧O — CopyBlockOutput — and a letter carries
+    // exactly one binding across both forms. `g` for "go to file", which is
+    // free in both, and the palette is the discoverable path regardless.
+    b(Mods::Desktop, ChordKey::Char("g"), Action::OpenFile, "G", "Open file…", Category::Files),
     // H for host. Not ⌘⇧D: a shifted letter collapses onto its unshifted
     // twin's Ctrl+Shift form on Windows (see ⌘B above), so the "on a host"
     // spelling needs a letter of its own.
@@ -528,6 +542,7 @@ pub static MOUSE_SHORTCUTS: &[MouseShortcut] = &[
 
 const CATEGORY_ORDER: &[(Category, &str)] = &[
     (Category::Tabs, "Tabs"),
+    (Category::Files, "Files"),
     (Category::Fleet, "Fleet"),
     (Category::Clipboard, "Copy & paste"),
     (Category::Blocks, "Command blocks"),

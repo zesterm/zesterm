@@ -627,6 +627,71 @@ replaces wholesale so a profile can *clear* an inherited variable), `src/ui.rs`
 
 ---
 
+### 13. Editor — a file in a pane
+
+A pane holds a session *or* a file (#464). Only a **split** pane may hold a
+file: pane 0 of a tab is always a shell, so a tab is still named by one, and
+closing the last shell closes the tab and its files with it.
+
+**Why a pane rather than a screen.** A tab already holds any number of panes on
+any number of hosts (#438), each with its own frame, header, focus and wheel
+target, so a file in one costs no new layout concept. A full-pane screen is a
+single enum-valued field — it cannot express two files at once — and it would
+hide the terminal whose output made you open the file.
+
+**Geometry** (physical px at scale `s`; the layout module copies these):
+
+| Constant | Value | Note |
+|---|---|---|
+| `GUTTER_PAD` | `8 * s` | either side of the line numbers |
+| `TEXT_PAD` | `10 * s` | gutter rule to the first glyph |
+| gutter width | `digits(total).max(2) * cell_w + 2 * GUTTER_PAD` | sized for the **file**, never for what is on screen |
+| body | `pane_body(frame, s, padding)` | the pane's, unchanged |
+| row height | `cell_h` | the grid's, so a file and a terminal beside it share one rhythm |
+| text size | `font_px` | the grid's — a file is text, not a UI label about text |
+
+**The gutter is sized for the whole file.** A gutter that widened as you
+scrolled past line 99 would shift every line sideways while you read it.
+Numbers are right-aligned in `text.faint`, with a `line` hairline between the
+gutter and the text, full body height — the rule is what makes the numbers read
+as a margin rather than as the file's first column.
+
+**No wrapping.** Wrapping breaks the identity between a line number and a
+screen row, which the gutter, "open this at line N" and every future caret
+movement rest on — the terminal's own fold view already shows what maintaining
+a second coordinate space costs (`row_map`). The terminal in the pane beside it
+does not wrap either. Long lines scroll sideways; the numbers do not move with
+them.
+
+**States.** One centred line in `text.faint`, drawn *instead of* the content,
+never beside it: `opening…` while the read is in flight, the host's own words
+for a refusal (shown verbatim — the message is the person's next move),
+`N of binary, not shown`, and `empty file`. A file read past the host's cap
+opens read-only and says so; the wire hands back no base hash for a truncated
+read, so it could never have been saved anyway.
+
+**The header** names the file and its directory where a session pane names a
+host and a cwd. `local` over a pane showing `main.rs` says nothing.
+
+**Reaching it.** `⌘G` / `Ctrl+Shift+G` — *not* `⌘O`, which is what a person
+would guess: a Desktop letter folds onto its own shifted twin's `Ctrl+Shift`
+form, so `o` is already spent by `⌘⇧O` (copy block output), and a letter
+carries exactly one binding across both forms. The palette is the discoverable
+path either way, since its rows are generated from the keymap table. The prompt
+names the directory *and the machine* a relative path will resolve against:
+a path in a fleet terminal is ambiguous in two directions at once, and neither
+is recoverable from what was typed.
+
+**Not persisted**, deliberately: a buffer is unsaved work, and restoring one
+whose base hash is stale would be worse than not restoring it.
+
+**Repo files this screen must stay consistent with:**
+`crates/zest-app/src/editor.rs` (the pane's model),
+`crates/zest-app/src/chrome/editor.rs` (this geometry), and
+`crates/zest-daemon/src/files.rs` (the cap, the binary sniff, the hash).
+
+---
+
 ## Interactions & behaviour
 
 | Trigger | Result |

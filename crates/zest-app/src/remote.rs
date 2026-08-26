@@ -181,6 +181,8 @@ pub struct RemoteSession {
     /// The parked answer to `ListDir` (#439), last write wins; the reader
     /// fills it and posts `Wakeup::DirListingReady`.
     dir_listing: Arc<parking_lot::Mutex<Option<crate::session::DirListing>>>,
+    /// The parked answer to `ReadFile` (#464), on `dir_listing`'s pattern.
+    file_contents: Arc<parking_lot::Mutex<Option<crate::editor::FileReply>>>,
     /// Shared with the supervisor, which reattaches at whatever size the
     /// window has reached by the time the link comes back -- not the size it
     /// was born with.
@@ -346,6 +348,8 @@ impl RemoteSession {
         let needs_redraw = Arc::new(AtomicBool::new(true));
         let dir_listing: Arc<parking_lot::Mutex<Option<crate::session::DirListing>>> =
             Arc::default();
+        let file_contents: Arc<parking_lot::Mutex<Option<crate::editor::FileReply>>> =
+            Arc::default();
 
         let mut applier = Applier::new();
         {
@@ -431,6 +435,7 @@ impl RemoteSession {
             let predictor = Arc::clone(&predictor);
             let simulated_latency = simulated_latency();
             let dir_listing = Arc::clone(&dir_listing);
+            let file_contents = Arc::clone(&file_contents);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -641,6 +646,18 @@ impl RemoteSession {
                                     });
                                     wake(Wakeup::DirListingReady);
                                 }
+                                // The editor pane asked (#464). Unpacked here
+                                // rather than parked as a `HostMessage`, so
+                                // the app has one shape whether the bytes came
+                                // over a socket or off this machine's own disk.
+                                msg @ HostMessage::FileContents { .. } => {
+                                    if let Some(reply) =
+                                        crate::editor::FileReply::from_host(msg)
+                                    {
+                                        *file_contents.lock() = Some(reply);
+                                        wake(Wakeup::FileContentsReady);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -783,6 +800,7 @@ impl RemoteSession {
             tx,
             addr: addr_cell,
             dir_listing,
+            file_contents,
             size: size_cell,
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
@@ -944,6 +962,23 @@ impl SessionSource for RemoteSession {
 
     fn take_dir_listing(&self) -> Option<crate::session::DirListing> {
         self.dir_listing.lock().take()
+    }
+
+    fn take_file_contents(&self) -> Option<crate::editor::FileReply> {
+        self.file_contents.lock().take()
+    }
+
+    fn request_file(&self, path: &str, cwd: &str) -> bool {
+        // Fire-and-forget like `request_dirs`: the answer arrives on the
+        // reader, and a send that failed means the writer is gone — the
+        // supervisor is already reconnecting, and the pane's "opening…" is
+        // the honest interim either way.
+        self.tx
+            .send(Outbound::Msg(ClientMessage::ReadFile {
+                path: path.to_string(),
+                cwd: cwd.to_string(),
+            }))
+            .is_ok()
     }
 
     fn request_dirs(&self, path: &str) -> bool {

@@ -14,6 +14,7 @@ mod block_menu;
 mod chrome;
 mod cloud;
 mod console;
+mod editor;
 mod fair_mutex;
 mod fleet;
 mod keymap;
@@ -159,9 +160,11 @@ fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
         Some("profiles") => Ok(app::StartScreen::Profiles),
         Some("settings-menu") => Ok(app::StartScreen::SettingsMenu),
         Some("profiles-rename") => Ok(app::StartScreen::ProfilesRename),
+        Some("open-file") => Ok(app::StartScreen::OpenFile),
+        Some("editor") => Ok(app::StartScreen::Editor),
         _ => Err(
             "--screen needs one of fleet|themes|settings|settings-menu|palette|dir-picker|\
-             launcher|profiles|profiles-rename"
+             launcher|profiles|profiles-rename|open-file|editor"
                 .into(),
         ),
     }
@@ -545,15 +548,17 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
                      --screen <name>   open on fleet|themes|settings|settings-menu|\n\
-                     \x20                 palette|dir-picker|launcher|profiles|profiles-rename\n\
-                     \x20                 instead of the terminal\n\
+                     \x20                 palette|dir-picker|launcher|profiles|profiles-rename|\n\
+                     \x20                 open-file|editor instead of the terminal\n\
                      \x20                 ('palette' is the ⌘K search, not the keymap's\n\
                      \x20                 command palette; 'launcher' is the + menu over the\n\
                      \x20                 default screen; 'settings-menu' is Settings with\n\
                      \x20                 the theme dropdown open, and 'profiles-rename' is\n\
                      \x20                 Profiles with the name entry open — both states a\n\
                      \x20                 screenshot cannot otherwise reach, since opening\n\
-                     \x20                 them takes a click).\n\
+                     \x20                 them takes a click). 'open-file' is the ⌘G path\n\
+                     \x20                 prompt, and 'editor' opens this directory's\n\
+                     \x20                 README.md in a pane beside the shell.\n\
                      \x20                 Composes with\n\
                      \x20                 --screenshot; screen content is live state, and\n\
                      \x20                 --screenshot already implies --no-daemon, which\n\

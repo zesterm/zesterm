@@ -129,6 +129,16 @@ pub enum HitRegion {
     /// *unfocused* pane's frame and every header — clicks inside the
     /// focused pane's body stay the grid's.
     Pane(usize),
+    /// The body of a pane holding a file, by pane index (#464).
+    ///
+    /// Its own region rather than more `Pane`: a file pane's body *is* chrome
+    /// — there is no grid under it to fall through to — so it has to answer
+    /// the wheel itself whether or not it holds the keyboard, which is the one
+    /// thing `Pane`'s two-sided meaning cannot express.
+    EditorBody(usize),
+    /// The "Open file…" prompt's panel, and the scrim behind it (#464).
+    OpenFilePanel,
+    OpenFileScrim,
     /// One theme card of the gallery; clicking applies that theme.
     ThemeCard(usize),
     /// The gallery's dashed import card; clicking imports the scheme the
@@ -276,6 +286,8 @@ pub enum WheelTarget {
     Settings,
     /// The open dropdown menu's own option list.
     Menu,
+    /// One pane's open file, by pane index (#464).
+    Editor(usize),
     /// Eaten: a surface that neither scrolls itself nor may let anything
     /// beneath it scroll.
     Swallow,
@@ -321,6 +333,15 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelT
                 WheelTarget::Swallow
             }
         }
+
+        // Unlike `Pane`, this does not depend on the focus: a file scrolls
+        // under the pointer whether or not the keyboard is in it, the way a
+        // list does. There is no grid beneath it to defer to.
+        R::EditorBody(i) => WheelTarget::Editor(i),
+
+        // A one-field prompt has nothing to scroll, and nothing beneath it may
+        // scroll either while it is up.
+        R::OpenFilePanel | R::OpenFileScrim => WheelTarget::Swallow,
 
         R::Strip
         | R::Tab(_)
