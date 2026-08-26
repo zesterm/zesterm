@@ -177,6 +177,20 @@ impl EditorPane {
         }
     }
 
+    /// Whether an answer that arrived on the session at `from` belongs to
+    /// this pane.
+    ///
+    /// The wire has no request id and the echoed path comes back
+    /// canonicalized, so a relative ask cannot be matched against it (#446).
+    /// What *is* unambiguous is which session produced the answer: a pane only
+    /// takes one from the session it asked, and only while it is still
+    /// waiting. Without the first half, a tab split across two machines could
+    /// hand the build box's answer to a pane waiting on the laptop.
+    #[must_use]
+    pub fn wants_reply_from(&self, from: SessionAddr) -> bool {
+        self.origin == from && self.state == LoadState::Loading
+    }
+
     /// Scroll by whole lines, clamped so the last line stays on screen.
     ///
     /// `visible` is how many lines the body can show. Clamping to
@@ -350,6 +364,35 @@ mod tests {
         p.apply(FileReply { binary: true, ..reply("\u{0}\u{1}\u{2}") });
         assert!(p.binary);
         assert_eq!(p.line_count(), 0, "the bytes arrived, but they are not lines");
+    }
+
+    #[test]
+    fn an_answer_goes_only_to_a_pane_that_asked_that_machine() {
+        let laptop = crate::tabs::placeholder_addr(10);
+        let build_box = crate::tabs::placeholder_addr(11);
+
+        let waiting = EditorPane::loading(
+            crate::tabs::placeholder_addr(1),
+            laptop,
+            "src/main.rs",
+            "/repo",
+        );
+        assert!(waiting.wants_reply_from(laptop));
+        assert!(
+            !waiting.wants_reply_from(build_box),
+            "an answer from another machine is not this pane's — the two files              would look alike and simply be the wrong one"
+        );
+
+        // And once it has an answer it stops taking them, so a later reply for
+        // a different pane cannot overwrite a file already on screen.
+        let mut done = EditorPane::loading(
+            crate::tabs::placeholder_addr(2),
+            laptop,
+            "src/main.rs",
+            "/repo",
+        );
+        done.apply(reply("x\n"));
+        assert!(!done.wants_reply_from(laptop));
     }
 
     #[test]

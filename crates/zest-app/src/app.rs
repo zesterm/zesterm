@@ -3256,17 +3256,23 @@ impl App {
 
         // A remote answer is parked on the *source* that asked, and the wire
         // has no request id — the correlation is the echoed path, which comes
-        // back canonicalized and so does not match a relative ask. So a source
-        // hands its answer to the pane on it that is still waiting. A source
-        // holds one answer at a time (last write wins), which is also the
-        // limit: two files opened on one host in the same instant means the
-        // second reply overwrites the first, and the first pane keeps saying
-        // it is opening. Rare enough to name rather than build a queue for.
-        let mut remote: Vec<crate::editor::FileReply> = Vec::new();
+        // back canonicalized and so does not match a relative ask. So each
+        // answer is carried with the address of the session that produced it,
+        // and goes only to a pane that asked *that* session. Without the
+        // address a tab split across two machines could hand the build box's
+        // answer to a pane waiting on the laptop — the two would look alike
+        // and the file would simply be the wrong one.
+        //
+        // What remains, and is inherent to one cell per source: two files
+        // opened on the *same* host in the same instant means the second
+        // reply overwrites the first in that cell, and the first pane keeps
+        // saying it is opening. Rare enough to name rather than build a queue
+        // for.
+        let mut remote: Vec<(zest_proto::SessionAddr, crate::editor::FileReply)> = Vec::new();
         if let Some(tab) = self.tabs.active() {
             for i in 0..tab.pane_count() {
                 if let Some(reply) = tab.pane_session(i).and_then(|s| s.take_file_contents()) {
-                    remote.push(reply);
+                    remote.push((tab.pane_addr(i), reply));
                 }
             }
         }
@@ -3280,10 +3286,9 @@ impl App {
                     editor.apply(reply.clone());
                 }
             }
-            for reply in remote {
-                if let Some((_, editor)) = tab
-                    .editors_mut()
-                    .find(|(_, e)| e.state == crate::editor::LoadState::Loading)
+            for (from, reply) in remote {
+                if let Some((_, editor)) =
+                    tab.editors_mut().find(|(_, e)| e.wants_reply_from(from))
                 {
                     editor.apply(reply);
                 }

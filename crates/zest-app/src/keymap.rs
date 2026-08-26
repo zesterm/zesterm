@@ -57,8 +57,11 @@ pub enum Action {
     /// Split the active tab right (⌘D): one more pane, on the window's own
     /// host. No cap — two panes was the design's picture, not a rule (#436).
     SplitRight,
-    /// Open a file in a pane (⌘O, #464). Prompts for a path, which resolves
+    /// Open a file in a pane (#464). Prompts for a path, which resolves
     /// against the focused session's cwd on *its* host.
+    ///
+    /// Bound to `g`, not the `o` a person would guess — see the binding for
+    /// why `o` was already spent.
     OpenFile,
     /// Split right onto a machine of your choosing (⌘H): opens the fleet
     /// picker carrying the split, so a host row creates the pane there and
