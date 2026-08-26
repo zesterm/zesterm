@@ -880,6 +880,25 @@ you need before you trip on it.
   crate is `error: constant is never used`. And prefer `cfg`-scoping the item
   to `#[allow(dead_code)]` when the *concept* is platform-specific, which
   Wayland's app_id and X11's WM_CLASS are. (#472)
+- **`arboard` without `wayland-data-control` is X11-only, and on a Wayland
+  desktop that failure is invisible.** It works because XWayland is running and
+  the compositor bridges the two selections — so the machine you are testing on
+  is exactly the one that cannot show the bug. Without XWayland
+  `Clipboard::new()` fails, one `warn!` goes by at startup, and every copy and
+  paste is a silent no-op (only the theme-import card surfaces it). Check
+  `Cargo.lock` for `wl-clipboard-rs`, not the code.
+- **PRIMARY is not CLIPBOARD, and conflating them makes middle-click lie.**
+  Middle-click called the ordinary paste, so it pasted whatever was last
+  explicitly copied while its comment promised "the selection, as X11 users
+  expect". The argument against copy-on-select — *it silently replaces the
+  clipboard* — is correct for CLIPBOARD and is precisely **why PRIMARY
+  exists**: PRIMARY *is* the selection, so writing it on mouse-up surprises
+  nobody and clobbers nothing. Two further facts worth knowing before
+  debugging it: PRIMARY needs `zwlr_data_control_manager_v1` **version 2** and
+  many compositors do not offer it, so it must degrade rather than warn on
+  every drag; and a Wayland selection is owned by the **live process**, so a
+  short-lived probe's PRIMARY vanishes on exit and reads as broken when it is
+  not. `cargo run -p zest-app --example clipboard_probe` answers both. (#477)
 
 ### Rendering and fonts
 

@@ -52,9 +52,22 @@ pollster = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[[example]]
+name = "clipboard_probe"
+path = "examples/clipboard_probe.rs"
+
 [target.'cfg(unix)'.dependencies]
 # `setsid` for the spawned daemon, so it outlives the window that started it.
 rustix = { workspace = true, features = ["process"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Without `wayland-data-control` arboard is X11-only, and a Wayland session
+# only has a clipboard at all because XWayland is running and the compositor
+# bridges the two selections. On a session without it `Clipboard::new()` fails,
+# one `warn!` goes by, and copy/paste is silently dead everywhere -- which is
+# not a state a terminal can ship in. Named here rather than in the workspace
+# dependency so Windows and macOS builds do not carry `wl-clipboard-rs`.
+arboard = { workspace = true, features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Reaching NSWindow for the traffic-light inset. The cluster's extent is not a

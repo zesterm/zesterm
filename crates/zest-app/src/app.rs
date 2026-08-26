@@ -2874,6 +2874,48 @@ impl App {
         }
     }
 
+    /// Write the selection to the X11/Wayland PRIMARY selection.
+    ///
+    /// PRIMARY *is* the selection, by definition, which is why writing it on
+    /// mouse-up does not contradict the deliberate absence of copy-on-select
+    /// just below: that argument is about CLIPBOARD, where replacing what
+    /// somebody explicitly copied is the surprise. Nothing here touches
+    /// CLIPBOARD.
+    ///
+    /// Failure is a `debug!`, not a `warn!`: PRIMARY needs
+    /// `zwlr_data_control_manager_v1` version 2 on Wayland and plenty of
+    /// compositors do not offer it, so this is expected to fail on real
+    /// machines and must not fill the log on every drag.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn set_primary(&mut self, text: String) {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        if let Err(e) = clipboard.set().clipboard(LinuxClipboardKind::Primary).text(text) {
+            tracing::debug!(error = %e, "no PRIMARY selection on this session");
+        }
+    }
+
+    /// PRIMARY's text, for a middle-click paste, falling back to CLIPBOARD.
+    ///
+    /// The fallback is what keeps the gesture useful where PRIMARY is
+    /// unavailable, and it is also what the old code did by accident -- the
+    /// difference is that the selection now wins when there is one.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn primary_text(&mut self) -> Option<String> {
+        use arboard::{GetExtLinux, LinuxClipboardKind};
+        let clipboard = self.clipboard.as_mut()?;
+        match clipboard.get().clipboard(LinuxClipboardKind::Primary).text() {
+            Ok(t) if !t.is_empty() => Some(t),
+            _ => clipboard.get_text().ok().filter(|t| !t.is_empty()),
+        }
+    }
+
+    /// Windows and macOS have no PRIMARY; middle-click reads the clipboard.
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    fn primary_text(&mut self) -> Option<String> {
+        self.clipboard.as_mut()?.get_text().ok().filter(|t| !t.is_empty())
+    }
+
     fn set_clipboard(&mut self, text: String) {
         let Some(clipboard) = self.clipboard.as_mut() else { return };
         if let Err(e) = clipboard.set_text(text) {
@@ -3237,6 +3279,20 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Middle-click's paste: PRIMARY first, CLIPBOARD second.
+    ///
+    /// Split from [`Self::paste`] rather than parameterised, because the two
+    /// gestures answer different questions -- ⌘V means "what did I copy", a
+    /// middle click means "what is selected" -- and a flag would make the call
+    /// sites read as the same intent.
+    fn paste_primary(&mut self) {
+        let Some(text) = self.primary_text() else { return };
+        let Some(session) = self.tabs.active_source() else { return };
+        let bytes = session.terminal().lock().encode_paste(&text);
+        session.write(bytes);
+        session.terminal().lock().scroll_to_bottom();
     }
 
     fn paste(&mut self) {
@@ -13539,9 +13595,28 @@ impl ApplicationHandler<Wakeup> for App {
                         // Copy-on-select is deliberately NOT the default: it
                         // silently replaces the clipboard, which surprises people
                         // who selected only to read.
+                        //
+                        // PRIMARY is the exception, and the same argument is why:
+                        // it *is* the selection, so writing it surprises nobody
+                        // and clobbers nothing anyone copied. Middle-click reads
+                        // it back, which is what makes the gesture below true.
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        {
+                            let text = self
+                                .tabs
+                                .active_source()
+                                .and_then(|s| s.terminal().lock().selection_text());
+                            if let Some(text) = text.filter(|t| !t.is_empty()) {
+                                self.set_primary(text);
+                            }
+                        }
                     }
-                    // Middle-click pastes the selection, as X11 users expect.
-                    (MouseButton::Middle, ElementState::Pressed) => self.paste(),
+                    // Middle-click pastes the selection, as X11 users expect --
+                    // which for a long time it did not: it read CLIPBOARD, so it
+                    // pasted whatever was last explicitly copied. PRIMARY is the
+                    // selection; CLIPBOARD is the fallback where the session has
+                    // no PRIMARY to offer.
+                    (MouseButton::Middle, ElementState::Pressed) => self.paste_primary(),
                     (MouseButton::Right, ElementState::Pressed) => {
                         // Right-click copies when there is a selection and pastes
                         // otherwise -- the PowerShell/conhost convention Windows

@@ -167,6 +167,16 @@ the history behind them is in closed issues and PRs.
       X11/KWin has `_KDE_NET_WM_BLUR_BEHIND_REGION`, picom needs user rules,
       Wayland has no protocol. Degrade honestly rather than pretending in the
       settings UI.
+- [x] **Linux: the clipboard, and the selection middle-click promised** (#477).
+      `arboard` was taken with default features, so the Wayland backend was
+      never compiled and a session without XWayland had no clipboard at all —
+      one `warn!` and every copy/paste a silent no-op. And middle-click read
+      CLIPBOARD while its comment promised the selection: PRIMARY existed
+      nowhere. Selecting now publishes PRIMARY and middle-click reads it,
+      CLIPBOARD first untouched — which is the same argument that keeps
+      copy-on-select off, read the right way round. `clipboard_probe` answers
+      what a given session supports, since PRIMARY needs wlr data-control v2
+      and many compositors do not offer it.
 - [ ] Linux packaging.
 
 ### Shell integration & blocks
