@@ -110,6 +110,8 @@ pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::Window
 #[cfg(any(windows, target_os = "macos"))]
 pub fn identify(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
     attrs
+}
+
 /// Which display server this process actually connected to.
 ///
 /// Read from the display handle, never from `XDG_SESSION_TYPE` or

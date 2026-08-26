@@ -635,7 +635,7 @@
       },
       {
         "value": "acrylic",
-        "description": "Acrylic blur. Undocumented on Windows; no effect on Linux, where no\nWayland protocol offers a blur material."
+        "description": "Acrylic blur. Undocumented on Windows; best-effort on Linux."
       },
       {
         "value": "vibrancy",
@@ -732,7 +732,7 @@
     "variants": [
       {
         "value": "auto",
-        "description": "The platform's own answer: borderless on Windows, where the OS caption\notherwise sits above our tab strip and the window wears two titlebars;\na transparent full-size titlebar on macOS, which keeps the traffic\nlights, native fullscreen and Sequoia tiling; server-side decorations\non Linux, where the compositor is the only thing that knows what it\ndraws and winit has already asked it."
+        "description": "The platform's own answer: borderless on Windows, where the OS caption\notherwise sits above our tab strip and the window wears two titlebars;\na transparent full-size titlebar on macOS, which keeps the traffic\nlights, native fullscreen and Sequoia tiling (WS-C2); system chrome on\nLinux until WS-D says otherwise."
       }
     ],
     "default": "auto",
