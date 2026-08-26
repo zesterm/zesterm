@@ -838,6 +838,48 @@ you need before you trip on it.
   tells a missing driver from a missing cargo feature, and
   `every_advertised_backend_is_compiled_in` holds the list against the
   manifests on whichever platform it compiles for. (#468)
+- **A platform intent spelled as a `bool` is decided once per consumer, and the
+  consumers disagree.** `custom_chrome` was read in three places to switch on
+  our caption buttons and resize bands, but *applied* to the window in one —
+  inside `#[cfg(windows)]`. So `custom_chrome = "on"` on Linux drew our caption
+  while the compositor kept its frame (the two titlebars `ROADMAP` warned about
+  for KDE), and on **macOS** drew our cluster beside the traffic lights. One
+  bug, two platforms, neither visible from the platform it was written on. The
+  fix is a type whose two accessors read the same variant, so the bad pair
+  cannot be spelled, resolved against a `Host` **parameter** rather than
+  `cfg!` — a matrix that only ever sees its own platform cannot show the other
+  two are safe, and that is exactly how this survived. (#472)
+- **Do not speak `zxdg_toplevel_decoration_v1` yourself.** winit owns the
+  `xdg_toplevel` and already negotiates decorations; a second
+  `get_toplevel_decoration` on a toplevel that has one is the fatal
+  `already_constructed` protocol error, which would kill the app on every
+  compositor that *supports* the protocol — the better the compositor, the
+  worse the failure. `with_decorations` is the whole API you need.
+  Correspondingly there is **no getter** for the negotiated mode
+  (`is_decorated()` returns the flag we asked for, not the compositor's reply),
+  which is why `Auto` defers rather than guessing. (#472)
+- **Nothing set the Wayland `app_id` or X11 `WM_CLASS`**, and winit sets one
+  only if `with_name` is called. That costs more than a name: on Wayland the
+  taskbar icon is found by matching `app_id` against an installed `.desktop`
+  file, so without it there is no icon and `with_window_icon` cannot help
+  (winit ignores it there). Verify with the compositor, not by reading code —
+  `hyprctl clients -j` reports the app_id as `class`. Use **one lowercase
+  spelling** everywhere: Hyprland matches `class:` against the app_id for a
+  Wayland window and against WM_CLASS's *class* for an XWayland one, so X11's
+  capitalized convention gives you a rule that works in one session and
+  silently does nothing in the other. (#472)
+
+- **A helper that exists for one platform makes its constants dead code on the
+  other two, and CI treats that as an error.** `APP_ID` is read only by the
+  unix `identify`, so Windows and macOS saw an unused `pub const` — and
+  `dead_code` is denied by the workspace's `-D warnings`, so
+  `cargo build --workspace` *failed to compile* on both while Linux was green.
+  `pub` does not save you: in a **binary** crate nothing outside can reach it,
+  so the lint fires anyway. Reproduce the rule in five lines rather than
+  guessing at a red CI — an unused `pub const` in a private module of a bin
+  crate is `error: constant is never used`. And prefer `cfg`-scoping the item
+  to `#[allow(dead_code)]` when the *concept* is platform-specific, which
+  Wayland's app_id and X11's WM_CLASS are. (#472)
 
 ### Rendering and fonts
 

@@ -358,8 +358,9 @@ pub enum CustomChrome {
     /// The platform's own answer: borderless on Windows, where the OS caption
     /// otherwise sits above our tab strip and the window wears two titlebars;
     /// a transparent full-size titlebar on macOS, which keeps the traffic
-    /// lights, native fullscreen and Sequoia tiling (WS-C2); system chrome on
-    /// Linux until WS-D says otherwise.
+    /// lights, native fullscreen and Sequoia tiling; server-side decorations
+    /// on Linux, where the compositor is the only thing that knows what it
+    /// draws and winit has already asked it.
     Auto,
     On,
     Off,
