@@ -94,9 +94,33 @@ esac
 bin=$REPO/target/$dir/zesterm
 
 if [ "$build" -eq 1 ]; then
+    # Find cargo rather than assuming PATH has it.
+    #
+    # rustup installs to `~/.cargo/bin` and offers to add it to the shell
+    # profile; declining -- or installing with `--no-modify-path` -- leaves a
+    # working toolchain that a fresh login shell cannot see. The failure is
+    # `cargo: command not found` from inside this script, which reads as the
+    # script being broken rather than the PATH being short.
+    #
+    # It is not only about profiles, either: a `.desktop` launcher, a systemd
+    # unit and a cron job all start with a minimal PATH no matter what the
+    # shell does, and "from anywhere" is meant to include those.
+    cargo_bin=${CARGO:-}
+    if [ -z "$cargo_bin" ]; then
+        if command -v cargo >/dev/null 2>&1; then
+            cargo_bin=cargo
+        elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then
+            cargo_bin=${CARGO_HOME:-$HOME/.cargo}/bin/cargo
+        else
+            echo "zesterm-dev: no cargo on PATH, and none at ${CARGO_HOME:-$HOME/.cargo}/bin" >&2
+            echo "zesterm-dev: install rustup, add ~/.cargo/bin to PATH, or set CARGO=/path/to/cargo" >&2
+            exit 1
+        fi
+    fi
+
     # The workspace, and quietly: the point is a window, not a build log. A
     # failure still prints, because cargo writes errors to stderr.
-    if ! ( cd "$REPO" && cargo build -q --profile "$profile" --workspace ); then
+    if ! ( cd "$REPO" && "$cargo_bin" build -q --profile "$profile" --workspace ); then
         echo "zesterm-dev: build failed; not opening a stale binary" >&2
         exit 1
     fi
