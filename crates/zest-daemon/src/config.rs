@@ -166,6 +166,40 @@ fn is_group(path: &str) -> bool {
             .any(|k| k.strip_prefix(path).is_some_and(|r| r.starts_with('.')))
 }
 
+/// Whether `key` names something that can be set at all, and whether it is a
+/// profile-only key rather than a schema one.
+///
+/// Split out of [`check`] so **`reset` uses it too**. Without that the two
+/// halves of the same tool disagree: `set typography.sizept` is refused with a
+/// did-you-mean, while `reset typography.sizept` reports success and does
+/// nothing — because `zest_config::remove_value` treats a missing key as
+/// already-absent, which is the right behaviour for a *known* key and hides a
+/// typo for an unknown one. A reset that silently does nothing is
+/// indistinguishable from one that worked, and the caller moves on believing
+/// the setting is back to its default.
+///
+/// Idempotence is kept where it belongs: a **known** key that was never set
+/// still resets successfully. Only a key that does not exist is refused.
+fn known_key(key: &str, profile: bool) -> Result<bool, String> {
+    let schema_keys = zest_config::schema::keys();
+    let profile_only = profile && zest_config::profiles::PROFILE_ONLY_KEYS.contains(&key);
+
+    // `PROFILE_ONLY_KEYS` *widens* what a profile may set; it does not narrow
+    // it. Deliberately not `PROFILE_SETTINGS_KEYS`, whose own doc says it
+    // scopes the editor rather than the cascade -- a profile may legitimately
+    // set any settings key, and checking against that list instead would
+    // refuse the feature's headline use (a profile that recolours its window).
+    if !profile_only && !schema_keys.iter().any(|k| k == key) {
+        let near = nearest(key, &schema_keys, profile);
+        return Err(if near.is_empty() {
+            format!("no setting named `{key}`")
+        } else {
+            format!("no setting named `{key}`; did you mean {near}?")
+        });
+    }
+    Ok(profile_only)
+}
+
 /// Validate one edit before it reaches the file.
 ///
 /// Refuses in three ways, each of which a raw file write would have let
@@ -186,22 +220,7 @@ pub fn check(
     value: &str,
     profile: bool,
 ) -> Result<toml_edit::Value, String> {
-    let schema_keys = zest_config::schema::keys();
-    let profile_only = profile && zest_config::profiles::PROFILE_ONLY_KEYS.contains(&key);
-
-    // `PROFILE_ONLY_KEYS` *widens* what a profile may set; it does not narrow
-    // it. Deliberately not `PROFILE_SETTINGS_KEYS`, whose own doc says it
-    // scopes the editor rather than the cascade -- a profile may legitimately
-    // set any settings key, and checking against that list instead would
-    // refuse the feature's headline use (a profile that recolours its window).
-    if !profile_only && !schema_keys.iter().any(|k| k == key) {
-        let near = nearest(key, &schema_keys, profile);
-        return Err(if near.is_empty() {
-            format!("no setting named `{key}`")
-        } else {
-            format!("no setting named `{key}`; did you mean {near}?")
-        });
-    }
+    let profile_only = known_key(key, profile)?;
 
     let parsed: toml_edit::Value = value
         .trim()
@@ -588,12 +607,20 @@ pub fn set(
                 }
             }
         }
-        ConfigOp::Reset => if profile.is_empty() {
-            zest_config::remove_value(&seam.path, key)
-        } else {
-            zest_config::remove_profile_value(&seam.path, profile, key)
+        ConfigOp::Reset => {
+            // Refused for an unknown key, successful for a known one that was
+            // never set. See `known_key`: the removal itself cannot tell those
+            // two apart, so this is the only place the difference exists.
+            if let Err(e) = known_key(key, !profile.is_empty()) {
+                return refuse(e);
+            }
+            if profile.is_empty() {
+                zest_config::remove_value(&seam.path, key)
+            } else {
+                zest_config::remove_profile_value(&seam.path, profile, key)
+            }
+            .map_err(|e| e.to_string())
         }
-        .map_err(|e| e.to_string()),
         ConfigOp::CreateProfile => match reserved(profile) {
             Some(e) => return refuse(e),
             None => zest_config::create_profile(&seam.path, profile).map_err(|e| e.to_string()),

@@ -434,7 +434,7 @@ fn main() {
         // ordering is how portable mode breaks silently.
         //
         // Writes are on. The authority to make them is the pairing, not a
-        // switch here (ADR-018): `WriteFile` already reaches this exact file
+        // switch here (ADR-019): `WriteFile` already reaches this exact file
         // with no path restriction of any kind, and `CreateSession` already
         // runs arbitrary commands — so refusing here would not withhold the
         // capability, only the validation, and push a client back to editing

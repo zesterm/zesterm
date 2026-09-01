@@ -5123,6 +5123,33 @@ mod tests {
     }
 
     #[test]
+    fn resetting_a_key_that_does_not_exist_is_refused_rather_than_quietly_doing_nothing() {
+        // The asymmetry this guards: `remove_value` treats a missing key as
+        // already-absent, which is right for a *known* key and hides a typo
+        // for an unknown one. Without the check, `set typography.sizept` is
+        // refused with a did-you-mean while `reset typography.sizept` reports
+        // success -- so the same typo behaves differently depending on which
+        // half of the tool you reached for, and the reset half tells you it
+        // worked.
+        let s = ConfigScratch::new("resettypo", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Reset,
+                key: "typography.sizept".into(),
+                profile: String::new(),
+                value: String::new(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.contains("no setting named"), "{error}");
+        assert!(error.contains("size_pt"), "and it names the likely intent: {error}");
+    }
+
+    #[test]
     fn a_daemon_that_serves_config_read_only_refuses_writes_in_the_reply_shape() {
         // Never `HostMessage::Error`: a sessionless Error is what an *old*
         // daemon sends when it cannot decode `SetConfig` at all, and a client
