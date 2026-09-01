@@ -145,6 +145,10 @@ for (const name of names) {
       // Blocks against the host's own index, at every frame — the phone's
       // whole view. State compared structurally so a null exit code cannot
       // pass as a zero.
+      // `author` is in this list deliberately: the projection is explicit, so
+      // a field left out of it is a field no client is held to — which is how
+      // `context` went uncompared. `?? null` so "absent" compares equal on
+      // both sides rather than `undefined` against a missing key.
       const wantBlocks = (want.blocks ?? []).map((b) => ({
         id: b.id,
         prompt_line: b.prompt_line,
@@ -153,6 +157,7 @@ for (const name of names) {
         state: b.state,
         command: b.command,
         cwd: b.cwd,
+        author: b.author ?? null,
       }));
       const gotBlocks = view.blocks.map((b) => ({
         id: b.id,
@@ -162,6 +167,7 @@ for (const name of names) {
         state: b.state,
         command: b.command,
         cwd: b.cwd,
+        author: b.author ?? null,
       }));
       assert.deepEqual(
         gotBlocks,

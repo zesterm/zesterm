@@ -1306,6 +1306,34 @@ any shell reached through `ssh` or `tmux`, which injection structurally cannot
 touch — but its *primary* property is that its status cannot be forged by the
 thing it is running.
 
+### A third provenance class, and it is not the shell's at all
+
+*(Amendment, #491.)* Both exit codes above are facts *about the session's
+contents*, and the argument between them is which one a program inside the
+terminal could have printed. A block's `author` is not in that argument. The
+daemon records it from the authenticated connection that wrote the bytes, so
+nothing inside the terminal can influence it — which is why it carries
+`daemon_witness` rather than joining `ExitSource`.
+
+The limit belongs in the same breath, because it is the one an agent will
+otherwise over-read. OSC 133 decides *when* a block opens. A shell can
+therefore mint a block nobody typed, and it will bear whoever wrote last. What
+it cannot do is make a block bear a *different* client's id. Provenance, never
+authorization — and the apparently stronger design, refusing to open a block
+with no recent input, was rejected because a nested integrated shell
+legitimately produces one.
+
+The same retention answers a second question the daemon could not previously
+ask. `may_approve_devices` is a property of the *transport*, so every loopback
+client could answer `PairingDecision` and enrol an arbitrary remote key. An
+agent now declines that authority for itself in its `Hello`, and the honest
+claim is narrow: the declaration is made at startup, before the agent has read
+any terminal text, so an injection that later steers it is steering a
+connection that already gave it up. A hostile program that omits the flag is
+untouched, and cannot be caught here — on loopback the socket *is* the
+authorization. The flag's default is therefore `false`, the permissive answer,
+because every already-shipped client omits it.
+
 ### The anchor is the tail block, not the next id
 
 `run` writes a command into a shell somebody is already using and then has to
@@ -1723,3 +1751,131 @@ no dependency on the image-format zoo; `image` is already linked into
 dialog. The settings row is a text field, so every prefix of a path someone is
 typing is a file that does not exist, and the only honest behaviour is for the
 window to look exactly as it did before they started.
+
+## ADR-018 — One process, many windows: `App` is the window, `Process` is the process
+
+**Status:** accepted (#490; the epic is #489).
+
+For as long as there was one window, `App` was the whole application: it
+implemented winit's `ApplicationHandler`, held the one `Window`, the one GPU
+surface, the one tab strip, and `window_event` threw its `WindowId` away.
+Closing it was `el.exit()`. A second window meant a second process — which
+fought the first over one `tabs.json`, started a second mDNS browser, and on
+macOS asked the Keychain a second time.
+
+### The split goes the cheap way round
+
+Nearly every field on `App` is genuinely the window's — its surface, its
+strip, its overlays, its pointer, its animation springs. The alternative that
+sounds cleaner, a new `Window` struct that those ~120 fields move *into*, is
+fifteen thousand lines of `self.x` becoming `win.x` for no behavioural gain.
+So `App` stayed the window, and the handful of things that are one per
+process moved **out** into `process::Shared`, reached through an `Rc`:
+
+| On `Shared` | Because two windows each having their own would… |
+|---|---|
+| `next_placeholder` | mint the same placeholder address twice, and a placeholder address is what routes `TabExited` / `SessionGone` / `Attention` to a window — a tab's exit would close a tab in the wrong window |
+| `fleet` | run two mDNS browsers and two probers |
+| `approval` | show the pairing modal in one window and not the other, for a question that is about the machine |
+| `clipboard` | on X11, take the copied text with the window that set it |
+| `remote_identity` | prompt the keychain once per window |
+| `local_context` | build two context engines for one machine's in-process sessions |
+| `restart_pending` | let one window's settings tab forget a restart another window's owed |
+
+`config` and `settings` are deliberately **per-window clones**: a reload
+lands as a broadcast and each window re-derives its own `Config`, which is
+also what ADR-012's "one `ChromeColors` per window" needs. The account state
+machine stays per-window too; it is driven by a Fleet screen inside a window,
+and hoisting it would put ~44 sites behind `RefCell` borrows across the
+longest methods in the crate for a limitation that costs nothing today.
+
+The rule for the next field someone adds to `App`: *would two windows break
+by each having their own?* If yes, it goes on `Shared`. If the answer is
+merely "it would be duplicated", it stays.
+
+### A window asks; the process decides
+
+`Process` implements `ApplicationHandler` and owns `Vec<App>`. It routes
+each `window_event` by id, and each `Wakeup` by a pure, exhaustive
+`process::route`: a wakeup that names a session goes to the window whose
+strip holds it (`TabStrip::owns`, tabs *and* panes), the fleet latch is
+consumed once by the process — `take_changed` clears one flag, so a broadcast
+would starve every window but the first — and everything else is broadcast,
+because each of those arms was already a no-op for a window it does not
+concern.
+
+`App` never calls `el.exit()` and never opens a window. It records intent in
+`WindowRequests { close, new_window, persist }` and the process drains that
+after every dispatch. That is what makes "close this window" and "quit"
+different things: the process drops the closing `App` — every tab's session
+detaches in its destructor, exactly as before — and exits the loop only when
+no window is left. The probes and `--screenshot` are `FirstOnly` flags handed
+to the first window alone; they measure or photograph *a* window and leave
+from inside it, which is why `Process::resumed` checks `el.exiting()` after
+each open.
+
+### The file remembers windows, and closing one is a decision about it
+
+`windows.json` replaces `tabs.json`: every window's tabs plus its geometry,
+in physical pixels because that is what winit reports and takes back. The
+old file is read as one window with no geometry until the first successful
+save of the new one, then removed. A saved size outranks `window.columns` /
+`window.rows` — a person resized *that* window; the setting describes windows
+with no memory yet. A saved position is kept only where at least 64×64 px of
+the window would still land on some monitor (`windows_state::place`), because
+a window restored off-screen is a window the user cannot find.
+
+Closing one window of several **forgets it**; closing the last remembers it.
+The first is what the user asked for, the second is quitting, and the single
+window always came back after quitting. `snapshot_after_close` is the whole
+rule, and it is tested.
+
+### What this deliberately does not do yet
+
+- **Share the GPU device.** Each window has its own `Gpu` — instance,
+  adapter, device, pipelines, atlas. `Renderer` already takes the device by
+  reference, so sharing is a mechanical split of `init_gpu`; it lands when a
+  measured second-window cost says it should, not before.
+- **Address `Redraw`.** `wake_for` stamps a session address on `Attention`
+  and could on `Redraw`; today `Redraw` is broadcast and each non-owner's
+  `RedrawRequested` finds nothing dirty and skips. The follow-up is one line
+  if profiling ever asks for it.
+- **Stay alive with no windows on macOS.** winit 0.30 exposes no
+  `applicationShouldHandleReopen`; closing the last window quits on every
+  platform.
+
+### A second launch is a request to the running process (#497)
+
+`zesterm` run while one is running does not become a second process; it
+asks the first to open what it was given. The rendezvous is a second per-user
+local endpoint beside the daemon's — `zesterm-app`, a unix socket or a named
+pipe — built on the daemon's own transport (`zest_daemon::LocalListener`,
+*lifted* out of `listen` rather than copied, because the flock-unlink-bind
+sequence and the overlapped `ConnectNamedPipe` are the paid-for traps and a
+copy is how one of them loses a step). It is deliberately **not** the daemon
+socket: the daemon is a session server, and "open a window" is nothing a
+session server should answer. Not loopback TCP either, for `local.rs`'s
+reason — the socket mode or pipe DACL is the authorization.
+
+Three rules hold it together. **A launch never hangs**: the launcher waits
+500 ms and then opens its own window, because a window too many is
+recoverable and a launch that does nothing is not. **The instance answers
+`Ok` only after the window exists**, and its acceptor's budget is *shorter*
+than the launcher's, so a wedged loop produces no answer rather than a late
+`Ok` to a launcher that has already left. **A different build is a different
+program**: the greeting carries the binary's own length and mtime, so
+`zesterm-dev`'s rebuilt binary never forwards to the stale one it replaces —
+one `stat`, no `build.rs`, and it distinguishes two builds of the same dirty
+tree where a git sha would not.
+
+The claim (one flock, or one `CreateNamedPipeW`) happens in `main` before
+the window, never between creating and showing it, and serving starts after
+the first paint — ADR-007's budget, kept. What forwards is what a running
+process can take: `-e`, `--profile` (as a launch, not as a cascade layer),
+`--screen`, `--attach`, and the directory the launcher was run from. A process
+whose flags are a config layer of its own (`--theme`, `--size`, …) neither
+forwards nor serves — a window opened later on someone else's behalf must
+not carry it — and the probes and `--screenshot` never touch the endpoint.
+`window.launch = window | tab | instance` is the setting; the values are the
+flag suffixes so the override needs no table.
+

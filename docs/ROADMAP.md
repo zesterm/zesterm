@@ -20,9 +20,9 @@ is reported rather than gated.
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA — the grid shapes runs when `typography.features`/`ligatures` ask for it, per-character otherwise |
 | `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
-| `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty) |
+| `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty); every mutator replaces the file rather than truncating it, so a crash mid-save cannot cost somebody every setting they have |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, Settings and Profiles among them (#494), a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, Settings and Profiles among them (#494), a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
@@ -67,6 +67,18 @@ the history behind them is in closed issues and PRs.
       from `WM_NCMOUSEMOVE`.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
+- [ ] Multi-window, the rest of #489 after #490 (the windows) and #497 (a
+      second launch opens in the running one): a tab moved to a new window
+      (palette, then drag-out); one GPU device shared across windows, if the
+      measured cost of a second window says so. Known edges: closing the last
+      window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
+      `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
+      size-only (no global coordinates), two windows on the Fleet screen run
+      two account watchers (idempotent, so merely wasteful), a `--new-tab`
+      into an *existing* window cannot be raised on Wayland (winit 0.30 takes
+      an activation token only for a new window), and Windows Terminal's
+      `useAnyExisting` — the same window per virtual desktop — has no
+      counterpart because nothing tracks desktops.
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 - [ ] The tab-signal tail (#379–#385 left these deliberately): a right-click tab
       menu, which is where Detach belongs once there is one — today it is ⌘B, the
@@ -329,6 +341,19 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
 
 ### Protocol & daemon
 
+- [x] **A launch can name its child's environment** (#488). `CreateSession`
+      grew an additive `env`, skipped when empty so an ordinary launch is
+      byte-identical to what a peer predating it sent. It is a bug fix wearing
+      a feature's clothes: `shell.env` had been a setting that did nothing for
+      every ordinary session, because the only code applying it —
+      `apply_shell_settings` — is reachable only from the in-process
+      `--no-daemon` fallback, and the daemon that actually spawns the shell was
+      never told. The daemon now reads its own `shell.env` at spawn (the shell
+      runs on *this* machine, so this machine's settings decide) and layers the
+      launch's entries on top. One copy of the ordering and its loud
+      `ZDOTDIR` collision warning, `CommandSpec::layer_env`, because two copies
+      is how the daemon came to have none. Groundwork for a profile that
+      carries its own environment (#487).
 - [ ] **Assert client scrollback equals the host's.** `SbPush` is emitted only
       when the encoder calls a viewport move a scroll, and a jump larger than
       the viewport deliberately is not one — so the host can push history the
@@ -510,16 +535,32 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       client receives, and the agent-facing number is the stable one. A
       `cargo build --workspace` is 40 KB of pty (~16k tokens) against 1,667
       bytes of `screen` (~417) — the tail, which is what "did it build" wants.
-- [ ] **Provenance.** An author on `Block`, so scrollback records who ran what.
-      Needs the daemon to stop forgetting: `welcome()` reads the `ClientId` and
-      then `Gate::Served` drops the transcript. Core cannot hold a `ClientId`
-      (`zest-proto` depends on `zest-core`, not the reverse), so it holds 32
-      opaque bytes and the wire converts, as `LineId` becomes `i64` today.
-- [ ] **An agent may not approve devices.** `may_approve_devices()` is a
-      property of the *transport* alone, so any loopback client can answer
-      `PairingDecision` and enrol an arbitrary remote key, unattended. Worth
-      closing while a general local gate is not: a prompt-injected
-      *cooperating* agent has only the tools it was given.
+- [x] **Provenance.** `Block.author`, so scrollback records who ran what: 32
+      opaque bytes in core (`zest-proto` depends on `zest-core`, not the
+      reverse) that the wire converts to a `ClientId`, as `LineId` becomes
+      `i64`. The daemon stopped forgetting — `Gate::Served` now carries the
+      client it served — and the session latches whoever last wrote, which the
+      reader stamps at OSC 133;C. `zest-mcp` reports it as `"you"` or a short
+      id beside `author_source: daemon_witness`, a third provenance class
+      stronger than either `ExitSource`: it is a fact about the *connection*,
+      so nothing inside the terminal can influence it.
+      What it does **not** mean, and every consumer says so: OSC 133 decides
+      *when* a block opens, so a block nobody typed carries whoever wrote
+      last. It cannot be made to carry a *different* client. Provenance, never
+      authorization. → #491.
+- [x] **An agent may not approve devices.** `Hello.agent` — a client declining
+      the authority for itself, at startup, before it has read a byte of
+      terminal text — and `Connection::device_authority` refuses it
+      `PairingDecision` and `Enroll` even on loopback, and never subscribes it
+      to the approval queue (the push carries the six-digit code, so refusing
+      the answer while streaming the code closes one door and leaves the other
+      open).
+      Deliberately narrow, and the doc comments say it: this binds a
+      **cooperating** agent, so a prompt injection that later steers it is
+      steering a connection that already gave this up. A hostile local program
+      omits the flag and is untouched — on loopback the socket *is* the
+      authorization. A general local gate is different work and this is not a
+      down payment on it. → #491.
 - [ ] Per-block consent and redaction, in `zest-core`, masking the delta so
       every client sees one masked truth — ADR-015's amendment records why a
       prompt-boundary filter is rejected. Plus fleet-wide block search and the

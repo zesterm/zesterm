@@ -136,6 +136,19 @@ pub struct Session {
     /// revision that holds still while the facts move is a client skipping a
     /// chrome rebuild it needed.
     facts_rev: Arc<AtomicU64>,
+    /// Who last wrote into this pty, for attributing the next command block.
+    ///
+    /// Transient input state and **not** a second copy of any block's author:
+    /// the one home for that fact is `Block::author`, stamped once when
+    /// OSC 133 `C` opens the block and never re-read. This is only what the
+    /// reader consults to fill it.
+    ///
+    /// Its own mutex rather than a field under the terminal lock, and that is
+    /// load-bearing: the keystroke path holds no terminal lock today, while
+    /// the reader holds it across a whole 64 KiB parse. Putting this there
+    /// would queue every keystroke behind a parse under a flood — the exact
+    /// latency ADR-016 built a predicted-echo overlay to protect.
+    last_writer: Arc<Mutex<Option<zest_proto::ClientId>>>,
 }
 
 impl Session {
@@ -189,6 +202,7 @@ impl Session {
         let exited = Arc::new(AtomicBool::new(false));
         let title = Arc::new(Mutex::new(String::new()));
         let facts_rev = Arc::new(AtomicU64::new(0));
+        let last_writer: Arc<Mutex<Option<zest_proto::ClientId>>> = Arc::new(Mutex::new(None));
 
         let subscribers: Arc<Mutex<HashMap<u64, Subscriber>>> = Arc::default();
         // Shared because two things now report the child leaving: the reader
@@ -202,6 +216,7 @@ impl Session {
             let exited = Arc::clone(&exited);
             let title = Arc::clone(&title);
             let facts_rev = Arc::clone(&facts_rev);
+            let last_writer = Arc::clone(&last_writer);
             let subscribers = Arc::clone(&subscribers);
             let context = context.clone();
             let mut reply = pty.writer();
@@ -227,12 +242,24 @@ impl Session {
                             Ok(n) => n,
                         };
 
+                        // Sampled before the terminal lock, and that ordering
+                        // is the whole correctness argument: the bytes that
+                        // open a block cannot exist before the write that
+                        // caused them, so a latch read after those bytes
+                        // arrived is at least as new as that write. The error
+                        // can only ever be too new, never too old.
+                        let author = last_writer.lock().ok().and_then(|w| *w);
+
                         let (events, busy, alt, to_stamp) = {
                             let Ok(mut term) = terminal.lock() else { break };
                             // The parser has no clock (`no_std`); the reader
                             // is where wall time and bytes meet, so blocks
                             // get their start/end stamps from here.
                             term.set_now_ms(unix_ms());
+                            // Who, on the same footing as when: the parser is
+                            // handed both facts it cannot obtain itself, and
+                            // stamps whichever blocks open in this chunk.
+                            term.set_input_author(author.map(|c| c.0));
                             term.advance(&buf[..n]);
                             // Read under the same lock the parse ran under:
                             // these are what `Registry::list` reports, and a
@@ -397,6 +424,7 @@ impl Session {
             exit_code: Arc::new(Mutex::new(None)),
             title,
             facts_rev,
+            last_writer,
         })
     }
 
@@ -719,10 +747,24 @@ impl Session {
         enc.history(&rows)
     }
 
-    /// Send bytes to the child.
-    pub fn write(&self, bytes: &[u8]) {
+    /// Send bytes to the child, recording who sent them.
+    ///
+    /// `from` is `None` where nobody is identified — a local session with no
+    /// daemon, or the terminal answering a query of its own. The latch it sets
+    /// is *sticky*: it is state, like the clock, so a block the shell opens
+    /// without fresh input carries whoever wrote last. That is what
+    /// `Block::author` documents itself to mean, and it is what attributes the
+    /// second block a nested integrated shell produces from one submission.
+    pub fn write(&self, bytes: &[u8], from: Option<zest_proto::ClientId>) {
+        // Before the latch, deliberately: a write that reaches no pty caused no
+        // output, so it must not claim the next block the shell happens to open.
         if bytes.is_empty() {
             return;
+        }
+        if let Some(from) = from {
+            if let Ok(mut w) = self.last_writer.lock() {
+                *w = Some(from);
+            }
         }
         let Ok(mut w) = self.writer.lock() else { return };
         let _ = w.write_all(bytes);
@@ -1074,6 +1116,7 @@ mod tests {
             exit_code: Arc::new(Mutex::new(None)),
             title: Arc::new(Mutex::new(String::new())),
             facts_rev: Arc::new(AtomicU64::new(0)),
+            last_writer: Arc::new(Mutex::new(None)),
         };
 
         s.resize(40, 12);
@@ -1361,6 +1404,47 @@ mod tests {
             settled,
             "after {seen} update(s) the child neither produced a third nor exited, so this \
              waited out its deadline on a session that had stalled"
+        );
+    }
+
+    #[test]
+    fn an_empty_input_claims_no_authorship() {
+        // An empty write reaches no pty, so it caused no output and must not
+        // put its sender's name on whatever block the shell opens next. The
+        // guard runs before the latch for exactly this reason.
+        let terminal = Arc::new(Mutex::new(Terminal::new(80, 24, 100)));
+        let probe = Arc::new(SizeProbePty {
+            terminal: Arc::clone(&terminal),
+            seen: Mutex::new(None),
+        });
+        let s = Session {
+            id: SessionId(1),
+            terminal: Arc::clone(&terminal),
+            pty: Arc::clone(&probe) as Arc<dyn PtyTransport + Send + Sync>,
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)),
+            subscribers: Arc::default(),
+            next_subscriber: Mutex::new(0),
+            exited: Arc::new(AtomicBool::new(false)),
+            ever_attached: Arc::new(AtomicBool::new(false)),
+            exit_code: Arc::new(Mutex::new(None)),
+            title: Arc::new(Mutex::new(String::new())),
+            facts_rev: Arc::new(AtomicU64::new(0)),
+            last_writer: Arc::new(Mutex::new(None)),
+        };
+
+        let who = zest_proto::ClientId::from_bytes([0xa1; 32]);
+        s.write(&[], Some(who));
+        assert_eq!(
+            *s.last_writer.lock().expect("latch"),
+            None,
+            "a write that sent nothing must leave the latch alone"
+        );
+
+        s.write(b"ls\r", Some(who));
+        assert_eq!(
+            *s.last_writer.lock().expect("latch"),
+            Some(who),
+            "a write that reached the pty is what the next block is attributed to"
         );
     }
 

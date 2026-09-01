@@ -21,6 +21,10 @@ use crate::chrome::model::PaletteRow;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     NewTab,
+    /// Another window of this process, on the same host as the one the
+    /// chord was pressed in (⌘N — every desktop's convention, and
+    /// Ctrl+Shift+N is Windows Terminal's own spelling of it).
+    NewWindow,
     CloseTab,
     /// Stop watching this tab's session and let it keep running in the
     /// daemon. Closing the *window* has always done this to every tab; this
@@ -229,6 +233,7 @@ pub static BINDINGS: &[Binding] = &[
     // Desktop chords. Lowercase-exact on purpose: shift produces the
     // uppercase, and ⌘⇧T stays reserved (reopen-closed, one day).
     b(Mods::Desktop, ChordKey::Char("t"), Action::NewTab, "T", "New tab", Category::Tabs),
+    b(Mods::Desktop, ChordKey::Char("n"), Action::NewWindow, "N", "New window", Category::Tabs),
     b(
         Mods::Desktop,
         ChordKey::Char("k"),
@@ -760,6 +765,14 @@ mod tests {
                 binding.name
             );
         }
+    }
+
+    #[test]
+    fn new_window_is_the_desktop_chord_beside_new_tab() {
+        // ⌘N on the Mac, Ctrl+Shift+N on Windows — Windows Terminal's own
+        // new-window chord, so a hand that knows it lands on the same thing.
+        assert_eq!(action_for(&char_key("n"), SUPER), Some(Action::NewWindow));
+        assert_eq!(action_for(&char_key("N"), CTRL_SHIFT), Some(Action::NewWindow));
     }
 
     #[test]

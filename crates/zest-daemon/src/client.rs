@@ -133,6 +133,26 @@ pub struct Watch {
     pub signals: bool,
 }
 
+/// What kind of client this connection is, as the daemon is told.
+///
+/// Not a field on [`Watch`]: that type's doc says what it holds — the things
+/// this connection *subscribes to* — and a declaration of what the client
+/// **is** is not a subscription. Not a bare `bool` either, because
+/// `connect_with(.., watch, true, on_pending)` at a call site says nothing
+/// about which `true` that is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClientKind {
+    /// A person is driving. The default, and what every client that predates
+    /// the flag is taken to be.
+    #[default]
+    Interactive,
+    /// A program acting for a model. Declared once at startup — before it has
+    /// read a byte of terminal text — and the daemon refuses it
+    /// `PairingDecision` and `Enroll` on the strength of it, even on loopback,
+    /// and never sends it a pairing code.
+    Agent,
+}
+
 /// An authenticated connection to one daemon.
 pub struct DaemonClient {
     read: Box<dyn Read + Send>,
@@ -173,6 +193,7 @@ impl DaemonClient {
             label,
             expect_host,
             Watch { sessions: watch_sessions, pairings: false, hosts: false, signals: false },
+            ClientKind::Interactive,
             None,
         )
     }
@@ -191,7 +212,7 @@ impl DaemonClient {
         expect_host: Option<zest_proto::HostId>,
         watch: Watch,
     ) -> Result<Self, DaemonError> {
-        Self::connect_impl(read, write, identity, label, expect_host, watch, None)
+        Self::connect_impl(read, write, identity, label, expect_host, watch, ClientKind::Interactive, None)
     }
 
     /// [`Self::connect_watching`], with a listener for the approval wait.
@@ -202,6 +223,7 @@ impl DaemonClient {
     /// Without it the code exists only in a log line while the caller shows a
     /// spinner (#190). The connect keeps blocking afterwards; the host's
     /// eventual `Welcome` or `AuthFailed` resolves it.
+    #[allow(clippy::too_many_arguments, reason = "a frozen seam whose two consumers spell every argument out; a params struct would rename them, not reduce them")]
     pub fn connect_with(
         read: Box<dyn Read + Send>,
         write: Box<dyn Write + Send>,
@@ -209,11 +231,13 @@ impl DaemonClient {
         label: &str,
         expect_host: Option<zest_proto::HostId>,
         watch: Watch,
+        kind: ClientKind,
         on_pending: Option<OnPending<'_>>,
     ) -> Result<Self, DaemonError> {
-        Self::connect_impl(read, write, identity, label, expect_host, watch, on_pending)
+        Self::connect_impl(read, write, identity, label, expect_host, watch, kind, on_pending)
     }
 
+    #[allow(clippy::too_many_arguments, reason = "a frozen seam whose two consumers spell every argument out; a params struct would rename them, not reduce them")]
     fn connect_impl(
         read: Box<dyn Read + Send>,
         write: Box<dyn Write + Send>,
@@ -221,6 +245,7 @@ impl DaemonClient {
         label: &str,
         expect_host: Option<zest_proto::HostId>,
         watch: Watch,
+        kind: ClientKind,
         on_pending: Option<OnPending<'_>>,
     ) -> Result<Self, DaemonError> {
         let mut client = Self {
@@ -245,6 +270,7 @@ impl DaemonClient {
             watch_pairings: watch.pairings,
             watch_hosts: watch.hosts,
             watch_signals: watch.signals,
+            agent: matches!(kind, ClientKind::Agent),
         })?;
 
         // Challenge -> Auth -> Welcome. Two round trips on connect, which on a
@@ -370,18 +396,25 @@ impl DaemonClient {
     }
 
     /// Start a fresh session and return its address.
+    ///
+    /// `env` is layered over whatever the host's own settings give the child,
+    /// last-wins, with the empty-value-unsets convention `CommandSpec` and
+    /// `shell.env` already share. Empty is the ordinary case and costs no
+    /// bytes on the wire.
     pub fn create(
         &mut self,
         command: &str,
         cwd: &str,
         cols: u16,
         rows: u16,
+        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         self.send(&ClientMessage::CreateSession {
             command: command.to_string(),
             cwd: cwd.to_string(),
             cols,
             rows,
+            env,
         })?;
         loop {
             match self.recv()? {
@@ -407,6 +440,12 @@ impl DaemonClient {
     /// The adopt policy lives client-side on purpose: `ListSessions` then the
     /// newest unattached, else create. See `AttachOptions::adopt` for why
     /// adopting is the GUI default today.
+    ///
+    /// `env` reaches only a session this call *creates*. An adopted one is
+    /// already running and its environment was fixed when it spawned — a
+    /// process cannot be handed a new one, and pretending otherwise is how a
+    /// profile would appear to apply while the shell it adopted belongs to a
+    /// different identity entirely.
     pub fn open_session(
         &mut self,
         command: &str,
@@ -414,13 +453,14 @@ impl DaemonClient {
         cols: u16,
         rows: u16,
         adopt: bool,
+        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         let existing = self.list()?;
         let adopted =
             adopt.then(|| existing.iter().rev().find(|s| !s.attached).map(|s| s.addr)).flatten();
         match adopted {
             Some(addr) => Ok(addr),
-            None => self.create(command, cwd, cols, rows),
+            None => self.create(command, cwd, cols, rows, env),
         }
     }
 
@@ -726,6 +766,7 @@ mod tests {
             "test",
             None,
             Watch::default(),
+            ClientKind::Interactive,
             Some(&on_pending),
         )
         .expect("an approved device must end up welcomed");
@@ -749,5 +790,63 @@ mod tests {
             !client.host_label().is_empty(),
             "the callback informs the wait, it must not replace the Welcome"
         );
+    }
+
+    #[test]
+    fn an_agent_connection_says_so_in_its_hello() {
+        // The declaration is worth nothing unless it reaches the wire: a
+        // `ClientKind` dropped in `connect_impl` would leave every daemon-side
+        // refusal test passing against a client that never declares itself.
+        // The `Hello` is plaintext -- the seal starts at the `Challenge` -- so
+        // reading the first frame is enough, and the connect failing
+        // afterwards is beside the point.
+        for (kind, expected) in
+            [(ClientKind::Agent, true), (ClientKind::Interactive, false)]
+        {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let seen: Arc<Mutex<Option<bool>>> = Arc::default();
+            let sink = Arc::clone(&seen);
+            let joiner = std::thread::spawn(move || {
+                let (mut sock, _) = listener.accept().expect("accept");
+                let mut frames = zest_proto::FrameReader::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = std::io::Read::read(&mut sock, &mut buf).expect("read");
+                    if n == 0 {
+                        return;
+                    }
+                    frames.feed(&buf[..n]);
+                    if let Some(body) = frames.next_frame().expect("frame") {
+                        let msg: zest_proto::ClientMessage =
+                            zest_proto::frame::decode(&body).expect("a plaintext Hello");
+                        if let zest_proto::ClientMessage::Hello { agent, .. } = msg {
+                            *sink.lock().expect("seen lock") = Some(agent);
+                        }
+                        return;
+                    }
+                }
+            });
+
+            let stream = TcpStream::connect(addr).expect("dial");
+            let write = stream.try_clone().expect("clone");
+            let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+            let _ = DaemonClient::connect_with(
+                Box::new(stream),
+                Box::new(write),
+                &identity,
+                "test",
+                None,
+                Watch::default(),
+                kind,
+                None,
+            );
+            joiner.join().expect("reader thread");
+            assert_eq!(
+                *seen.lock().expect("seen lock"),
+                Some(expected),
+                "{kind:?} must reach the daemon as agent={expected}"
+            );
+        }
     }
 }

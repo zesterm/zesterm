@@ -29,10 +29,52 @@ use crate::{DaemonConfig, DaemonError};
 enum Gate {
     /// Mid-handshake. Only `Hello` and `Auth` are accepted.
     Handshaking(Box<zest_mesh::pairing::HostHandshake>),
-    /// Proved. Everything is accepted.
-    Served,
+    /// Proved. Everything is accepted, by this client.
+    Served(Box<Client>),
     /// Failed. **Nothing** is accepted, ever again on this connection.
     Refused,
+}
+
+/// Who is on this connection, kept past the handshake.
+///
+/// The handshake's transcript is dropped when the gate opens, and until this
+/// existed that dropped the only record of *who* had proved themselves — so
+/// [`Auth::may_approve_devices`] could ask which **socket** a message arrived
+/// on and never which client sent it, and a block could not record who ran it.
+///
+/// Held inside [`Gate::Served`] rather than beside it, for `Gate`'s own reason:
+/// a record only [`Connection::welcome`] can construct cannot be read on a
+/// connection that has not proved itself.
+struct Client {
+    /// The authenticated client, from the signed transcript.
+    ///
+    /// `Option` rather than a zero id: the refusal and logging paths in this
+    /// file fall back to all-zero bytes, which is fine for a log line and
+    /// would be a lie here — this id is stamped onto command blocks as
+    /// provenance, and "we did not record one" must not read as a client whose
+    /// key happens to be zero. Not currently reachable; `welcome()` is only
+    /// entered from a handshake that verified.
+    id: Option<ClientId>,
+    /// The client's own label, from the transcript — signed, so it is the same
+    /// string the approval prompt showed a person.
+    label: String,
+    /// `Hello.agent`: this client said it acts for a model. A claim, not a
+    /// proof; see [`Connection::device_authority`].
+    agent: bool,
+}
+
+/// Why a connection may not approve devices or enrol this machine.
+///
+/// An enum and not a bool because the two refusals are different sentences and
+/// the client is told the true one: "only a local client" is a *lie* to an
+/// agent on the loopback socket, and that is the exact case this exists for.
+/// The same reason [`crate::auth::failure_for`] maps refusals to names rather
+/// than to message strings.
+enum NoAuthority {
+    /// The socket says no: `Auth::Proof`, i.e. the LAN or the relay.
+    NotLocal,
+    /// The client said it acts for a model (`Hello.agent`).
+    Agent,
 }
 
 /// This connection's channel, and where the switch to it stands.
@@ -501,6 +543,13 @@ pub struct Connection {
     /// every subscriber's slot regardless — it has no idea who asked — and
     /// this is where the answer is dropped for a client that did not.
     watch_signals: bool,
+    /// `Hello.agent`, as declared, until the gate opens.
+    ///
+    /// Parked beside the `watch_*` flags because it arrives with them and is
+    /// the same kind of thing — a claim the client made before it had proved
+    /// anything. It is *read* only out of [`Gate::Served`], so no authority
+    /// check can consult it on a connection that never authenticated.
+    declared_agent: bool,
     /// The offer generation this connection last told its client about. `0`
     /// means "has never sent one", and `OfferSource` starts at 1, so a
     /// subscriber's very first `Sessions` carries the offer without needing a
@@ -611,6 +660,7 @@ impl Connection {
             watch_sessions: false,
             watch_hosts: false,
             watch_signals: false,
+            declared_agent: false,
             seen_offer_generation: 0,
             offer_watch_token: None,
             watch_token: None,
@@ -626,7 +676,7 @@ impl Connection {
     /// Whether the handshake has completed. Used by the LAN watchdog.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        matches!(self.gate, Gate::Served)
+        matches!(self.gate, Gate::Served(_))
     }
 
     fn handshake_mut(&mut self) -> Option<&mut zest_mesh::pairing::HostHandshake> {
@@ -640,6 +690,51 @@ impl Connection {
         match &self.gate {
             Gate::Handshaking(h) => Some(h),
             _ => None,
+        }
+    }
+
+    /// The client this connection proved itself as, once served.
+    ///
+    /// `None` before the gate opens, which is the truthful shape rather than a
+    /// convenience: nothing is stamped with, or gated on, an identity nobody
+    /// has proved.
+    fn served(&self) -> Option<&Client> {
+        match &self.gate {
+            Gate::Served(who) => Some(who),
+            _ => None,
+        }
+    }
+
+    /// Whether this connection may approve *other* devices, or enrol this
+    /// machine.
+    ///
+    /// Three facts, all required, in one place so a later call site cannot
+    /// satisfy two of them and forget the third. The **transport** (only the
+    /// loopback listener can construct `Auth::Transport`); the **handshake**
+    /// (an unproved connection has no authority at all — today `Gate` refuses
+    /// these messages before they reach here, so that arm is belt and braces,
+    /// and the strict answer is the only safe default for a gate); and the
+    /// client's own **declaration**.
+    ///
+    /// The last of the three is a claim, and the honest claim about it is
+    /// narrow. A cooperating agent declares itself at startup, before it has
+    /// read a byte of terminal text, so a prompt injection that later steers it
+    /// is steering a connection that already gave this up. A hostile program
+    /// that simply omits the flag is untouched, and cannot be caught here: on
+    /// loopback the socket *is* the authorization. That is a general local
+    /// gate's job, and this is not one.
+    /// The order of the two refusals is deliberate. A *remote* agent fails
+    /// both tests, and the transport is the one worth reporting: it is the
+    /// older and more fundamental rule, it would refuse the same connection
+    /// even if it stopped declaring itself, and an audit line reading "an
+    /// agent tried to approve a device" would bury the more alarming fact that
+    /// something off this machine did.
+    fn device_authority(&self) -> Result<(), NoAuthority> {
+        match &self.gate {
+            Gate::Served(_) if !self.auth.may_approve_devices() => Err(NoAuthority::NotLocal),
+            Gate::Served(who) if who.agent => Err(NoAuthority::Agent),
+            Gate::Served(_) => Ok(()),
+            _ => Err(NoAuthority::NotLocal),
         }
     }
 
@@ -754,7 +849,7 @@ impl Connection {
         // The listing push, first and coalesced: however many changes piled
         // up since this connection last looked, one `Sessions` describes the
         // current truth. Only for clients that asked (`Hello.watch_sessions`).
-        if self.watch_sessions && matches!(self.gate, Gate::Served) {
+        if self.watch_sessions && matches!(self.gate, Gate::Served(_)) {
             let generation = self.registry.generation();
             if generation != self.seen_generation {
                 self.seen_generation = generation;
@@ -769,7 +864,7 @@ impl Connection {
         // reach a subscriber — a config edit moves the profile list and moves
         // nothing in the registry, and without this the far launcher would show
         // the old rows until somebody happened to open a shell.
-        if self.watch_hosts && matches!(self.gate, Gate::Served) {
+        if self.watch_hosts && matches!(self.gate, Gate::Served(_)) {
             if let Some(offer) = self.offer_if_new() {
                 out.push(HostMessage::Sessions {
                     sessions: self.registry.list(self.config.host),
@@ -783,10 +878,7 @@ impl Connection {
         // announced says "show this" (a request, with its remaining
         // validity) and "stop showing that" (a tombstone, `resolved: true`,
         // carrying only the client — there is nothing left to compare).
-        if self.watch_pairings
-            && self.auth.may_approve_devices()
-            && matches!(self.gate, Gate::Served)
-        {
+        if self.watch_pairings && self.device_authority().is_ok() {
             let queue = self.auth.authenticator().queue();
             let generation = queue.generation();
             if generation != self.seen_pairing_generation {
@@ -995,11 +1087,13 @@ impl Connection {
                 watch_pairings,
                 watch_hosts,
                 watch_signals,
+                agent,
             } => {
                 self.watch_sessions = watch_sessions;
                 self.watch_pairings = watch_pairings;
                 self.watch_hosts = watch_hosts;
                 self.watch_signals = watch_signals;
+                self.declared_agent = agent;
                 let Some(h) = self.handshake_mut() else {
                     return vec![HostMessage::Error {
                         session: None,
@@ -1136,15 +1230,31 @@ impl Connection {
                 // is exactly the authority enrolling a device requires --
                 // accepting it over the LAN would let one paired device enrol
                 // others.
-                if !self.auth.may_approve_devices() {
-                    tracing::warn!(
-                        remote = %self.remote,
-                        "a remote connection tried to approve a device"
-                    );
-                    return vec![HostMessage::Error {
-                        session: None,
-                        message: "only a local client may approve devices".into(),
-                    }];
+                // ...and never from an agent, even on loopback: a program
+                // acting for a model must not be able to enrol a key because
+                // something it read told it to.
+                if let Err(why) = self.device_authority() {
+                    let message = match why {
+                        NoAuthority::NotLocal => {
+                            tracing::warn!(
+                                remote = %self.remote,
+                                "a remote connection tried to approve a device"
+                            );
+                            "only a local client may approve devices"
+                        }
+                        NoAuthority::Agent => {
+                            // Named, not just counted: the label is signed
+                            // into the transcript, so the audit line can say
+                            // *which* agent asked rather than that one did.
+                            tracing::warn!(
+                                remote = %self.remote,
+                                agent = self.served().map_or("", |w| w.label.as_str()),
+                                "an agent connection tried to approve a device"
+                            );
+                            "an agent may not approve devices"
+                        }
+                    };
+                    return vec![HostMessage::Error { session: None, message: message.into() }];
                 }
                 let decision = if approve {
                     zest_mesh::pairing::Decision::Approve
@@ -1160,15 +1270,28 @@ impl Connection {
                 // Loopback only, `PairingDecision`'s gate verbatim: joining
                 // the machine to an account is the authority of whoever is
                 // logged in at it.
-                if !self.auth.may_approve_devices() {
-                    tracing::warn!(
-                        remote = %self.remote,
-                        "a remote connection tried to enroll this machine"
-                    );
-                    return vec![HostMessage::Error {
-                        session: None,
-                        message: "only a local client may enroll this machine".into(),
-                    }];
+                if let Err(why) = self.device_authority() {
+                    let message = match why {
+                        NoAuthority::NotLocal => {
+                            tracing::warn!(
+                                remote = %self.remote,
+                                "a remote connection tried to enroll this machine"
+                            );
+                            "only a local client may enroll this machine"
+                        }
+                        NoAuthority::Agent => {
+                            // Named, not just counted: the label is signed
+                            // into the transcript, so the audit line can say
+                            // *which* agent asked rather than that one did.
+                            tracing::warn!(
+                                remote = %self.remote,
+                                agent = self.served().map_or("", |w| w.label.as_str()),
+                                "an agent connection tried to enroll this machine"
+                            );
+                            "an agent may not enroll this machine"
+                        }
+                    };
+                    return vec![HostMessage::Error { session: None, message: message.into() }];
                 }
                 let Some(seam) = self.config.enroll.clone() else {
                     // An --ephemeral daemon, honestly: its key dies with the
@@ -1266,7 +1389,7 @@ impl Connection {
                 vec![list_dir(&path)]
             }
 
-            ClientMessage::CreateSession { command, cwd, cols, rows } => {
+            ClientMessage::CreateSession { command, cwd, cols, rows, env } => {
                 let mut spec = CommandSpec::default_shell();
                 if !command.is_empty() {
                     spec.command_line = command;
@@ -1274,22 +1397,38 @@ impl Connection {
                 if !cwd.is_empty() {
                     spec.cwd = Some(cwd.into());
                 }
+                // The shell runs on *this* machine, so this machine's settings
+                // decide its prompt and its environment (the ROADMAP's rule for
+                // every shell-integration switch). Read at spawn, like the offer
+                // reads profiles on demand: a session keeps what it started
+                // with, which is also what these settings' `Restart`
+                // invalidation class promises.
+                //
+                // Read unconditionally now rather than inside the
+                // `shell_integration` branch: `shell.env` has nothing to do
+                // with command blocks, and hanging it off that switch would
+                // make one setting silently disable another.
+                let settings =
+                    zest_config::load(&zest_config::Options::default()).resolved.settings;
                 // After `command_line` is settled, because which shell this is
                 // decides what gets injected -- and a client may have asked for
                 // something that is not a shell at all.
+                let injected_from = spec.env.len();
                 if self.config.shell_integration {
                     spec.enable_shell_integration(&shell_integration_dir());
-                    // The shell runs on *this* machine, so this machine's
-                    // settings decide its prompt (the ROADMAP's rule for
-                    // every shell-integration switch). Read at spawn, like
-                    // the offer reads profiles on demand: a session keeps
-                    // the prompt it started with, which is also what the
-                    // setting's `Restart` invalidation class promises.
-                    let load = zest_config::load(&zest_config::Options::default());
-                    if load.resolved.settings.prompt.compact_ps1 {
+                    if settings.prompt.compact_ps1 {
                         spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
                     }
                 }
+                let injected = spec.injected_since(injected_from);
+                // This machine's `shell.env` first, then whatever the launch
+                // carried, so the more specific of the two wins -- the order
+                // `apply_shell_settings` states app-side, now obeyed on the
+                // path every ordinary session actually takes. Until #488 the
+                // daemon applied neither, so `shell.env` was a setting that
+                // did nothing outside `--no-daemon`.
+                let configured = settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone()));
+                spec.layer_env(configured.chain(env), &injected);
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
                     Ok(created) => {
                         vec![HostMessage::Sessions {
@@ -1416,7 +1555,10 @@ impl Connection {
             ClientMessage::Input { session, bytes } => {
                 match self.registry.get(session.session) {
                     Some(s) => {
-                        s.write(&bytes);
+                        // The retention, spent: the connection knows which
+                        // client proved itself, and the session latches it so
+                        // the block this input opens can say who ran it.
+                        s.write(&bytes, self.served().and_then(|w| w.id));
                         Vec::new()
                     }
                     None => vec![Self::no_such(session)],
@@ -1588,14 +1730,23 @@ impl Connection {
 
     /// Complete the handshake and start serving.
     fn welcome(&mut self) -> Vec<HostMessage> {
+        // Read off the transcript before the gate replaces the handshake that
+        // owns it. Who proved themselves is what every later authority check
+        // asks about, and what a command block records as its author.
+        let mut who = None;
         if let Some(h) = self.handshake() {
             if let Some(t) = h.transcript() {
                 tracing::info!(
                     client = %t.client.short(),
                     label = %t.client_label,
                     remote = %self.remote,
+                    // The audit line is the cheapest place this belongs: it is
+                    // the one record that says which connections gave up
+                    // device authority and which kept it.
+                    agent = self.declared_agent,
                     "client authenticated"
                 );
+                who = Some((t.client, t.client_label.clone()));
                 // Best-effort: a client is served whether or not the timestamp
                 // reaches the disk, and refusing over it would turn a full disk
                 // into an outage.
@@ -1606,7 +1757,11 @@ impl Connection {
                     .touch(t.client, std::time::SystemTime::now());
             }
         }
-        self.gate = Gate::Served;
+        let (id, label) = match who {
+            Some((id, label)) => (Some(id), label),
+            None => (None, String::new()),
+        };
+        self.gate = Gate::Served(Box::new(Client { id, label, agent: self.declared_agent }));
         self.pending = None;
         // Exactly here, and only once: the gate has opened. The LAN listener
         // disarms its watchdog and gives back its mid-handshake slot.
@@ -1630,15 +1785,17 @@ impl Connection {
                 self.offer_watch_token = Some(source.watch(waker));
             }
         }
-        // The approval-modal subscription, gated by the transport: only a
-        // connection that could answer (`may_approve_devices`) is told what
-        // is waiting, so the codes never leave the machine. Unlike sessions,
+        // The approval-modal subscription, gated by the same rule that
+        // answers a `PairingDecision`: only a connection that *could* answer
+        // is told what is waiting, so the codes never leave the machine — and
+        // never reach an agent, whose model would then have a matching code in
+        // its context for a device it is not allowed to approve. Unlike sessions,
         // `seen_pairing_generation` is not snapped to current here — a
         // request already waiting when the app connects must be replayed by
         // the first poll, or a modal only ever shows for requests that
         // arrive while the app happens to be running.
         if self.watch_pairings
-            && self.auth.may_approve_devices()
+            && self.device_authority().is_ok()
             && self.pairing_watch_token.is_none()
         {
             if let Some(waker) = self.waker.clone() {
@@ -2167,6 +2324,22 @@ mod tests {
         watch_pairings: bool,
         watch_hosts: bool,
     ) -> Peer {
+        authenticate_declaring(c, client, watch_sessions, watch_pairings, watch_hosts, false)
+    }
+
+    /// [`authenticate_identity`], for a client that declares what kind it is.
+    ///
+    /// A separate wrapper rather than a fourth positional `bool` on the one
+    /// above: every existing caller would have grown a `false` saying nothing
+    /// about which flag it was, and only the handful of tests below care.
+    fn authenticate_declaring(
+        c: &mut Connection,
+        client: &std::sync::Arc<zest_mesh::identity::ClientIdentity>,
+        watch_sessions: bool,
+        watch_pairings: bool,
+        watch_hosts: bool,
+        agent: bool,
+    ) -> Peer {
         let client = std::sync::Arc::clone(client);
         // The shared client handshake, not a hand-rolled one: a test peer that
         // derived its key differently would fail every frame *after* the
@@ -2192,6 +2365,7 @@ mod tests {
                 // directly; every other one must look like a client that
                 // never asked, which is the case the gate exists for.
                 watch_signals: false,
+                agent,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -2366,6 +2540,215 @@ mod tests {
         };
         assert_eq!(*client, device);
         assert!(code.is_empty(), "a tombstone carries no code — there is nothing to compare");
+    }
+
+    /// A loopback connection that declared `Hello.agent`, with a device
+    /// already waiting to be approved.
+    fn agent_watcher(
+        auth: &Arc<crate::auth::Authenticator>,
+        registry: &Arc<Registry>,
+        watch_pairings: bool,
+    ) -> (Connection, Peer) {
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(registry),
+            // `Auth::Transport` -- the loopback socket, which on its own says
+            // yes. The refusal under test must come from the declaration and
+            // from nothing else.
+            crate::auth::Auth::Transport(Arc::clone(auth)),
+            "test",
+        );
+        c.set_waker(Box::new(|| {}));
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        let peer = authenticate_declaring(&mut c, &identity, false, watch_pairings, false, true);
+        (c, peer)
+    }
+
+    #[test]
+    fn an_agent_may_not_approve_devices() {
+        // The hole this closes: `may_approve_devices` asked which *socket* a
+        // message arrived on, so every loopback client could enrol an
+        // arbitrary remote key unattended -- an agent included, on the say-so
+        // of whatever it had just read out of a terminal.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let device = ClientId::from_bytes([0xd0; 32]);
+        let (_handle, decided) = pending_request(&auth, device);
+        let (mut c, mut peer) = agent_watcher(&auth, &registry, false);
+
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::PairingDecision { client: device, approve: true },
+        );
+        let [HostMessage::Error { message, .. }] = &out[..] else {
+            panic!("an agent's pairing decision must be refused, got {out:?}");
+        };
+        assert!(
+            message.contains("agent"),
+            "the refusal must say which rule refused: \"only a local client\" is a lie to \
+             an agent on the loopback socket, and that is exactly this case, got {message:?}"
+        );
+        // The assertion that matters. A test checking only the message would
+        // pass against a daemon that answered rudely and enrolled the device
+        // anyway.
+        assert_eq!(
+            *decided.lock().expect("decision lock"),
+            None,
+            "the device must still be waiting: refusing in words while approving in fact \
+             is the bug wearing the fix's clothes"
+        );
+    }
+
+    #[test]
+    fn an_agent_may_not_enroll_this_machine() {
+        // Joining the machine to an account is the same authority as approving
+        // a device, so it is refused by the same rule -- and refused *first*,
+        // before the enrolment seam is consulted, or a self-declared agent
+        // could still make the daemon reach for a keychain and a network on
+        // demand.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let (mut c, mut peer) = agent_watcher(&auth, &registry, false);
+
+        let out = peer.send(&mut c, &ClientMessage::Enroll { code: "ABC123".into() });
+        let [HostMessage::Error { message, .. }] = &out[..] else {
+            panic!("an agent's enrolment must be refused as an error, got {out:?}");
+        };
+        assert!(
+            message.contains("agent"),
+            "the refusal must name the rule that refused, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn an_agent_is_never_subscribed_to_the_approval_queue() {
+        // `PairingRequested` carries the six-digit code a person compares.
+        // Refusing an agent's *answer* while still pushing it the *code*
+        // would close one door and leave the other open -- the code would sit
+        // in a model's context for a device it is not allowed to approve.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let device = ClientId::from_bytes([0xd1; 32]);
+        let (_handle, _decided) = pending_request(&auth, device);
+        let (mut c, _peer) = agent_watcher(&auth, &registry, true);
+
+        let pushed = c.poll();
+        assert!(
+            pushed.is_empty(),
+            "an agent asked to watch pairings and must hear nothing, got {pushed:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_agent_is_refused_for_being_remote_not_for_being_an_agent() {
+        // A remote agent fails both tests, and which one it is told matters:
+        // the transport rule would refuse this connection even if it stopped
+        // declaring itself, so naming the declaration would point it at a
+        // change that fixes nothing -- and the audit line would say "an agent
+        // tried to approve a device" where the fact worth seeing is that
+        // something off this machine did.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        auth.trust_now(identity.client_id(), "trusted-lan").expect("trust");
+
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Proof(Arc::clone(&auth)),
+            "192.168.1.42:51314",
+        );
+        let mut peer = authenticate_declaring(&mut c, &identity, false, false, false, true);
+
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::PairingDecision {
+                client: ClientId::from_bytes([0xd3; 32]),
+                approve: true,
+            },
+        );
+        let [HostMessage::Error { message, .. }] = &out[..] else {
+            panic!("a remote connection's pairing decision must be refused, got {out:?}");
+        };
+        assert!(
+            message.contains("local"),
+            "the transport is the true and more fundamental refusal here, got {message:?}"
+        );
+        assert!(
+            !message.contains("agent"),
+            "naming the declaration would point a remote client at a change that would \
+             not help it, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_client_that_is_not_an_agent_still_approves_devices() {
+        // The regression guard. Every assertion above also holds for a gate
+        // that simply refused everyone, which would break the desktop
+        // approval modal -- the one client this authority exists to serve.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let device = ClientId::from_bytes([0xd2; 32]);
+        let (_handle, decided) = pending_request(&auth, device);
+
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(Arc::clone(&auth)),
+            "test",
+        );
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        let mut peer = authenticate_identity(&mut c, &identity, false, false, false);
+
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::PairingDecision { client: device, approve: true },
+        );
+        assert!(out.is_empty(), "a loopback decision is honoured silently, got {out:?}");
+        assert_eq!(
+            *decided.lock().expect("decision lock"),
+            Some(zest_mesh::pairing::Decision::Approve),
+            "a person's client must still be able to answer the modal"
+        );
+    }
+
+    #[test]
+    fn the_daemon_remembers_which_client_it_served() {
+        // The retention both halves of this change spend: without it the
+        // refusals above would all still pass on a daemon that kept the flag
+        // and dropped the id, and a command block would have nobody to name.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Transport(Arc::clone(&auth)),
+            "test",
+        );
+        assert!(
+            c.served().is_none(),
+            "nothing may be stamped with, or gated on, an identity nobody has proved yet"
+        );
+
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        let _peer = authenticate_identity(&mut c, &identity, false, false, false);
+
+        let who = c.served().expect("a served connection knows who it served");
+        assert_eq!(
+            who.id,
+            Some(identity.client_id()),
+            "the retained id must be the one that signed the transcript, not a placeholder"
+        );
+        assert_eq!(who.label, "test", "the label is signed too, so it is worth keeping");
+        assert!(!who.agent, "a client that never declared itself an agent is not one");
     }
 
     #[test]
@@ -2990,6 +3373,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
+                env: Vec::new(),
             },
         );
 
@@ -3032,6 +3416,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
+                env: Vec::new(),
             },
         );
         let [HostMessage::Sessions { created: Some(id), .. }] = &out[..] else {
@@ -3110,6 +3495,7 @@ mod tests {
                 watch_pairings: false,
                 watch_hosts: false,
                 watch_signals: false,
+                agent: false,
             },
         );
         let [HostMessage::Challenge { nonce, host, label, version, dh, signature }] = &out[..]
@@ -3145,11 +3531,155 @@ mod tests {
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         }
     }
 
     fn echo_cmd() -> String {
         if cfg!(windows) { "cmd.exe /c echo probe".into() } else { "/bin/echo probe".into() }
+    }
+
+    /// A child that writes one environment variable to a file, so the
+    /// assertion is on the child's *environment* rather than on whatever
+    /// reached a grid.
+    ///
+    /// A file, not the terminal: the daemon's own view of a session is its
+    /// listing, and a keyframe would have to be decoded before it could be
+    /// read -- two layers between the claim and the evidence, both of which
+    /// have their own bugs. Each platform's spelling is chosen so that an
+    /// *unset* variable writes nothing rather than something — see the two
+    /// branches; getting that wrong makes both of these tests pass for a
+    /// reason unrelated to the code.
+    ///
+    /// No backslashes anywhere in the command line: `split_command_line` eats
+    /// them even inside double quotes (#285), which is how two daemon fixtures
+    /// were vacuous for months.
+    fn write_env_cmd(var: &str, path: &std::path::Path) -> String {
+        let path = path.display();
+        if cfg!(windows) {
+            // `set VAR`, never `echo %VAR%`: cmd echoes the *literal* text
+            // `%VAR%` when the variable is unset, so the unset case would be
+            // indistinguishable from a value and this whole pair of tests
+            // would pass on Windows for the wrong reason. `set` prints
+            // `VAR=value` and prints nothing at all when there is none.
+            //
+            // No space before `>`: `set VAR >f` looks up the prefix "VAR "
+            // and finds nothing. The target is quoted because a Windows temp
+            // directory routinely has a space in it.
+            format!("cmd.exe /c set {var}> \"{path}\"")
+        } else {
+            // `printenv`, not `printf %s $VAR`: an unquoted expansion
+            // word-splits a value containing a space, and quoting it here
+            // would need backslashes, which `split_command_line` eats even
+            // inside double quotes (#285). Single quotes pass through the
+            // splitter untouched and reach sh, which is what keeps a temp
+            // directory with a space in it from redirecting elsewhere.
+            format!("/bin/sh -c \"printenv {var} > '{path}'\"")
+        }
+    }
+
+    /// What the child recorded, however its shell spells "print one variable".
+    ///
+    /// `printenv` answers with the bare value; `cmd /c set VAR` answers
+    /// `VAR=value`. Normalising here rather than in each test keeps one
+    /// assertion shape across the two platforms — and an unset variable is the
+    /// empty string on both, which is the case that matters.
+    fn env_probe(path: &std::path::Path, var: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = raw.trim();
+        Some(raw.strip_prefix(&format!("{var}=")).unwrap_or(raw).to_string())
+    }
+
+    #[test]
+    fn a_create_sessions_env_reaches_the_child() {
+        // The #488 bug, from the side a user meets it: `shell.env` was a
+        // setting that did nothing, because the only code that applied it --
+        // `apply_shell_settings` in zest-app -- runs on the in-process
+        // `--no-daemon` fallback, and every ordinary session is spawned by the
+        // daemon from a `CreateSession` that had no env field at all. The
+        // field is only half the fix; this asserts the daemon *applies* it,
+        // which is the half a wire round-trip test cannot see (ADR-015: test a
+        // field's value from the far side, not the message that carries it).
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_LAUNCH_ENV", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_LAUNCH_ENV".into(), "from-the-launch".into())],
+            },
+        );
+
+        assert!(
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_LAUNCH_ENV").is_some_and(|v| !v.is_empty())),
+            "the child never wrote the variable, so the launch env did not reach its environment"
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_LAUNCH_ENV").expect("the child wrote it");
+        assert_eq!(
+            got, "from-the-launch",
+            "the value must arrive intact, not merely be present: {got:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_launch_envs_empty_value_unsets_a_variable_the_daemon_inherited() {
+        // The other half of the convention, and the half that only shows up
+        // through a real spawn: `CommandSpec` promises empty-means-unset and
+        // both backends honour it, but nothing asserted that a value arriving
+        // over the wire keeps that meaning rather than setting the variable to
+        // the empty string. Code that tests for presence takes the wrong
+        // branch on the difference.
+        //
+        // The daemon's environment is what a session inherits and it is frozen
+        // at first spawn (AGENTS.md), so this is also the only lever a client
+        // has over a marker the daemon started life with.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("ZESTERM_TEST_DAEMON_INHERITED");
+        std::env::set_var("ZESTERM_TEST_DAEMON_INHERITED", "from-the-daemon");
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-unset-{}", std::process::id()));
+        let _ = std::fs::write(&out, "sentinel");
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_DAEMON_INHERITED", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_DAEMON_INHERITED".into(), String::new())],
+            },
+        );
+
+        assert!(
+            wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| s != "sentinel")),
+            "the child never ran, so nothing here is about the unset convention"
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_DAEMON_INHERITED").expect("the child wrote it");
+        assert!(
+            got.is_empty(),
+            "an empty value must leave the variable genuinely absent, not set to the \
+             daemon's inherited copy: {got:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
     }
 
     /// A child that fails, with a status nothing could have guessed.
@@ -3324,6 +3854,7 @@ mod tests {
             cwd: String::new(),
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
         peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
@@ -3385,6 +3916,7 @@ mod tests {
                 watch_pairings: false,
                 watch_hosts: false,
                 watch_signals: false,
+                agent: false,
             },
         );
         assert!(
@@ -3453,6 +3985,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
@@ -3540,7 +4073,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3590,7 +4129,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3648,7 +4193,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3689,6 +4240,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3720,6 +4272,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3761,6 +4314,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3801,6 +4355,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3849,6 +4404,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3892,6 +4448,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 100,
                 rows: 30,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3921,6 +4478,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3962,6 +4520,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4009,6 +4568,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4050,6 +4610,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4129,6 +4690,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4164,6 +4726,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4200,6 +4763,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4383,6 +4947,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4410,6 +4975,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4450,6 +5016,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4506,6 +5073,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4556,6 +5124,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4597,6 +5166,7 @@ mod tests {
                     cwd: String::new(),
                     cols: 80,
                     rows: 24,
+                    env: Vec::new(),
                 },
             );
             let addr = registry.list(config().host)[0].addr;
@@ -4637,6 +5207,7 @@ mod tests {
                     cwd: String::new(),
                     cols: 80,
                     rows: 24,
+                    env: Vec::new(),
                 },
             );
         }
@@ -4661,6 +5232,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         for info in registry.list(config().host) {
@@ -4688,6 +5260,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;

@@ -1059,6 +1059,17 @@ impl TabStrip {
         }
     }
 
+    /// Whether `addr` names a tab in this strip, or a pane inside one.
+    ///
+    /// The routing question with several windows: a wakeup stamped with a
+    /// session address goes to the window whose strip holds it, and a pane's
+    /// address counts as held — a split pane's shell exiting must reach the
+    /// window that shows the pane, not be dropped as nobody's.
+    #[must_use]
+    pub fn owns(&self, addr: SessionAddr) -> bool {
+        self.tabs.iter().any(|t| t.addr == addr || t.panes.iter().any(|p| p.addr == addr))
+    }
+
     /// The tab holding `addr` as one of its *split* panes, if any.
     pub fn find_pane_owner(&mut self, addr: SessionAddr) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.panes.iter().any(|p| p.addr == addr))
@@ -1273,15 +1284,6 @@ impl TabStrip {
         Some(tab)
     }
 
-    /// Drop every tab — the window-close path, where dropping *is* the
-    /// detach (`RemoteSession`'s destructor sends it).
-    pub fn clear(&mut self) {
-        self.tabs.clear();
-        self.active = 0;
-        self.settings_open = false;
-        self.profiles_open = false;
-        self.active_app = None;
-    }
 }
 
 #[cfg(test)]

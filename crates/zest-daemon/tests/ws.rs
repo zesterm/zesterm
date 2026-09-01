@@ -176,6 +176,7 @@ fn handshake(ws: &mut Ws, frames: &mut FrameReader, ch: &mut Chan, identity: &Ar
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         },
     );
 
@@ -230,6 +231,7 @@ fn a_paired_device_drives_a_session_over_websocket() {
             cwd: String::new(),
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         },
     );
     let listing = wait_for(&mut ws, &mut frames, &mut ch, |m| {
@@ -446,6 +448,7 @@ fn the_daemons_own_client_codec_interoperates() {
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     })
     .expect("encode");
     std::io::Write::write_all(&mut writer, &hello).expect("write");

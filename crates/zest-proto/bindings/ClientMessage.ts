@@ -96,11 +96,50 @@ watch_hosts: boolean,
  * an old daemon ignores the flag and sends nothing, which is exactly
  * today's behaviour at both ends.
  */
-watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_signals: boolean, 
+/**
+ * This connection is a program acting for a model, not a person.
+ *
+ * Set once at startup, before the client has read a byte of terminal
+ * text, and it only ever *removes* authority: a connection that says
+ * this is refused [`Self::PairingDecision`] and [`Self::Enroll`] even
+ * on loopback, and is never subscribed to the approval queue, so the
+ * six-digit matching code never enters a model's context.
+ *
+ * `#[serde(default)]` for `watch_sessions`' reason, with one
+ * difference worth stating plainly: absent means `false`, and `false`
+ * is the *permissive* answer. It has to be — every already-shipped
+ * client omits the field, and a default that revoked their authority
+ * would break the desktop approval modal against a new daemon. So it
+ * binds a **cooperating** client that declares itself, and is not a
+ * gate against one that stays quiet; `zest_daemon::auth::Auth` carries
+ * the rest of that argument.
+ */
+agent: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */
-command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
+command: string, cwd: string, cols: number, rows: number, 
+/**
+ * Extra environment for the child, layered over the host's own.
+ *
+ * Ordered and last-wins, and **an empty value unsets** — the same
+ * convention `CommandSpec.env` and the `shell.env` setting already
+ * carry, kept identical here so a launch can be handed straight to
+ * the pty rather than translated on the way.
+ *
+ * No new privilege: `command` is already arbitrary execution on the
+ * host, which is the argument `ReadFile` below makes about itself.
+ * What this *is* is the seam a per-profile environment needs — without
+ * it `shell.env` is a setting that does nothing, because the only
+ * path that applied it was the in-process `--no-daemon` fallback
+ * (#488).
+ *
+ * Skipped when empty so an ordinary launch is byte-identical to what
+ * a daemon predating the field sent, and the conformance fixtures do
+ * not move.
+ */
+env: Array<[string, string]>, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
 /**
  * The file, as the host reads paths. Absolute, or resolved against
  * `cwd`; opaque to the client, like `CreateSession.cwd`.

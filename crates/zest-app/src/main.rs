@@ -17,12 +17,14 @@ mod console;
 mod editor;
 mod fair_mutex;
 mod fleet;
+mod instance;
 mod keymap;
 mod launch;
 mod launcher;
 mod motion;
 mod pipeline_cache;
 mod platform;
+mod process;
 mod profiles_ui;
 mod remote;
 mod route;
@@ -35,10 +37,11 @@ mod tabs_state;
 mod text_field;
 mod themes;
 mod window_chrome;
+mod windows_state;
 
 use winit::event_loop::EventLoop;
 
-use app::App;
+use process::{FirstOnly, Process, WindowTemplate};
 use session::Wakeup;
 
 /// Rebuild a command line from separate arguments.
@@ -257,6 +260,16 @@ struct Flags {
     shot_delay: Option<std::time::Duration>,
     shot_size: Option<(f64, f64)>,
     screen: Option<app::StartScreen>,
+    /// `-e`, joined. Its own field rather than a `shell.command` key in the
+    /// layer, because a running instance can take a command and cannot
+    /// take a config layer (#497); `main` still writes it into the layer for
+    /// the local path.
+    command: Option<String>,
+    /// Process-global by construction (an environment variable), so a
+    /// launch carrying it can never be someone else's window.
+    simulated_latency: bool,
+    /// `--new-window` / `--new-tab` / `--new-instance`.
+    launch: Option<zest_config::settings::LaunchTarget>,
 }
 
 /// The parse ended without producing a run.
@@ -405,6 +418,7 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 // thread exists -- the same moment every other process-wide
                 // default here is decided.
                 unsafe { std::env::set_var("ZESTERM_SIMULATED_LATENCY_MS", ms) };
+                f.simulated_latency = true;
                 i += 2;
             }
             "--no-daemon" => {
@@ -432,6 +446,22 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
             }
             "--scroll-on-output" => {
                 f.cli.set_bool("scrolling.scroll_on_output", true);
+                i += 1;
+            }
+            // One launch's answer to `window.launch`. Mutually exclusive:
+            // two of them is a contradiction, not a precedence.
+            flag @ ("--new-window" | "--new-tab" | "--new-instance") => {
+                use zest_config::settings::LaunchTarget;
+                if f.launch.is_some() {
+                    return Err(EarlyExit::Refused(
+                        "--new-window, --new-tab and --new-instance contradict each other".into(),
+                    ));
+                }
+                f.launch = Some(match flag {
+                    "--new-window" => LaunchTarget::Window,
+                    "--new-tab" => LaunchTarget::Tab,
+                    _ => LaunchTarget::Instance,
+                });
                 i += 1;
             }
             "--screenshot" => {
@@ -485,7 +515,7 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                 if rest.is_empty() {
                     return Err(EarlyExit::Refused("-e needs a command".into()));
                 }
-                f.cli.set_str("shell.command", &join_command(&rest));
+                f.command = Some(join_command(&rest));
                 break;
             }
             "--themes" => {
@@ -547,6 +577,11 @@ fn parse_args(args: &[String]) -> Result<Flags, EarlyExit> {
                      --attach-probe    report what attaching to the daemon cost, then exit\n\
                      --no-daemon       own the pty in this process, do not attach\n\
                      --new-session     start a fresh shell instead of restoring your tabs\n\
+                     --new-window      open in the running zesterm, as a window (the default\n\
+                     \x20                 while one runs; `window.launch` in the config)\n\
+                     --new-tab         open in the running zesterm, as a tab in its\n\
+                     \x20                 focused window\n\
+                     --new-instance    a separate process, as if none were running\n\
                      --screen <name>   open on fleet|themes|settings|settings-menu|\n\
                      \x20                 palette|dir-picker|launcher|profiles|profiles-rename|\n\
                      \x20                 open-file|editor instead of the terminal\n\
@@ -605,7 +640,7 @@ fn main() -> std::process::ExitCode {
     // the config file disagrees with.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Flags {
-        cli,
+        mut cli,
         profile,
         startup_probe,
         no_daemon,
@@ -616,6 +651,9 @@ fn main() -> std::process::ExitCode {
         shot_delay,
         shot_size,
         screen,
+        command,
+        simulated_latency,
+        launch,
     } = match parse_args(&args) {
         Ok(flags) => flags,
         Err(EarlyExit::Handled) => return std::process::ExitCode::SUCCESS,
@@ -641,6 +679,13 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
+    // Whether this process carries a config layer of its own — decided before
+    // `-e` joins it, because a command is something a running instance can
+    // take and a layer is not (#497).
+    let own_config = !cli.table.is_empty() || no_daemon || simulated_latency;
+    if let Some(cmd) = &command {
+        cli.set_str("shell.command", cmd);
+    }
     // Kept, not consumed: a config file save re-runs the cascade, and the flags
     // have to be replayed on top or `--size 20` would vanish the first time the
     // user edits anything.
@@ -664,58 +709,104 @@ fn main() -> std::process::ExitCode {
         tracing::debug!(key = %key, source = %source, "setting");
     }
 
+    // A running zesterm? Ask it first, and claim the endpoint when nobody
+    // holds it — here, before the window exists and never between creating
+    // it and showing it (ADR-007): a claim is one flock or one
+    // `CreateNamedPipeW`. Serving starts after the first paint.
+    let plan = instance::classify(
+        &instance::LaunchFlags {
+            probe: shot.is_some() || startup_probe || attach_probe,
+            own_config,
+            target: launch,
+            command: command.clone(),
+            profile: profile_name.clone(),
+            screen,
+            attach: attach_addr.clone(),
+        },
+        load.resolved.settings.window.launch,
+    );
+    let mut claim = None;
+    if let Some(request) = &plan.forward {
+        let path = instance::socket_path();
+        match instance::forward(&path, request, instance::FORWARD_BUDGET) {
+            instance::Verdict::Opened => return std::process::ExitCode::SUCCESS,
+            instance::Verdict::Refused(why) => {
+                eprintln!("{why}");
+                return std::process::ExitCode::from(1);
+            }
+            instance::Verdict::NoInstance if plan.serve => {
+                claim = instance::claim().ok();
+                if claim.is_none() {
+                    // Lost the race to another launch that is still bringing
+                    // its window up: it binds before it paints, so its
+                    // endpoint exists now and answers within its own budget.
+                    for _ in 0..50 {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        match instance::forward(&path, request, instance::FORWARD_BUDGET) {
+                            instance::Verdict::Opened => return std::process::ExitCode::SUCCESS,
+                            instance::Verdict::Refused(why) => {
+                                eprintln!("{why}");
+                                return std::process::ExitCode::from(1);
+                            }
+                            instance::Verdict::NoInstance => continue,
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            instance::Verdict::NoInstance => {}
+            instance::Verdict::OtherBuild => {
+                tracing::info!("the running zesterm is another build; opening a separate one");
+            }
+            instance::Verdict::NoAnswer => {
+                tracing::info!("the running zesterm did not answer in time; opening a separate one");
+            }
+        }
+    } else if plan.serve {
+        claim = instance::claim().ok();
+    }
+
     let event_loop = EventLoop::<Wakeup>::with_user_event()
         .build()
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
 
-    let mut app = App::new(load.resolved, cli_table, profile_name, proxy);
-    if startup_probe {
-        app = app.with_startup_probe();
+    // Contradiction, not precedence: one flag says "no daemon anywhere", the
+    // other names one to attach to. Guessing which the user meant produces a
+    // window whose shell is on the wrong machine.
+    if attach_addr.is_some() && no_daemon {
+        eprintln!("--attach and --no-daemon contradict each other");
+        return std::process::ExitCode::from(2);
     }
-    if no_daemon {
-        app = app.with_no_daemon();
-    }
-    if attach_probe {
-        app = app.with_attach_probe();
-    }
-    if new_session {
-        app = app.with_new_session();
-    }
-    if let Some(shot) = shot {
-        // In-process by default, and not as a shortcut: on macOS the daemon
-        // blocks on a Keychain prompt after every rebuild and the app falls
-        // back silently after 2s (see "Traps already paid for"). A screenshot
-        // that sometimes waits two seconds and sometimes photographs a
-        // half-attached session is not a measurement of anything. `--attach`
-        // still wins, for the case where the remote session *is* the subject.
-        if attach_addr.is_none() {
-            app = app.with_no_daemon();
-        }
-        app = app.with_screenshot(shot);
-    }
-    if let Some(addr) = attach_addr {
-        // Contradiction, not precedence: one flag says "no daemon anywhere",
-        // the other names one to attach to. Guessing which the user meant
-        // produces a window whose shell is on the wrong machine.
-        if no_daemon {
-            eprintln!("--attach and --no-daemon contradict each other");
-            return std::process::ExitCode::from(2);
-        }
-        app = app.with_attach_addr(addr);
-    }
-    if let Some(screen) = screen {
-        app = app.with_start_screen(screen);
-    }
-    event_loop.run_app(&mut app).expect("run");
+    // A screenshot is in-process by default, and not as a shortcut: on macOS
+    // the daemon blocks on a Keychain prompt after every rebuild and the app
+    // falls back silently after 2s (see "Traps already paid for"). A
+    // screenshot that sometimes waits two seconds and sometimes photographs a
+    // half-attached session is not a measurement of anything. `--attach`
+    // still wins, for the case where the remote session *is* the subject.
+    let no_daemon = no_daemon || (shot.is_some() && attach_addr.is_none());
+
+    // The template every window is built from, and the flags only the first
+    // one gets: a probe or a screenshot measures *a* window (ADR-018).
+    let template = WindowTemplate {
+        resolved: load.resolved,
+        cli_layer: cli_table,
+        profile: profile_name,
+        no_daemon,
+        attach_addr,
+        new_session,
+    };
+    let first = FirstOnly { startup_probe, attach_probe, screenshot: shot, start_screen: screen };
+    let mut process = Process::new(template, first, proxy, claim);
+    event_loop.run_app(&mut process).expect("run");
 
     // The screenshot's exit code, carried out of the event loop rather than
     // taken by `process::exit` from inside it: the pty, the clipboard and the
     // saved tab state all want their `Drop`, and `main` returning is the only
     // way they get it. A screenshot that silently did not happen is exactly
     // the failure a caller needs to see, so it must survive the trip.
-    let code = app.exit_code();
-    drop(app);
+    let code = process.exit_code();
+    drop(process);
     std::process::ExitCode::from(code)
 }
 

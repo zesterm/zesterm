@@ -126,6 +126,7 @@ test('every client message round-trips through the real decoder', () => {
       watch_pairings: false,
       watch_hosts: false,
       watch_signals: false,
+      agent: false,
     },
     { t: 'auth', signature: 'ef'.repeat(64) },
     { t: 'pairing_decision', client: 'cd'.repeat(32), approve: false },
@@ -156,6 +157,7 @@ test('the wire map is built in declaration order, whatever order the caller used
   const backwards = {
     watch_hosts: false,
     watch_signals: false,
+    agent: false,
     watch_pairings: false,
     watch_sessions: false,
     nonce: '00'.repeat(32),
@@ -176,6 +178,7 @@ test('the wire map is built in declaration order, whatever order the caller used
     watch_pairings: false,
     watch_hosts: false,
     watch_signals: false,
+    agent: false,
   };
   assert.deepEqual(encodeClientMessage(backwards), encodeClientMessage(forwards));
 });

@@ -320,6 +320,7 @@ mod tests {
             started_ms: None,
             ended_ms: None,
             context: None,
+            author: None,
         }
     }
 

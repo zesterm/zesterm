@@ -68,6 +68,19 @@ export type ClientMessage =
        * enough to survive them.
        */
       readonly watch_signals: boolean;
+      /**
+       * This connection is a program acting for a model, not a person.
+       *
+       * Always `false` from a browser — somebody is looking at it. Present
+       * because the encoder is held byte-equal to `rmp_serde::to_vec_named`,
+       * which writes every field of the Rust struct whether or not it is the
+       * default, so omitting it here would fail the fixture rather than
+       * degrade politely.
+       *
+       * A daemon refuses `pairing_decision` and `enroll` from a connection
+       * that sets it, even over loopback.
+       */
+      readonly agent: boolean;
     }
   | {
       readonly t: 'auth';
@@ -170,6 +183,7 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
         watch_pairings: msg.watch_pairings,
         watch_hosts: msg.watch_hosts,
         watch_signals: msg.watch_signals,
+        agent: msg.agent,
       };
       break;
     case 'auth':

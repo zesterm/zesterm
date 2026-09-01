@@ -54,7 +54,7 @@ pub use auth::{Auth, Authenticator};
 pub use lan::{Gate, LanListener};
 pub use relay::Relay;
 pub use ws::WsListener;
-pub use local::{connect, default_socket_path, listen};
+pub use local::{connect, default_socket_path, listen, socket_path_for, LocalListener, LocalStream};
 // The client half of starting a local daemon, beside the client half of talking
 // to one. `zest-app` and `zest-mcp` both reach for it (#274).
 pub use spawn::{find_or_spawn, resolve_daemon_binary, Attached, DaemonStartError};

@@ -61,6 +61,13 @@ permission and works over SSH:
 zesterm --screenshot shot.png [--screenshot-size 1200x800] [--screenshot-delay 400]
 ```
 
+Run `zesterm` while one is already running and it opens a new window *in the
+running one* — ⌘N / Ctrl+Shift+N from the keyboard does the same — rather
+than a second process. `window.launch` in the config chooses `window`, `tab`
+(in the focused window) or `instance` (a separate process), and `--new-window`,
+`--new-tab` and `--new-instance` override it for one launch; `-e`, `--profile`
+and the directory you ran it from travel with the request.
+
 ## Layout
 
 A Rust workspace under `crates/` (13 crates), plus `xtask/` for the repo's gates,

@@ -349,6 +349,30 @@ pub struct BlockPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub context: Option<BlockContextPayload>,
+    /// The client the daemon saw write the input that started this command.
+    ///
+    /// A [`crate::ClientId`] here where `zest_core::Block` holds thirty-two
+    /// opaque bytes, converted in `from_block`/`to_block` exactly as `LineId`
+    /// becomes `i64` above: `zest-proto` depends on `zest-core`, so the type
+    /// that names a device can only live on this side.
+    ///
+    /// Hex on the wire by way of `ClientId`'s own `crate::hex` binding, which
+    /// is also what keeps it a `string` in TypeScript — a bare `[u8; 32]`
+    /// would reach a client as a 32-element array and the binding would say
+    /// `Array<number>`. (The `rmp-serde` integer-width trap does not apply: it
+    /// is a string, not a number.)
+    ///
+    /// Additive like `context`, and unlike it costs no extra delta: it is
+    /// stamped in the same `advance` that turns the block `Running`, so
+    /// `diff_blocks` was already resending the block that carries it.
+    ///
+    /// **Provenance, never authorization.** OSC 133 decides *when* a block
+    /// opens, so a shell can open one nobody typed and it will bear the last
+    /// writer's id; it cannot make one bear a different client's. See
+    /// `zest_core::blocks::Block::author`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub author: Option<crate::ClientId>,
 }
 
 /// [`zest_core::blocks::BlockContext`], on the wire. Mirrored for the reason
@@ -396,6 +420,7 @@ impl BlockPayload {
                 venv: c.venv.clone(),
                 kube: c.kube.clone(),
             }),
+            author: b.author.map(crate::ClientId::from_bytes),
         }
     }
 
@@ -424,6 +449,7 @@ impl BlockPayload {
                 venv: c.venv.clone(),
                 kube: c.kube.clone(),
             }),
+            author: self.author.map(|c| c.0),
         }
     }
 }
@@ -508,6 +534,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_author_survives_the_round_trip_as_the_client_id_it_was() {
+        // The applier is one of the three readers (#313): a field it drops is
+        // a replica quietly poorer than its host, and here that is the only
+        // record of who ran a command.
+        let mut b = block_fixture();
+        b.author = Some([0xa1; 32]);
+        let back = BlockPayload::from_block(&b).to_block();
+        assert_eq!(
+            back.author,
+            Some([0xa1; 32]),
+            "the bytes must come back as the bytes they were: core cannot name a \
+             ClientId, so this conversion is the only thing holding the two shapes together"
+        );
+
+        b.author = None;
+        assert_eq!(
+            BlockPayload::from_block(&b).to_block().author,
+            None,
+            "an unattributed block must stay unattributed rather than gaining a zero id"
+        );
+    }
+
+    #[test]
+    fn an_author_rides_the_wire_as_hex_rather_than_a_byte_list() {
+        // `crate::hex` is the rule for every fixed-width value here. A bare
+        // byte array would reach a client as a 32-element list and the
+        // TypeScript binding would say `Array<number>`, which every consumer
+        // would then have to re-assemble.
+        let mut b = block_fixture();
+        b.author = Some([0xab; 32]);
+        let wire = rmp_serde::to_vec_named(&BlockPayload::from_block(&b)).expect("encode");
+        let json: serde_json::Value =
+            rmp_serde::from_slice(&wire).expect("decode back to a generic shape");
+        assert_eq!(
+            json["author"].as_str(),
+            Some("ab".repeat(32).as_str()),
+            "the author must be one hex string, got {:?}",
+            json["author"]
+        );
+    }
+
+    #[test]
+    fn a_block_from_a_host_that_never_knew_authors_decodes_rather_than_failing() {
+        // The additive rule, tested rather than asserted in a comment: a frame
+        // a client cannot decode does not go unread, it ends the connection
+        // (`DaemonClient::recv` maps it to a transport error). So an old
+        // host's block, which carries no `author` key at all, has to parse.
+        let mut b = block_fixture();
+        b.author = None;
+        let wire = rmp_serde::to_vec_named(&BlockPayload::from_block(&b)).expect("encode");
+        let json: serde_json::Value = rmp_serde::from_slice(&wire).expect("decode");
+        assert!(
+            json.get("author").is_none(),
+            "`skip_serializing_if` must keep the key off the wire entirely, not send null"
+        );
+        let parsed: BlockPayload = rmp_serde::from_slice(&wire).expect("an old block must decode");
+        assert_eq!(parsed.author, None);
+    }
+
+    /// A minimal running block, for the author tests above.
+    fn block_fixture() -> zest_core::Block {
+        zest_core::Block {
+            id: zest_core::BlockId(7),
+            prompt_line: 10,
+            output_line: Some(11),
+            end_line: None,
+            state: zest_core::BlockState::Running,
+            command: "make".into(),
+            cwd: "/tmp".into(),
+            started_ms: Some(1),
+            ended_ms: None,
+            context: None,
+            author: None,
+        }
+    }
+
+    #[test]
     fn a_blocks_context_survives_the_round_trip_and_its_absence_does_too() {
         // #429: the applier is one of the three readers (#313), and a field
         // it drops is a replica quietly poorer than its host.
@@ -526,6 +629,7 @@ mod tests {
                 venv: "ml".into(),
                 kube: String::new(),
             }),
+            author: None,
         };
         let back = BlockPayload::from_block(&b).to_block();
         assert_eq!(back.context, b.context, "the stamp must survive both conversions whole");

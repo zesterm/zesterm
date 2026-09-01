@@ -28,12 +28,22 @@ use crate::{DaemonConfig, DaemonError};
 /// daemons and cannot see each other's shells.
 #[must_use]
 pub fn default_socket_path() -> String {
+    socket_path_for("zesterm")
+}
+
+/// A per-user local endpoint by service name, on the daemon's own rules.
+///
+/// `zesterm` is the daemon; `zesterm-app` is the running app's rendezvous for
+/// a second launch (#497). One rule for every name, so a second endpoint
+/// cannot drift into a different idea of "per user" than the first.
+#[must_use]
+pub fn socket_path_for(name: &str) -> String {
     #[cfg(windows)]
     {
         // Named pipes live in a flat kernel namespace, so the user name is what
         // separates two sessions on one machine.
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-        format!(r"\\.\pipe\zesterm-{}", sanitize(&user))
+        format!(r"\\.\pipe\{name}-{}", sanitize(&user))
     }
     #[cfg(unix)]
     {
@@ -41,10 +51,10 @@ pub fn default_socket_path() -> String {
         // exactly the lifetime a session socket wants. Falling back to /tmp
         // means the name has to carry the user itself.
         if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            return format!("{dir}/zesterm.sock");
+            return format!("{dir}/{name}.sock");
         }
         let user = std::env::var("USER").unwrap_or_else(|_| "default".into());
-        format!("/tmp/zesterm-{}.sock", sanitize(&user))
+        format!("/tmp/{name}-{}.sock", sanitize(&user))
     }
 }
 
@@ -158,6 +168,68 @@ mod imp {
         Lock::acquire(path)
     }
 
+    /// One end of a connected local stream.
+    pub type LocalStream = UnixStream;
+
+    /// An exclusive claim on a path *and* the socket bound at it, for as long
+    /// as the value lives.
+    ///
+    /// What `listen` did inline, as a value, so that a second service on this
+    /// machine — the app's own rendezvous for a second launch (#497) — binds
+    /// by the same claim-unlink-bind sequence rather than by a second copy of
+    /// it, which is how one of the two would come to skip the claim.
+    pub struct LocalListener {
+        _lock: Lock,
+        listener: UnixListener,
+        path: String,
+    }
+
+    impl LocalListener {
+        pub fn bind_exclusive(path: &str) -> Result<Self, DaemonError> {
+            // Take the lock *before* unlinking anything.
+            //
+            // The old code unlinked unconditionally, reasoning that a socket
+            // left by a crashed daemon must be removed or the daemon could
+            // never start again. True, and it also means two daemons starting
+            // at once split-brain: the second unlinks the first's socket and
+            // binds its own, the first keeps running on an unlinked path with
+            // its own Registry, and every client that connects afterwards
+            // reaches only one of them. Nothing exercised it while daemons
+            // were started by hand; the app doing find-or-spawn is what would
+            // have.
+            //
+            // The lock also makes the stale-socket case *checked* rather than
+            // assumed: a lock that can be taken proves no live daemon holds
+            // this path, which is exactly the condition under which unlinking
+            // is safe.
+            //
+            // Windows needs none of this -- `FILE_FLAG_FIRST_PIPE_INSTANCE`
+            // makes the loser's create fail outright.
+            let lock = Lock::acquire(path)?;
+            let _ = std::fs::remove_file(path);
+            let listener = bind_private(path)?;
+            Ok(Self { _lock: lock, listener, path: path.to_string() })
+        }
+
+        /// The next client. `&mut` for symmetry with the Windows end, which
+        /// keeps the next pipe instance in the value.
+        pub fn accept(&mut self) -> std::io::Result<LocalStream> {
+            self.listener.accept().map(|(stream, _)| stream)
+        }
+    }
+
+    impl Drop for LocalListener {
+        /// Unlinked while the lock is still held (a `Drop` body runs before
+        /// the fields drop), so no claimant can bind between the two.
+        /// The daemon's `listen` never returns and never reaches this; the
+        /// app's server does, on a clean exit, and a stale socket it left
+        /// behind would cost every later launch a failed connect.
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(format!("{}.lock", self.path));
+        }
+    }
+
     /// Accept clients until the process ends.
     pub fn listen(
         path: &str,
@@ -165,32 +237,11 @@ mod imp {
         registry: Arc<Registry>,
         auth: std::sync::Arc<crate::auth::Authenticator>,
     ) -> Result<(), DaemonError> {
-        // Take the lock *before* unlinking anything.
-        //
-        // The old code unlinked unconditionally, reasoning that a socket left
-        // by a crashed daemon must be removed or the daemon could never start
-        // again. True, and it also means two daemons starting at once
-        // split-brain: the second unlinks the first's socket and binds its own,
-        // the first keeps running on an unlinked path with its own Registry,
-        // and every client that connects afterwards reaches only one of them.
-        // Nothing exercised it while daemons were started by hand; the app
-        // doing find-or-spawn is what would have.
-        //
-        // The lock also makes the stale-socket case *checked* rather than
-        // assumed: a lock that can be taken proves no live daemon holds this
-        // path, which is exactly the condition under which unlinking is safe.
-        //
-        // Windows needs none of this -- `FILE_FLAG_FIRST_PIPE_INSTANCE` makes
-        // the loser's create fail outright.
-        let _guard = Lock::acquire(path)?;
-
-        let _ = std::fs::remove_file(path);
-
-        let listener = bind_private(path)?;
+        let mut listener = LocalListener::bind_exclusive(path)?;
 
         tracing::info!(path, "listening");
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
+        loop {
+            let Ok(stream) = listener.accept() else { continue };
             let config = config.clone();
             let registry = Arc::clone(&registry);
             let auth = std::sync::Arc::clone(&auth);
@@ -210,7 +261,6 @@ mod imp {
                 }
             });
         }
-        Ok(())
     }
 
     /// Connect to a daemon already running.
@@ -410,19 +460,47 @@ mod imp {
         pub fn try_clone(&self) -> io::Result<Self> {
             Ok(Self { shared: std::sync::Arc::clone(&self.shared) })
         }
+
+        /// Abort whatever another thread has parked in on this handle.
+        ///
+        /// There is no read timeout on an overlapped pipe — `GetOverlappedResult`
+        /// waits forever — so a caller that gave up on a peer has to unpark its
+        /// reader from outside: the pending read completes with
+        /// `ERROR_OPERATION_ABORTED`, the reader returns, and the thread ends
+        /// instead of holding a handle for the life of the process.
+        pub fn cancel_io(&self) {
+            use windows_sys::Win32::System::IO::CancelIoEx;
+            // SAFETY: a live handle; a null OVERLAPPED cancels every pending
+            // operation on it from any thread.
+            unsafe { CancelIoEx(self.shared.handle, ptr::null()) };
+        }
     }
 
-    pub fn listen(
-        path: &str,
-        config: DaemonConfig,
-        registry: Arc<Registry>,
-        auth: std::sync::Arc<crate::auth::Authenticator>,
-    ) -> Result<(), DaemonError> {
-        let name = wide(path);
-        let mut first = true;
+    /// One end of a connected local stream.
+    pub type LocalStream = PipeStream;
 
-        tracing::info!(path, "listening");
-        loop {
+    /// An exclusive claim on a pipe name, and the instance waiting for the
+    /// next client.
+    ///
+    /// The unix end's shape (claim, then accept), so a second service — the
+    /// app's rendezvous for a second launch (#497) — shares this loop rather
+    /// than copying it: the overlapped `ConnectNamedPipe` and the
+    /// `ERROR_PIPE_CONNECTED` arm below are the paid-for trap, and a copy is
+    /// how one of them loses it.
+    pub struct LocalListener {
+        name: Vec<u16>,
+        /// The instance created ahead of the next `accept`, so a client
+        /// arriving between two accepts finds an instance to connect to
+        /// rather than `ERROR_FILE_NOT_FOUND`.
+        next: HANDLE,
+    }
+
+    // SAFETY: a HANDLE is a kernel object index; the value moves to the
+    // thread that accepts, and nothing else holds it.
+    unsafe impl Send for LocalListener {}
+
+    impl LocalListener {
+        fn instance(name: &[u16], first: bool) -> Result<HANDLE, DaemonError> {
             // A fresh instance per client. `FILE_FLAG_FIRST_PIPE_INSTANCE` on
             // the first one is what makes a second daemon fail to start rather
             // than silently stealing connections from the first -- two daemons
@@ -448,28 +526,76 @@ mod imp {
             if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
                 return Err(DaemonError::Transport(io::Error::last_os_error().to_string()));
             }
-            first = false;
+            Ok(handle)
+        }
 
-            // Overlapped, because the handle is. A synchronous
-            // `ConnectNamedPipe` against an overlapped handle returns without
-            // waiting, and the server then serves a connection nobody made.
-            let connected = overlapped(handle, |ov| {
-                // SAFETY: `handle` is a live pipe instance.
-                unsafe { ConnectNamedPipe(handle, ov) }
-            });
-            if let Err(e) = connected {
-                use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
-                // A client that connected between Create and Connect is already
-                // there, which the API reports as a failure. It is not one.
-                if e.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
-                    tracing::debug!(error = %e, "connect failed");
-                    // SAFETY: live handle, closed once on this path.
-                    unsafe { CloseHandle(handle) };
-                    continue;
+        /// Claim the name: `Err` means another process already serves it.
+        /// Eager, so "already owned" is known at bind time rather than on
+        /// the first accept.
+        pub fn bind_exclusive(path: &str) -> Result<Self, DaemonError> {
+            let name = wide(path);
+            let next = Self::instance(&name, true)?;
+            Ok(Self { name, next })
+        }
+
+        /// The next client.
+        pub fn accept(&mut self) -> io::Result<LocalStream> {
+            loop {
+                let handle = if self.next.is_null() {
+                    Self::instance(&self.name, false).map_err(|e| io::Error::other(e.to_string()))?
+                } else {
+                    std::mem::replace(&mut self.next, ptr::null_mut())
+                };
+
+                // Overlapped, because the handle is. A synchronous
+                // `ConnectNamedPipe` against an overlapped handle returns
+                // without waiting, and the server then serves a connection
+                // nobody made.
+                let connected = overlapped(handle, |ov| {
+                    // SAFETY: `handle` is a live pipe instance.
+                    unsafe { ConnectNamedPipe(handle, ov) }
+                });
+                if let Err(e) = connected {
+                    use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
+                    // A client that connected between Create and Connect is
+                    // already there, which the API reports as a failure. It
+                    // is not one.
+                    if e.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                        tracing::debug!(error = %e, "connect failed");
+                        // SAFETY: live handle, closed once on this path.
+                        unsafe { CloseHandle(handle) };
+                        continue;
+                    }
                 }
+                // The next instance now, before this client is served: the
+                // gap in which nothing listens is what a second launcher
+                // would otherwise fall into.
+                self.next = Self::instance(&self.name, false).unwrap_or(ptr::null_mut());
+                return Ok(PipeStream::new(handle, true));
             }
+        }
+    }
 
-            let stream = PipeStream::new(handle, true);
+    impl Drop for LocalListener {
+        fn drop(&mut self) {
+            if !self.next.is_null() {
+                // SAFETY: live handle, owned, closed once.
+                unsafe { CloseHandle(self.next) };
+            }
+        }
+    }
+
+    pub fn listen(
+        path: &str,
+        config: DaemonConfig,
+        registry: Arc<Registry>,
+        auth: std::sync::Arc<crate::auth::Authenticator>,
+    ) -> Result<(), DaemonError> {
+        let mut listener = LocalListener::bind_exclusive(path)?;
+
+        tracing::info!(path, "listening");
+        loop {
+            let stream = listener.accept().map_err(|e| DaemonError::Transport(e.to_string()))?;
             let config = config.clone();
             let registry = Arc::clone(&registry);
             let auth = std::sync::Arc::clone(&auth);
@@ -488,27 +614,43 @@ mod imp {
     }
 
     pub fn connect(path: &str) -> Result<PipeStream, DaemonError> {
+        use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+        use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
         let name = wide(path);
-        // SAFETY: `name` is a NUL-terminated wide string that outlives the call.
-        let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                ptr::null_mut(),
-            )
+        let handle = loop {
+            // SAFETY: `name` is a NUL-terminated wide string that outlives the call.
+            let handle = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    ptr::null_mut(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    ptr::null_mut(),
+                )
+            };
+            if handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                break handle;
+            }
+            let err = io::Error::last_os_error();
+            // Every instance is mid-accept. The server creates the next one
+            // right after each connect, so this is a moment, not a state;
+            // wait for it rather than reporting a server that is plainly up
+            // as absent.
+            // SAFETY: `name` outlives the call.
+            if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                && unsafe { WaitNamedPipeW(name.as_ptr(), 2000) } != 0
+            {
+                continue;
+            }
+            return Err(DaemonError::Transport(err.to_string()));
         };
-        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return Err(DaemonError::Transport(io::Error::last_os_error().to_string()));
-        }
         Ok(PipeStream::new(handle, false))
     }
 }
 
-pub use imp::{connect, listen};
+pub use imp::{connect, listen, LocalListener, LocalStream};
 #[cfg(unix)]
 pub use imp::claim;
 // `connect` returns this, so leaving it unexported made its own return type
@@ -579,6 +721,39 @@ mod tests {
     }
 
     #[test]
+    fn the_daemon_path_is_the_named_form_of_its_own_service() {
+        // `default_socket_path` is the rule every client already relies on;
+        // parameterising it by name must not have moved the daemon.
+        assert_eq!(default_socket_path(), socket_path_for("zesterm"));
+        let app = socket_path_for("zesterm-app");
+        assert_ne!(app, default_socket_path(), "two services, two endpoints");
+        assert!(app.contains("zesterm-app"), "{app}");
+    }
+
+    #[test]
+    fn one_path_has_one_listener_at_a_time() {
+        // The claim, on both platforms: `two_daemons_cannot_both_claim_one_socket`
+        // covers the unix lock alone, and the Windows half
+        // (`FILE_FLAG_FIRST_PIPE_INSTANCE`) had no test until a second
+        // service came to depend on it.
+        let p = test_path(&format!("excl-{}", std::process::id()));
+        let first = LocalListener::bind_exclusive(&p).expect("the first listener takes the path");
+        assert!(
+            LocalListener::bind_exclusive(&p).is_err(),
+            "two listeners both believed they owned {p}"
+        );
+        drop(first);
+        let again = LocalListener::bind_exclusive(&p);
+        assert!(again.is_ok(), "a released path must be reclaimable: {:?}", again.err());
+        drop(again);
+        #[cfg(unix)]
+        {
+            assert!(!std::path::Path::new(&p).exists(), "the socket outlived its listener");
+            assert!(!std::path::Path::new(&format!("{p}.lock")).exists(), "the lock file outlived its listener");
+        }
+    }
+
+    #[test]
     fn a_user_name_with_awkward_characters_is_made_safe() {
         // A domain account is `DOMAIN\user`, which is a path separator on one
         // platform and illegal in a pipe name on the other.
@@ -642,7 +817,7 @@ mod tests {
         } else {
             "/bin/echo over-the-socket".to_string()
         };
-        conn.create(&cmd, "", 80, 24).expect("create a session over the socket");
+        conn.create(&cmd, "", 80, 24, Vec::new()).expect("create a session over the socket");
         let sessions = conn.list().expect("list sessions");
 
         assert_eq!(sessions.len(), 1, "the session was not created");

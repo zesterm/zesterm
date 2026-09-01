@@ -348,6 +348,11 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
                                                #   is byte-identical to no picture at all, which
                                                #   is what the pixel test asserts
 ./target/fast/zesterm --tabs-position left     # tab strip placement override, top|left
+./target/fast/zesterm                          # while one runs: a new window *in it*, over the
+                                               #   per-user `zesterm-app` socket (#497). A rebuilt
+                                               #   binary is another build and opens its own process
+./target/fast/zesterm --new-tab -e htop        # a tab in its focused window instead
+./target/fast/zesterm --new-instance           # a separate process, as if none were running
 cargo build --release && ./target/release/zesterm   # the shipping build
 cargo run -p zest-app  --example headless      # a terminal with no window
 cargo run -p zest-font --example font_dump     # font sample sheet as a PNG
