@@ -3605,7 +3605,7 @@ impl App {
             Action::MoveTabToNewWindow => {
                 // Only a session tab has anywhere to go; the app tabs are
                 // singletons of the window that holds them.
-                if self.settings_tab_active() || self.screen == AppScreen::Profiles {
+                if self.tabs.app_tab_active() {
                     return;
                 }
                 if let Some(tab) = self.tabs.active() {
