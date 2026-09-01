@@ -3177,8 +3177,10 @@ mod tests {
     /// A file, not the terminal: the daemon's own view of a session is its
     /// listing, and a keyframe would have to be decoded before it could be
     /// read -- two layers between the claim and the evidence, both of which
-    /// have their own bugs. `sh` and `cmd` expand the variable themselves, so
-    /// an unset one writes an empty file rather than the literal name.
+    /// have their own bugs. Each platform's spelling is chosen so that an
+    /// *unset* variable writes nothing rather than something — see the two
+    /// branches; getting that wrong makes both of these tests pass for a
+    /// reason unrelated to the code.
     ///
     /// No backslashes anywhere in the command line: `split_command_line` eats
     /// them even inside double quotes (#285), which is how two daemon fixtures
@@ -3186,10 +3188,37 @@ mod tests {
     fn write_env_cmd(var: &str, path: &std::path::Path) -> String {
         let path = path.display();
         if cfg!(windows) {
-            format!("cmd.exe /c echo %{var}%> {path}")
+            // `set VAR`, never `echo %VAR%`: cmd echoes the *literal* text
+            // `%VAR%` when the variable is unset, so the unset case would be
+            // indistinguishable from a value and this whole pair of tests
+            // would pass on Windows for the wrong reason. `set` prints
+            // `VAR=value` and prints nothing at all when there is none.
+            //
+            // No space before `>`: `set VAR >f` looks up the prefix "VAR "
+            // and finds nothing. The target is quoted because a Windows temp
+            // directory routinely has a space in it.
+            format!("cmd.exe /c set {var}> \"{path}\"")
         } else {
-            format!("/bin/sh -c \"printf %s ${var} > {path}\"")
+            // `printenv`, not `printf %s $VAR`: an unquoted expansion
+            // word-splits a value containing a space, and quoting it here
+            // would need backslashes, which `split_command_line` eats even
+            // inside double quotes (#285). Single quotes pass through the
+            // splitter untouched and reach sh, which is what keeps a temp
+            // directory with a space in it from redirecting elsewhere.
+            format!("/bin/sh -c \"printenv {var} > '{path}'\"")
         }
+    }
+
+    /// What the child recorded, however its shell spells "print one variable".
+    ///
+    /// `printenv` answers with the bare value; `cmd /c set VAR` answers
+    /// `VAR=value`. Normalising here rather than in each test keeps one
+    /// assertion shape across the two platforms — and an unset variable is the
+    /// empty string on both, which is the case that matters.
+    fn env_probe(path: &std::path::Path, var: &str) -> Option<String> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = raw.trim();
+        Some(raw.strip_prefix(&format!("{var}=")).unwrap_or(raw).to_string())
     }
 
     #[test]
@@ -3219,13 +3248,12 @@ mod tests {
         );
 
         assert!(
-            wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| !s.trim().is_empty())),
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_LAUNCH_ENV").is_some_and(|v| !v.is_empty())),
             "the child never wrote the variable, so the launch env did not reach its environment"
         );
-        let got = std::fs::read_to_string(&out).expect("the child wrote it");
+        let got = env_probe(&out, "ZESTERM_TEST_LAUNCH_ENV").expect("the child wrote it");
         assert_eq!(
-            got.trim(),
-            "from-the-launch",
+            got, "from-the-launch",
             "the value must arrive intact, not merely be present: {got:?}"
         );
 
@@ -3274,9 +3302,9 @@ mod tests {
             wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| s != "sentinel")),
             "the child never ran, so nothing here is about the unset convention"
         );
-        let got = std::fs::read_to_string(&out).expect("the child wrote it");
+        let got = env_probe(&out, "ZESTERM_TEST_DAEMON_INHERITED").expect("the child wrote it");
         assert!(
-            got.trim().is_empty(),
+            got.is_empty(),
             "an empty value must leave the variable genuinely absent, not set to the \
              daemon's inherited copy: {got:?}"
         );

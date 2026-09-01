@@ -1296,10 +1296,28 @@ mod tests {
             rows: 24,
             env: Vec::new(),
         };
-        let encoded = crate::frame::encode_body(&bare).expect("encode");
+        // Decoded as a map and checked by *key*, not by searching the bytes
+        // for the text "env": a MessagePack body is arbitrary bytes, so a
+        // substring search can match a value that merely contains those three
+        // characters -- `cwd: "/srv/env"` would have done it -- and would
+        // equally miss a key spelled across a boundary it does not expect.
+        // `IgnoredAny` reads the keys and discards every value, so this stays
+        // a statement about the field set and nothing else.
+        let keys = |msg: &ClientMessage| -> std::collections::BTreeSet<String> {
+            let body = crate::frame::encode_body(msg).expect("encode");
+            let map: std::collections::BTreeMap<String, serde::de::IgnoredAny> =
+                rmp_serde::from_slice(&body).expect("a named map, which is what to_vec_named writes");
+            map.into_keys().collect()
+        };
         assert!(
-            !String::from_utf8_lossy(&encoded).contains("env"),
+            !keys(&bare).contains("env"),
             "an empty launch env must not reach the wire at all"
+        );
+        // The negative above is only worth anything if the positive holds:
+        // a `keys` that never reported `env` would pass it for free.
+        assert!(
+            keys(&msg).contains("env"),
+            "a non-empty launch env must reach the wire, or the assertion above proves nothing"
         );
     }
 
