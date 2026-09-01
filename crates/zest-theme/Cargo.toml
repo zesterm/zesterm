@@ -18,6 +18,8 @@ palette.workspace = true
 thiserror.workspace = true
 schemars = { workspace = true, optional = true }
 ts-rs = { workspace = true, optional = true }
+# Only the `fs` module logs, and only it needs this.
+tracing = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -25,5 +27,9 @@ default = []
 typescript = ["dep:ts-rs"]
 # Emit a JSON Schema so remote settings UIs can be generated rather than hand-written.
 jsonschema = ["dep:schemars"]
+# Read and write a machine's imported themes. Off by default and deliberately:
+# the crate's whole point is that the browser client runs this code, and
+# wasm32 has no directory to scan. The daemon turns it on.
+fs = ["dep:tracing"]
 
 [dev-dependencies]
