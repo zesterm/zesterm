@@ -723,10 +723,17 @@ impl Connection {
     /// that simply omits the flag is untouched, and cannot be caught here: on
     /// loopback the socket *is* the authorization. That is a general local
     /// gate's job, and this is not one.
+    /// The order of the two refusals is deliberate. A *remote* agent fails
+    /// both tests, and the transport is the one worth reporting: it is the
+    /// older and more fundamental rule, it would refuse the same connection
+    /// even if it stopped declaring itself, and an audit line reading "an
+    /// agent tried to approve a device" would bury the more alarming fact that
+    /// something off this machine did.
     fn device_authority(&self) -> Result<(), NoAuthority> {
         match &self.gate {
+            Gate::Served(_) if !self.auth.may_approve_devices() => Err(NoAuthority::NotLocal),
             Gate::Served(who) if who.agent => Err(NoAuthority::Agent),
-            Gate::Served(_) if self.auth.may_approve_devices() => Ok(()),
+            Gate::Served(_) => Ok(()),
             _ => Err(NoAuthority::NotLocal),
         }
     }
@@ -2631,6 +2638,50 @@ mod tests {
         assert!(
             pushed.is_empty(),
             "an agent asked to watch pairings and must hear nothing, got {pushed:?}"
+        );
+    }
+
+    #[test]
+    fn a_remote_agent_is_refused_for_being_remote_not_for_being_an_agent() {
+        // A remote agent fails both tests, and which one it is told matters:
+        // the transport rule would refuse this connection even if it stopped
+        // declaring itself, so naming the declaration would point it at a
+        // change that fixes nothing -- and the audit line would say "an agent
+        // tried to approve a device" where the fact worth seeing is that
+        // something off this machine did.
+        let auth = test_authenticator();
+        let registry = Arc::new(Registry::new());
+        let identity = std::sync::Arc::new(
+            zest_mesh::identity::ClientIdentity::generate().expect("client key"),
+        );
+        auth.trust_now(identity.client_id(), "trusted-lan").expect("trust");
+
+        let mut c = Connection::new(
+            config(),
+            Arc::clone(&registry),
+            crate::auth::Auth::Proof(Arc::clone(&auth)),
+            "192.168.1.42:51314",
+        );
+        let mut peer = authenticate_declaring(&mut c, &identity, false, false, false, true);
+
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::PairingDecision {
+                client: ClientId::from_bytes([0xd3; 32]),
+                approve: true,
+            },
+        );
+        let [HostMessage::Error { message, .. }] = &out[..] else {
+            panic!("a remote connection's pairing decision must be refused, got {out:?}");
+        };
+        assert!(
+            message.contains("local"),
+            "the transport is the true and more fundamental refusal here, got {message:?}"
+        );
+        assert!(
+            !message.contains("agent"),
+            "naming the declaration would point a remote client at a change that would \
+             not help it, got {message:?}"
         );
     }
 
