@@ -218,6 +218,26 @@
         }
       ]
     },
+    "LaunchTarget": {
+      "description": "Where a launch lands when zesterm is already running. The values are\nthe flag suffixes (`--new-window` ⇔ `\"window\"`), so the flag and the\nsetting need no table between them.",
+      "oneOf": [
+        {
+          "const": "window",
+          "description": "A new window of the running zesterm — what Warp and Windows Terminal\ndo by default.",
+          "type": "string"
+        },
+        {
+          "const": "tab",
+          "description": "A new tab in the running zesterm's focused window.",
+          "type": "string"
+        },
+        {
+          "const": "instance",
+          "description": "A separate process, exactly as if none were running.",
+          "type": "string"
+        }
+      ]
+    },
     "Motion": {
       "properties": {
         "enabled": {
@@ -646,6 +666,13 @@
           "x_zest_restart": true,
           "x_zest_widget": "select"
         },
+        "launch": {
+          "$ref": "#/$defs/LaunchTarget",
+          "default": "window",
+          "description": "What a second `zesterm` launch does while one is already running.\n`--new-window`, `--new-tab` and `--new-instance` override it for one\nlaunch.",
+          "x_zest_group": "Window",
+          "x_zest_widget": "select"
+        },
         "opacity": {
           "default": 1.0,
           "description": "Background opacity, applied *only* to cells with a default background.\n\nApplying it to explicit backgrounds too would double-darken and make\n`ls` colours and TUI panels see-through, which is the single most common\ntransparency bug.",
@@ -808,6 +835,7 @@
         "chrome_opacity": 1.0,
         "columns": 100,
         "custom_chrome": "auto",
+        "launch": "window",
         "opacity": 1.0,
         "padding": 8,
         "rows": 30

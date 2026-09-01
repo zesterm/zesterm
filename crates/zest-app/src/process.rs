@@ -26,6 +26,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::WindowId;
 
 use crate::app::{App, ApprovalCell, NextWake, Screenshot, StartScreen};
+use crate::instance::{self, OpenRequest, OpenTarget, PendingOpens, Reply};
 use crate::session::Wakeup;
 use crate::tabs_state::SavedTab;
 use crate::windows_state::{self, Geometry, Rect, SavedWindow, SavedWindows};
@@ -126,6 +127,41 @@ pub struct WindowRequests {
     pub persist: bool,
 }
 
+/// What a tab opened on an existing route holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabOpen {
+    /// A shell — the host's default, or `command` — in `cwd` when given.
+    Shell { command: Option<String>, cwd: Option<String> },
+    /// A named launch profile, through the same path the + menu takes.
+    Profile(String),
+    /// The Settings tab.
+    Settings,
+    /// The Profiles tab.
+    Profiles,
+}
+
+impl TabOpen {
+    /// What a launch wants in a *tab*: the profile if it named one, else
+    /// the tab-shaped screens, else a shell.
+    fn for_tab(req: &OpenRequest) -> Self {
+        match (&req.profile, req.screen) {
+            (Some(name), _) => Self::Profile(name.clone()),
+            (None, Some(StartScreen::Settings)) => Self::Settings,
+            (None, Some(StartScreen::Profiles)) => Self::Profiles,
+            _ => Self::Shell { command: req.command.clone(), cwd: req.cwd.clone() },
+        }
+    }
+
+    /// What a launch wants in a *window*: a screen is dispatched by the
+    /// window itself (`start_screen`), over the shell or profile.
+    fn for_window(req: &OpenRequest) -> Self {
+        match &req.profile {
+            Some(name) => Self::Profile(name.clone()),
+            None => Self::Shell { command: req.command.clone(), cwd: req.cwd.clone() },
+        }
+    }
+}
+
 /// How a window's first tab comes to be.
 pub enum FirstTab {
     /// Find or spawn this machine's daemon (or `--attach`'s), reattaching
@@ -134,16 +170,20 @@ pub enum FirstTab {
     Attach { restore: Option<zest_proto::SessionAddr>, rest: Vec<SavedTab> },
     /// A window opened *from* another: the same route and the same proven
     /// identity, so a relay or `--attach` window's far host does not ask
-    /// for approval again, then a fresh shell on it.
+    /// for approval again, then `open` on it.
     Inherit {
         route: zest_fleet::HostRoute,
         identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
+        open: TabOpen,
     },
 }
 
 pub struct WindowSpec {
     pub geometry: Geometry,
     pub first_tab: FirstTab,
+    /// Wayland's activation token from the launcher, so the compositor lets
+    /// the new window take focus under the launcher's right to it.
+    pub activation_token: Option<String>,
 }
 
 impl WindowSpec {
@@ -152,6 +192,7 @@ impl WindowSpec {
         Self {
             geometry: Geometry::default(),
             first_tab: FirstTab::Attach { restore: None, rest: Vec::new() },
+            activation_token: None,
         }
     }
 
@@ -160,18 +201,26 @@ impl WindowSpec {
         Self {
             geometry: windows_state::place(saved.geometry, monitors),
             first_tab: FirstTab::Attach { restore, rest },
+            activation_token: None,
         }
     }
 
-    /// A window opened from `from` by ⌘N: cascaded beside it, on its host.
-    /// A window with no route (the in-process fallback) opens a launch-shaped
-    /// window instead, which is the honest degraded answer.
-    fn cascade_from(from: &App, monitors: &[Rect]) -> Self {
+    /// A window opened from `from` — by ⌘N, or by a second launch —
+    /// cascaded beside it, on its host, holding `open`. A window with no
+    /// route (the in-process fallback) opens a launch-shaped window instead,
+    /// which is the honest degraded answer.
+    fn cascade_from(from: &App, monitors: &[Rect], open: TabOpen) -> Self {
         let first_tab = match from.route() {
-            Some(route) => FirstTab::Inherit { route: route.clone(), identity: from.client_identity() },
+            Some(route) => {
+                FirstTab::Inherit { route: route.clone(), identity: from.client_identity(), open }
+            }
             None => FirstTab::Attach { restore: None, rest: Vec::new() },
         };
-        Self { geometry: windows_state::cascade(from.current_geometry(), monitors), first_tab }
+        Self {
+            geometry: windows_state::cascade(from.current_geometry(), monitors),
+            first_tab,
+            activation_token: None,
+        }
     }
 }
 
@@ -193,6 +242,8 @@ pub enum Route {
     Fleet,
     /// The process ends.
     Exit,
+    /// A second launch's request is parked; the process opens it.
+    Open,
 }
 
 /// The routing rule, exhaustive on purpose: a new `Wakeup` variant is a
@@ -206,6 +257,7 @@ pub fn route(event: &Wakeup) -> Route {
         }
         Wakeup::FleetChanged => Route::Fleet,
         Wakeup::Exited => Route::Exit,
+        Wakeup::OpenRequested => Route::Open,
         Wakeup::Redraw
         | Wakeup::Detached
         | Wakeup::Reattached
@@ -271,10 +323,21 @@ pub struct Process {
     /// Carried out of a closing window (a screenshot that could not be
     /// written), returned by `main`.
     exit_code: Option<u8>,
+    /// The `zesterm-app` endpoint, claimed by `main` and served once the
+    /// first window has painted (#497).
+    instance_claim: Option<instance::Claim>,
+    instance: Option<instance::InstanceServer>,
+    /// Launches parked by the endpoint's threads for this loop to open.
+    pending_opens: PendingOpens,
 }
 
 impl Process {
-    pub fn new(template: WindowTemplate, first: FirstOnly, proxy: EventLoopProxy<Wakeup>) -> Self {
+    pub fn new(
+        template: WindowTemplate,
+        first: FirstOnly,
+        proxy: EventLoopProxy<Wakeup>,
+        instance_claim: Option<instance::Claim>,
+    ) -> Self {
         let persist_allowed = first.screenshot.is_none() && !first.startup_probe && !first.attach_probe;
         Self {
             template,
@@ -286,7 +349,56 @@ impl Process {
             focused: None,
             config_watcher: None,
             exit_code: None,
+            instance_claim,
+            instance: None,
+            pending_opens: Arc::default(),
         }
+    }
+
+    /// The window a request that names none lands in: the focused one, else
+    /// the last opened.
+    fn focused_index(&self) -> Option<usize> {
+        self.focused
+            .and_then(|id| self.index_of(id))
+            .or_else(|| self.windows.len().checked_sub(1))
+    }
+
+    /// Open what a second launch asked for, and answer it — after the window
+    /// exists, never before, so a launcher that reads `Ok` has a window.
+    fn open_requested(&mut self, el: &ActiveEventLoop) {
+        let parked: Vec<_> = self.pending_opens.lock().drain(..).collect();
+        for pending in parked {
+            let req = pending.request;
+            let target = match (req.target, self.focused_index()) {
+                (OpenTarget::Tab, Some(i)) => {
+                    self.windows[i].open_tab(&TabOpen::for_tab(&req));
+                    i
+                }
+                _ => {
+                    let monitors = Self::monitors(el);
+                    let mut spec = match (req.attach.is_some(), self.focused_index()) {
+                        (false, Some(i)) => {
+                            WindowSpec::cascade_from(&self.windows[i], &monitors, TabOpen::for_window(&req))
+                        }
+                        _ => WindowSpec::fresh(),
+                    };
+                    spec.activation_token = req.activation_token.clone();
+                    let mut app = self.new_app();
+                    if let Some(addr) = req.attach.clone() {
+                        app = app.with_attach_addr(addr);
+                    }
+                    if let Some(screen) = req.screen {
+                        app = app.with_start_screen(screen);
+                    }
+                    app.open_window(el, &spec);
+                    self.windows.push(app);
+                    self.windows.len() - 1
+                }
+            };
+            self.windows[target].focus();
+            let _ = pending.reply.send(Reply::Ok);
+        }
+        self.persist_all();
     }
 
     /// What the process should exit with, once the event loop has returned.
@@ -418,8 +530,13 @@ impl Process {
             let monitors = Self::monitors(el);
             // The spec is built before the new window is pushed, so the
             // borrow of its parent never overlaps the push.
-            let specs: Vec<_> =
-                to_open.iter().map(|&i| WindowSpec::cascade_from(&self.windows[i], &monitors)).collect();
+            let specs: Vec<_> = to_open
+                .iter()
+                .map(|&i| {
+                    let open = TabOpen::Shell { command: None, cwd: None };
+                    WindowSpec::cascade_from(&self.windows[i], &monitors, open)
+                })
+                .collect();
             for spec in specs {
                 self.open_window(el, &spec);
             }
@@ -472,6 +589,15 @@ impl ApplicationHandler<Wakeup> for Process {
         // inotify/ReadDirectoryChanges handle, and none of it is needed to
         // show the first frame.
         self.watch_config();
+        // Likewise the endpoint: claimed in `main`, served only now that the
+        // first window has painted.
+        if let Some(claim) = self.instance_claim.take() {
+            self.instance = Some(instance::InstanceServer::start(
+                claim,
+                self.proxy.clone(),
+                Arc::clone(&self.pending_opens),
+            ));
+        }
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: Wakeup) {
@@ -503,6 +629,7 @@ impl ApplicationHandler<Wakeup> for Process {
                 }
             }
             Route::Exit => el.exit(),
+            Route::Open => self.open_requested(el),
         }
         self.drain_requests(el);
     }
@@ -619,6 +746,7 @@ mod tests {
     fn the_fleet_latch_is_consumed_once_and_the_exit_is_the_process_s() {
         assert_eq!(route(&Wakeup::FleetChanged), Route::Fleet, "take_changed clears a single flag; a broadcast would starve every window but the first");
         assert_eq!(route(&Wakeup::Exited), Route::Exit);
+        assert_eq!(route(&Wakeup::OpenRequested), Route::Open, "a launch is the process's to place");
     }
 
     #[test]

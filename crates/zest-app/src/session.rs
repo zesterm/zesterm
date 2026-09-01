@@ -69,6 +69,11 @@ pub enum Wakeup {
     /// those happens on a worker thread the keychain and the network must
     /// never block the event loop from.
     AccountChanged,
+    /// A second `zesterm` launch asked this process to open something
+    /// (#497); the request is parked in the process's pending queue with the
+    /// channel to answer it on. Bare, like `TabsChanged`, so `Wakeup` stays
+    /// `Copy`.
+    OpenRequested,
     /// A worker finished opening a tab; the pending queue has it.
     ///
     /// Attaching from the picker dials over the network, and a dead host
