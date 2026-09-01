@@ -57,6 +57,7 @@ fn serve_daemon(socket: &str) {
         offer: Some(zest_daemon::offer::OfferSource::new(zest_daemon::offer::facts(
             "stdio-test-shell".into(),
         ))),
+        settings: None,
     };
     let auth = Arc::new(Authenticator::new(
         identity,

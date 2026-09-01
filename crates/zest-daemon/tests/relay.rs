@@ -530,6 +530,7 @@ fn daemon(label: &str) -> Daemon {
         min_delta_interval: Duration::ZERO,
         enroll: None,
         offer: None,
+        settings: None,
     };
     Daemon { identity, config, registry: Arc::new(Registry::new()), auth, trust, gate: Arc::new(Gate::new()) }
 }

@@ -95,6 +95,7 @@ fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
         offer: Some(zest_daemon::offer::OfferSource::new(zest_daemon::offer::facts(
             "mcp-test-shell".into(),
         ))),
+        settings: None,
     };
     let registry = Arc::new(Registry::new());
 

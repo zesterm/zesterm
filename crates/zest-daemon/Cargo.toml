@@ -29,6 +29,9 @@ zest-mesh.workspace = true
 # on another machine. `check-deps` guards `zest-core`, not this crate, so the
 # wasm fence is untouched.
 zest-config.workspace = true
+# `fs`: answering `GetConfig { want_themes }` means reading the themes this
+# machine imported, which lives on its disk and nowhere a client can see.
+zest-theme = { workspace = true, features = ["fs"] }
 # The workspace's one owner of TLS and HTTP, and the first crate to depend on
 # it — `--enroll` posts through it. rustls therefore reaches this binary and,
 # through it, `zest-app`, which is what #68's boundary says should happen: TLS
@@ -45,6 +48,10 @@ serde = { workspace = true }
 # Worker, and JSON is what it speaks -- so this is the boundary's format rather
 # than a second protocol creeping in. Already in the tree via zest-config.
 serde_json = { workspace = true }
+# Reading and editing this machine's settings (#498). `toml_edit` is *not*
+# here on purpose: `zest-config` re-exports it so a caller builds a value
+# without pinning a second copy, and that is the copy the mutators take.
+toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

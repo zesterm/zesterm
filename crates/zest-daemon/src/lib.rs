@@ -34,6 +34,7 @@ pub mod account;
 pub mod attest_sync;
 pub mod audit;
 pub mod client;
+pub mod config;
 pub mod auth;
 pub mod context;
 pub mod enroll;
@@ -170,6 +171,18 @@ pub struct DaemonConfig {
     /// then sees `Sessions { offer: None }` — indistinguishable from an older
     /// daemon, and handled by the same branch.
     pub offer: Option<offer::OfferSource>,
+    /// Whether this machine answers questions about its own configuration,
+    /// and where the answers are read from and written to (#498).
+    ///
+    /// `None` means it answers none of them — what every test harness wants,
+    /// and what a daemon built before this field did. A client then gets the
+    /// refusal shape rather than silence.
+    ///
+    /// Named for what it serves rather than for the wire's `GetConfig`, which
+    /// would make every use of it read `config.config`: this sits beside
+    /// [`Self::enroll`] and [`Self::offer`] as one more seam on the daemon's
+    /// own config.
+    pub settings: Option<config::ConfigSeam>,
 }
 
 /// Everything [`server`] needs to run `enroll::enroll` on a client's behalf.

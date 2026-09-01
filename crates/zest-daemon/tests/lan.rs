@@ -58,6 +58,7 @@ fn host() -> Host {
         min_delta_interval: std::time::Duration::ZERO,
         enroll: None,
         offer: None,
+        settings: None,
     };
     let registry = Arc::new(Registry::new());
     std::thread::spawn(move || {

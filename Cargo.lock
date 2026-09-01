@@ -5744,6 +5744,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "thiserror 2.0.19",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "tungstenite",
@@ -5754,6 +5755,7 @@ dependencies = [
  "zest-mesh",
  "zest-proto",
  "zest-pty",
+ "zest-theme",
 ]
 
 [[package]]

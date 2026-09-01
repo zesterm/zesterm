@@ -138,6 +138,46 @@ pub(crate) fn resolve_ref(root: &serde_json::Value, node: &serde_json::Value) ->
         .unwrap_or_else(|| node.clone())
 }
 
+/// Plain Levenshtein edit distance, for the unknown-key suggestions.
+///
+/// Small and in-crate on purpose: two dotted keys are ~25 characters, a config
+/// has a handful of unknowns, and a dependency for this would be all cost.
+///
+/// It lives here rather than in `zest-app` — where it was written — because
+/// `zest-app` is a `[[bin]]`, so the daemon refusing an unknown key over the
+/// wire could not reach it and would have grown a second, worse copy. Keys are
+/// this module's subject; the string math that compares them belongs beside
+/// them.
+#[must_use]
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// "did you mean `size_pt`?" — the nearest schema key when the distance is
+/// small enough to read as a typo (≤ 2 edits), else nothing: a stretch
+/// suggestion is worse than none.
+#[must_use]
+pub fn suggest_key(unknown: &str, schema_keys: &[String]) -> Option<String> {
+    schema_keys
+        .iter()
+        .map(|k| (levenshtein(unknown, k), k))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +300,24 @@ mod tests {
                             .map(str::to_string)
                     })
             })
+    }
+
+    #[test]
+    fn an_unknown_key_suggests_only_a_plausible_typo() {
+        let keys = keys();
+        assert_eq!(
+            suggest_key("typography.size_px", &keys).as_deref(),
+            Some("typography.size_pt"),
+            "one edit away is the canonical did-you-mean"
+        );
+        assert_eq!(
+            suggest_key("window.blur_radius", &keys),
+            None,
+            "far from everything: no match beats a stretch"
+        );
+        // The <=2 boundary itself, pinned with arithmetic rather than vibes.
+        assert_eq!(levenshtein("size_pt", "size_px"), 1);
+        assert_eq!(levenshtein("opacity", "opac"), 3);
+        assert_eq!(levenshtein("", "ab"), 2);
     }
 }
