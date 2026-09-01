@@ -370,18 +370,25 @@ impl DaemonClient {
     }
 
     /// Start a fresh session and return its address.
+    ///
+    /// `env` is layered over whatever the host's own settings give the child,
+    /// last-wins, with the empty-value-unsets convention `CommandSpec` and
+    /// `shell.env` already share. Empty is the ordinary case and costs no
+    /// bytes on the wire.
     pub fn create(
         &mut self,
         command: &str,
         cwd: &str,
         cols: u16,
         rows: u16,
+        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         self.send(&ClientMessage::CreateSession {
             command: command.to_string(),
             cwd: cwd.to_string(),
             cols,
             rows,
+            env,
         })?;
         loop {
             match self.recv()? {
@@ -407,6 +414,12 @@ impl DaemonClient {
     /// The adopt policy lives client-side on purpose: `ListSessions` then the
     /// newest unattached, else create. See `AttachOptions::adopt` for why
     /// adopting is the GUI default today.
+    ///
+    /// `env` reaches only a session this call *creates*. An adopted one is
+    /// already running and its environment was fixed when it spawned — a
+    /// process cannot be handed a new one, and pretending otherwise is how a
+    /// profile would appear to apply while the shell it adopted belongs to a
+    /// different identity entirely.
     pub fn open_session(
         &mut self,
         command: &str,
@@ -414,13 +427,14 @@ impl DaemonClient {
         cols: u16,
         rows: u16,
         adopt: bool,
+        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         let existing = self.list()?;
         let adopted =
             adopt.then(|| existing.iter().rev().find(|s| !s.attached).map(|s| s.addr)).flatten();
         match adopted {
             Some(addr) => Ok(addr),
-            None => self.create(command, cwd, cols, rows),
+            None => self.create(command, cwd, cols, rows, env),
         }
     }
 

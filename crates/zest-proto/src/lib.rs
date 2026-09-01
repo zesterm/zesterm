@@ -248,6 +248,25 @@ pub enum ClientMessage {
         cwd: String,
         cols: u16,
         rows: u16,
+        /// Extra environment for the child, layered over the host's own.
+        ///
+        /// Ordered and last-wins, and **an empty value unsets** — the same
+        /// convention `CommandSpec.env` and the `shell.env` setting already
+        /// carry, kept identical here so a launch can be handed straight to
+        /// the pty rather than translated on the way.
+        ///
+        /// No new privilege: `command` is already arbitrary execution on the
+        /// host, which is the argument `ReadFile` below makes about itself.
+        /// What this *is* is the seam a per-profile environment needs — without
+        /// it `shell.env` is a setting that does nothing, because the only
+        /// path that applied it was the in-process `--no-daemon` fallback
+        /// (#488).
+        ///
+        /// Skipped when empty so an ordinary launch is byte-identical to what
+        /// a daemon predating the field sent, and the conformance fixtures do
+        /// not move.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<(String, String)>,
     },
     /// Begin receiving updates for a session.
     ///
@@ -1231,10 +1250,75 @@ mod tests {
             cwd: r"\\wsl$\Ubuntu-24.04\home\andy".to_string(),
             cols: 120,
             rows: 34,
+            env: Vec::new(),
         };
         let body = crate::frame::encode_body(&msg).expect("encode");
         let back: ClientMessage = crate::frame::decode(&body).expect("decode");
         assert_eq!(msg, back, "command, cwd and size all survive the frame");
+    }
+
+    #[test]
+    fn a_create_sessions_env_crosses_the_wire_and_costs_nothing_when_empty() {
+        // Two claims, because the second is what lets this field be added to a
+        // frozen contract at all (#488).
+        //
+        // One: order and the empty-value-unsets convention survive the frame.
+        // `Vec<(String, String)>` rather than a map precisely so both do --
+        // last-wins needs an order, and a map would silently keep one of two
+        // entries naming the same variable.
+        let msg = ClientMessage::CreateSession {
+            command: String::new(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+            env: vec![
+                ("CLAUDE_CONFIG_DIR".into(), "/home/a/.config/zesterm/work".into()),
+                ("TERM".into(), "xterm-256color".into()),
+                // The unset spelling. A map would round-trip this identically;
+                // the assertion that matters is that it is still *here* and
+                // still last, because the daemon applies it in order.
+                ("WT_SESSION".into(), String::new()),
+            ],
+        };
+        let body = crate::frame::encode_body(&msg).expect("encode");
+        let back: ClientMessage = crate::frame::decode(&body).expect("decode");
+        assert_eq!(msg, back, "the launch environment survives the frame in order");
+
+        // Two: an ordinary launch is byte-identical to what a peer predating
+        // the field sent. `skip_serializing_if` is doing that work, and
+        // without it every `CreateSession` on every machine in the fleet would
+        // grow a field, and the conformance fixtures would move for a feature
+        // nobody in them uses.
+        let bare = ClientMessage::CreateSession {
+            command: String::new(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+        };
+        // Decoded as a map and checked by *key*, not by searching the bytes
+        // for the text "env": a MessagePack body is arbitrary bytes, so a
+        // substring search can match a value that merely contains those three
+        // characters -- `cwd: "/srv/env"` would have done it -- and would
+        // equally miss a key spelled across a boundary it does not expect.
+        // `IgnoredAny` reads the keys and discards every value, so this stays
+        // a statement about the field set and nothing else.
+        let keys = |msg: &ClientMessage| -> std::collections::BTreeSet<String> {
+            let body = crate::frame::encode_body(msg).expect("encode");
+            let map: std::collections::BTreeMap<String, serde::de::IgnoredAny> =
+                rmp_serde::from_slice(&body).expect("a named map, which is what to_vec_named writes");
+            map.into_keys().collect()
+        };
+        assert!(
+            !keys(&bare).contains("env"),
+            "an empty launch env must not reach the wire at all"
+        );
+        // The negative above is only worth anything if the positive holds:
+        // a `keys` that never reported `env` would pass it for free.
+        assert!(
+            keys(&msg).contains("env"),
+            "a non-empty launch env must reach the wire, or the assertion above proves nothing"
+        );
     }
 
     #[test]

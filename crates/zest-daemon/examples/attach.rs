@@ -156,6 +156,7 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
         cwd: String::new(),
         cols: 100,
         rows: 30,
+        env: Vec::new(),
     });
 
     // The deadline is enforced by a separate thread, not by checking between

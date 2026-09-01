@@ -815,6 +815,7 @@ fn write_client_messages(path: &Path) {
                 // Past u8, so the u16 encoding is pinned.
                 cols: 300,
                 rows: 80,
+                env: Vec::new(),
             },
         ),
         ("attach", ClientMessage::Attach { session: addr, cols: 120, rows: 40, observe: false }),

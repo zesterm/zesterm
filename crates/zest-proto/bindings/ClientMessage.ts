@@ -100,7 +100,27 @@ watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing
 /**
  * Empty means the host's default shell.
  */
-command: string, cwd: string, cols: number, rows: number, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
+command: string, cwd: string, cols: number, rows: number, 
+/**
+ * Extra environment for the child, layered over the host's own.
+ *
+ * Ordered and last-wins, and **an empty value unsets** — the same
+ * convention `CommandSpec.env` and the `shell.env` setting already
+ * carry, kept identical here so a launch can be handed straight to
+ * the pty rather than translated on the way.
+ *
+ * No new privilege: `command` is already arbitrary execution on the
+ * host, which is the argument `ReadFile` below makes about itself.
+ * What this *is* is the seam a per-profile environment needs — without
+ * it `shell.env` is a setting that does nothing, because the only
+ * path that applied it was the in-process `--no-daemon` fallback
+ * (#488).
+ *
+ * Skipped when empty so an ordinary launch is byte-identical to what
+ * a daemon predating the field sent, and the conformance fixtures do
+ * not move.
+ */
+env: Array<[string, string]>, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
 /**
  * The file, as the host reads paths. Absolute, or resolved against
  * `cwd`; opaque to the client, like `CreateSession.cwd`.
