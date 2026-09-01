@@ -47,6 +47,20 @@ pub fn config_file() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Where an edit lands: the config file to read if there is one, else the path
+/// a first write should create.
+///
+/// The `config_file()`-first ordering is the portable-mode rule, and it is why
+/// this is a function rather than a `config_dir().join(CONFIG_FILE)` at each
+/// call site: portable mode's file is `zesterm.toml` beside the binary, not
+/// `config.toml` under it, so a caller that composes the fallback itself writes
+/// to a file the loader will never read — on the one setup where that file is
+/// the only one the person can write.
+#[must_use]
+pub fn config_write_target() -> Option<PathBuf> {
+    config_file().or_else(|| config_dir().map(|d| d.join(CONFIG_FILE)))
+}
+
 /// Where user themes are read from.
 #[must_use]
 pub fn themes_dir() -> Option<PathBuf> {
@@ -93,6 +107,33 @@ mod tests {
         // Every supported platform has one; if this ever returns None the
         // caller silently runs on defaults forever.
         assert!(config_dir().is_some());
+    }
+
+    #[test]
+    fn a_write_target_exists_even_before_the_file_does() {
+        // The point of the fallback: a machine that has never been configured
+        // must still have somewhere for a first write to go, or every settings
+        // edit on a fresh install silently does nothing.
+        let target = config_write_target().expect("a config dir is always available");
+        assert!(
+            target.is_absolute(),
+            "a write target must be absolute; a relative one resolves against \
+             whatever directory the process happens to be in: {}",
+            target.display()
+        );
+    }
+
+    #[test]
+    fn a_write_target_agrees_with_what_the_loader_reads() {
+        // The two must not be allowed to drift: a target that is not the file
+        // `config_file` returns is a write nothing ever loads.
+        if let Some(existing) = config_file() {
+            assert_eq!(
+                config_write_target(),
+                Some(existing),
+                "the write target left the file the loader actually reads"
+            );
+        }
     }
 
     #[test]
