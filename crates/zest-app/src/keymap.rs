@@ -818,6 +818,25 @@ mod tests {
     }
 
     #[test]
+    fn a_chord_pressed_over_the_find_bar_is_still_a_chord() {
+        // The find bar is the one overlay that is *not* exclusive with the
+        // others, so its key block consults this table rather than swallowing
+        // everything. Copilot caught the first version doing the latter, which
+        // silently broke two documented behaviours at once: ⌘F on an open bar
+        // is supposed to re-select the query (design §14), and ⌘K is supposed
+        // to open the palette *over* the bar. Both were dead.
+        //
+        // What this pins is the half the table owns: these chords resolve to
+        // actions, so a key block that looks them up cannot swallow them.
+        assert_eq!(action_for(&char_key("f"), SUPER), Some(Action::ToggleFind));
+        assert_eq!(action_for(&char_key("k"), SUPER), Some(Action::ToggleFleetPicker));
+        // And the half `command_for` owns stays the field's: ⌘V while typing a
+        // query pastes into the query, which is why the field is consulted
+        // first (AGENTS.md § App UI).
+        assert_eq!(action_for(&char_key("v"), SUPER), Some(Action::Paste));
+    }
+
+    #[test]
     fn every_desktop_chord_has_a_ctrl_shift_form() {
         // The policy, pinned. It fails the day someone adds a Desktop row
         // Windows cannot reach -- which is the state this whole family was in

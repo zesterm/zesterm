@@ -13299,11 +13299,17 @@ impl App {
                     return;
                 }
 
-                // The find bar owns the keyboard while it is up, and is
-                // checked before the other overlays because it is the one that
-                // is *not* exclusive with them. `command_for` first, the rule
-                // every text entry here follows (#228/#251/#270): a field that
-                // handles its own keys is a field that eats ⌘V.
+                // The find bar takes the keys that are *text*, and only those.
+                //
+                // It is the one overlay that is not exclusive with the others,
+                // so it must not own the keyboard the way they do: swallowing
+                // everything here would stop ⌘K opening the palette over it and
+                // would make ⌘F on an open bar do nothing, when it is supposed
+                // to re-select the query. `command_for` first — the rule every
+                // text entry here follows (#228/#251/#270), so ⌘V reaches the
+                // field — then the chord table, on the block menu's pattern
+                // twenty lines up, except that a chord leaves the bar *open*:
+                // it is a search still in progress, not a menu being dismissed.
                 if self.find.is_some() {
                     use winit::keyboard::{Key, NamedKey};
                     if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
@@ -13320,6 +13326,12 @@ impl App {
                         if let Some(w) = self.window.as_ref() {
                             w.request_redraw();
                         }
+                        return;
+                    }
+                    if let Some(binding) =
+                        keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                    {
+                        self.perform(binding.action);
                         return;
                     }
                     match &event.logical_key {

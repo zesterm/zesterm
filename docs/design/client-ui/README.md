@@ -743,7 +743,10 @@ same. This also rules `⌘⇧F` out as a future "search the fleet" chord.
 
 - Opening seeds from a **single-line** selection and selects it all, so the
   next keystroke replaces. A multi-line selection is not a search term.
-- `⌘F` on an open bar re-selects the query; it does not close.
+- `⌘F` on an open bar re-selects the query; it does not close. The bar takes
+  the keys that are *text* and only those — it is the one overlay not exclusive
+  with the others, so a bound chord still reaches the app and `⌘K` opens the
+  palette **over** it.
 - Opening while scrolled back lands on the hit **nearest the viewport**, not
   the first — the reader navigated there on purpose.
 - The grid cursor draws hollow while the bar is up, because the bar has the

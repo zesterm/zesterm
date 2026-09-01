@@ -1369,6 +1369,25 @@ impl Scene {
         let cols = grid.cols();
         let fill = |c: zest_core::Rgb| LinearRgba::opaque(c.r, c.g, c.b);
 
+        // Resolve each visible row's line **once**, then look matches up in it.
+        // The obvious shape -- for every match, scan every row -- is
+        // O(matches x rows), and `DEFAULT_MATCH_LIMIT` is 5,000: a one-letter
+        // needle on a tall window is a quarter of a million `resolved_row`
+        // calls per frame, which is jank in exactly the case a find bar is
+        // most likely to be open (a common word, while output streams).
+        let mut rows: Vec<(zest_core::LineId, isize)> = (0..drawn_rows(grid))
+            .filter_map(|row| {
+                let r = grid_row(row);
+                resolved_row(grid, vp, r).map(|line| (line.id, r))
+            })
+            .collect();
+        // Sorted so a match can binary-search into it. A fold reorders nothing
+        // today, but this pass must not be the thing that assumes so.
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        if rows.is_empty() {
+            return;
+        }
+
         // Current last, so where two hits abut the current one wins: the last
         // rect pushed is the one drawn on top.
         let order = (0..find.matches.len())
@@ -1376,24 +1395,29 @@ impl Scene {
             .chain(find.current.filter(|i| *i < find.matches.len()));
 
         for i in order {
-            let sel = find.matches[i].highlight();
-            let paint = if Some(i) == find.current { find.current_bg } else { find.bg };
-            for row in 0..drawn_rows(grid) {
-                let Some(line) = resolved_row(grid, vp, grid_row(row)).map(|r| r.id) else {
-                    continue;
-                };
-                let Some((from, to)) = sel.span_on(line, cols) else { continue };
-                if to <= from {
+            let m = find.matches[i];
+            let sel = m.highlight();
+            let paint = fill(if Some(i) == find.current { find.current_bg } else { find.bg });
+            // Only the rows this match actually spans, found by binary search
+            // rather than by scanning: a match covers one row and a bit even
+            // when it crosses a wrap.
+            let from = rows.partition_point(|(id, _)| *id < m.start.line);
+            for &(line, row) in &rows[from..] {
+                if line > m.end.line {
+                    break;
+                }
+                let Some((lo, hi)) = sel.span_on(line, cols) else { continue };
+                if hi <= lo {
                     continue;
                 }
                 self.rects.push(RectInstance::filled(
                     [
-                        ox + from as f32 * cw,
-                        oy + grid_row(row) as f32 * ch,
-                        (to - from) as f32 * cw,
+                        ox + lo as f32 * cw,
+                        oy + row as f32 * ch,
+                        (hi - lo) as f32 * cw,
                         ch,
                     ],
-                    fill(paint),
+                    paint,
                     clip,
                 ));
             }
@@ -2723,6 +2747,31 @@ mod tests {
             ox + 2.0 * 8.0,
             "the current hit is the one pushed last, so it wins where hits abut"
         );
+    }
+
+    #[test]
+    fn a_match_off_screen_costs_no_rects() {
+        // The reason the row map is built once and binary-searched: the obvious
+        // shape scans every visible row for every match, and the limit is 5,000
+        // -- a one-letter needle on a tall window would be a quarter of a
+        // million span tests per frame, in exactly the case a find bar is most
+        // likely to be open. A match far above the viewport must cost nothing.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(9_000, 0, 3), hit(1, 0, 3)];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: None,
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: Rgb::new(0x99, 0x77, 0x22),
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        scene.emit_find(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+        assert_eq!(scene.rects.len(), 1, "only the on-screen match painted");
     }
 
     #[test]
