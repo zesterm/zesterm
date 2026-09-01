@@ -148,7 +148,7 @@ fn a_floor_bounds_the_message_rate_and_still_lands_on_the_right_grid() {
     let stream = serve_one(FLOOR);
     let mut client = connect(&stream);
 
-    let addr = client.create(&flood_cmd(), "", COLS, ROWS).expect("create");
+    let addr = client.create(&flood_cmd(), "", COLS, ROWS, Vec::new()).expect("create");
     let (seq, keyframe) = client.attach(addr, COLS, ROWS).expect("attach");
 
     let mut term = zest_core::Terminal::new(usize::from(COLS), usize::from(ROWS), 2000);

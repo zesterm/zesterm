@@ -1266,7 +1266,7 @@ impl Connection {
                 vec![list_dir(&path)]
             }
 
-            ClientMessage::CreateSession { command, cwd, cols, rows } => {
+            ClientMessage::CreateSession { command, cwd, cols, rows, env } => {
                 let mut spec = CommandSpec::default_shell();
                 if !command.is_empty() {
                     spec.command_line = command;
@@ -1274,22 +1274,38 @@ impl Connection {
                 if !cwd.is_empty() {
                     spec.cwd = Some(cwd.into());
                 }
+                // The shell runs on *this* machine, so this machine's settings
+                // decide its prompt and its environment (the ROADMAP's rule for
+                // every shell-integration switch). Read at spawn, like the offer
+                // reads profiles on demand: a session keeps what it started
+                // with, which is also what these settings' `Restart`
+                // invalidation class promises.
+                //
+                // Read unconditionally now rather than inside the
+                // `shell_integration` branch: `shell.env` has nothing to do
+                // with command blocks, and hanging it off that switch would
+                // make one setting silently disable another.
+                let settings =
+                    zest_config::load(&zest_config::Options::default()).resolved.settings;
                 // After `command_line` is settled, because which shell this is
                 // decides what gets injected -- and a client may have asked for
                 // something that is not a shell at all.
+                let injected_from = spec.env.len();
                 if self.config.shell_integration {
                     spec.enable_shell_integration(&shell_integration_dir());
-                    // The shell runs on *this* machine, so this machine's
-                    // settings decide its prompt (the ROADMAP's rule for
-                    // every shell-integration switch). Read at spawn, like
-                    // the offer reads profiles on demand: a session keeps
-                    // the prompt it started with, which is also what the
-                    // setting's `Restart` invalidation class promises.
-                    let load = zest_config::load(&zest_config::Options::default());
-                    if load.resolved.settings.prompt.compact_ps1 {
+                    if settings.prompt.compact_ps1 {
                         spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
                     }
                 }
+                let injected = spec.injected_since(injected_from);
+                // This machine's `shell.env` first, then whatever the launch
+                // carried, so the more specific of the two wins -- the order
+                // `apply_shell_settings` states app-side, now obeyed on the
+                // path every ordinary session actually takes. Until #488 the
+                // daemon applied neither, so `shell.env` was a setting that
+                // did nothing outside `--no-daemon`.
+                let configured = settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone()));
+                spec.layer_env(configured.chain(env), &injected);
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
                     Ok(created) => {
                         vec![HostMessage::Sessions {
@@ -2990,6 +3006,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
+                env: Vec::new(),
             },
         );
 
@@ -3032,6 +3049,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 20,
                 rows: 5,
+                env: Vec::new(),
             },
         );
         let [HostMessage::Sessions { created: Some(id), .. }] = &out[..] else {
@@ -3150,6 +3168,121 @@ mod tests {
 
     fn echo_cmd() -> String {
         if cfg!(windows) { "cmd.exe /c echo probe".into() } else { "/bin/echo probe".into() }
+    }
+
+    /// A child that writes one environment variable to a file, so the
+    /// assertion is on the child's *environment* rather than on whatever
+    /// reached a grid.
+    ///
+    /// A file, not the terminal: the daemon's own view of a session is its
+    /// listing, and a keyframe would have to be decoded before it could be
+    /// read -- two layers between the claim and the evidence, both of which
+    /// have their own bugs. `sh` and `cmd` expand the variable themselves, so
+    /// an unset one writes an empty file rather than the literal name.
+    ///
+    /// No backslashes anywhere in the command line: `split_command_line` eats
+    /// them even inside double quotes (#285), which is how two daemon fixtures
+    /// were vacuous for months.
+    fn write_env_cmd(var: &str, path: &std::path::Path) -> String {
+        let path = path.display();
+        if cfg!(windows) {
+            format!("cmd.exe /c echo %{var}%> {path}")
+        } else {
+            format!("/bin/sh -c \"printf %s ${var} > {path}\"")
+        }
+    }
+
+    #[test]
+    fn a_create_sessions_env_reaches_the_child() {
+        // The #488 bug, from the side a user meets it: `shell.env` was a
+        // setting that did nothing, because the only code that applied it --
+        // `apply_shell_settings` in zest-app -- runs on the in-process
+        // `--no-daemon` fallback, and every ordinary session is spawned by the
+        // daemon from a `CreateSession` that had no env field at all. The
+        // field is only half the fix; this asserts the daemon *applies* it,
+        // which is the half a wire round-trip test cannot see (ADR-015: test a
+        // field's value from the far side, not the message that carries it).
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_LAUNCH_ENV", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_LAUNCH_ENV".into(), "from-the-launch".into())],
+            },
+        );
+
+        assert!(
+            wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| !s.trim().is_empty())),
+            "the child never wrote the variable, so the launch env did not reach its environment"
+        );
+        let got = std::fs::read_to_string(&out).expect("the child wrote it");
+        assert_eq!(
+            got.trim(),
+            "from-the-launch",
+            "the value must arrive intact, not merely be present: {got:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_launch_envs_empty_value_unsets_a_variable_the_daemon_inherited() {
+        // The other half of the convention, and the half that only shows up
+        // through a real spawn: `CommandSpec` promises empty-means-unset and
+        // both backends honour it, but nothing asserted that a value arriving
+        // over the wire keeps that meaning rather than setting the variable to
+        // the empty string. Code that tests for presence takes the wrong
+        // branch on the difference.
+        //
+        // The daemon's environment is what a session inherits and it is frozen
+        // at first spawn (AGENTS.md), so this is also the only lever a client
+        // has over a marker the daemon started life with.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("ZESTERM_TEST_DAEMON_INHERITED");
+        std::env::set_var("ZESTERM_TEST_DAEMON_INHERITED", "from-the-daemon");
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-unset-{}", std::process::id()));
+        let _ = std::fs::write(&out, "sentinel");
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_DAEMON_INHERITED", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_DAEMON_INHERITED".into(), String::new())],
+            },
+        );
+
+        assert!(
+            wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| s != "sentinel")),
+            "the child never ran, so nothing here is about the unset convention"
+        );
+        let got = std::fs::read_to_string(&out).expect("the child wrote it");
+        assert!(
+            got.trim().is_empty(),
+            "an empty value must leave the variable genuinely absent, not set to the \
+             daemon's inherited copy: {got:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
     }
 
     /// A child that fails, with a status nothing could have guessed.
@@ -3324,6 +3457,7 @@ mod tests {
             cwd: String::new(),
             cols: 80,
             rows: 24,
+            env: Vec::new(),
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
         peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
@@ -3453,6 +3587,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
@@ -3540,7 +3675,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3590,7 +3731,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3648,7 +3795,13 @@ mod tests {
         };
         peer.send(
             &mut c,
-            &ClientMessage::CreateSession { command, cwd: String::new(), cols: 80, rows: 24 },
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+            },
         );
 
         let host = config().host;
@@ -3689,6 +3842,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3720,6 +3874,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3761,6 +3916,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3801,6 +3957,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3849,6 +4006,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3892,6 +4050,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 100,
                 rows: 30,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3921,6 +4080,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -3962,6 +4122,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4009,6 +4170,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4050,6 +4212,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4129,6 +4292,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4164,6 +4328,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4200,6 +4365,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4383,6 +4549,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4410,6 +4577,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4450,6 +4618,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4506,6 +4675,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4556,6 +4726,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4597,6 +4768,7 @@ mod tests {
                     cwd: String::new(),
                     cols: 80,
                     rows: 24,
+                    env: Vec::new(),
                 },
             );
             let addr = registry.list(config().host)[0].addr;
@@ -4637,6 +4809,7 @@ mod tests {
                     cwd: String::new(),
                     cols: 80,
                     rows: 24,
+                    env: Vec::new(),
                 },
             );
         }
@@ -4661,6 +4834,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         for info in registry.list(config().host) {
@@ -4688,6 +4862,7 @@ mod tests {
                 cwd: String::new(),
                 cols: 80,
                 rows: 24,
+                env: Vec::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;

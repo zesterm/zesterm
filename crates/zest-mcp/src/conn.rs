@@ -327,6 +327,9 @@ impl Conn {
             cwd: cwd.to_string(),
             cols,
             rows,
+            // An agent's session takes the host's own `shell.env` and nothing
+            // more: there is no profile behind an MCP tool call to carry one.
+            env: Vec::new(),
         });
         self.wait_for(|s| s.created)
     }

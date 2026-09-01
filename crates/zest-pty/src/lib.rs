@@ -134,6 +134,53 @@ impl CommandSpec {
             }
         }
     }
+
+    /// Layer configured environment entries over this spec, last-wins.
+    ///
+    /// **Call after [`Self::enable_shell_integration`]**, passing what that
+    /// injected as `injected`. The user's entries go last and therefore *win*
+    /// a collision, deliberately: an entry that is silently discarded is a
+    /// setting that does nothing, and overriding `TERM` is a real thing people
+    /// do — Alacritty and WezTerm both allow it. The stale-identity variables
+    /// [`terminal_env`] clears stay cleared unless the user names one back,
+    /// which is theirs to decide.
+    ///
+    /// `injected` exists so that one collision is *loud*. zsh is hooked
+    /// entirely through `ZDOTDIR`, so a user who sets that wins — and silently
+    /// loses every command block, which reads as the blocks feature being
+    /// broken rather than as their own setting doing exactly what they asked.
+    /// Winning is still right; saying so is what makes it a trade rather than
+    /// a trap.
+    ///
+    /// One copy, in the crate that owns the spec, because both spawn sites
+    /// need the rule: the app's in-process fallback and the daemon, which is
+    /// the path every ordinary session actually takes (#488).
+    pub fn layer_env(
+        &mut self,
+        entries: impl IntoIterator<Item = (String, String)>,
+        injected: &[String],
+    ) {
+        for (key, value) in entries {
+            if injected.iter().any(|k| k == &key) {
+                tracing::warn!(
+                    key = %key,
+                    "a configured environment entry overrides a variable shell integration \
+                     needs; this session will have no command blocks"
+                );
+            }
+            self.env.push((key, value));
+        }
+    }
+
+    /// The keys [`Self::enable_shell_integration`] added, given the length
+    /// [`Self::env`] had before it ran.
+    ///
+    /// A length rather than a set because the injection is always a suffix,
+    /// and because the caller has to take the mark *before* injecting anyway.
+    #[must_use]
+    pub fn injected_since(&self, mark: usize) -> Vec<String> {
+        self.env[mark.min(self.env.len())..].iter().map(|(k, _)| k.clone()).collect()
+    }
 }
 
 /// Which shell a Windows box gets when the user has not chosen one.
@@ -541,6 +588,63 @@ mod tests {
         assert_eq!(spec.command_line, "cmd.exe", "cmd has no hook and must not be given one");
         assert!(spec.env.is_empty());
         assert!(!dir.exists(), "nothing should have been written for a shell with no hook");
+    }
+
+    #[test]
+    fn layered_env_goes_last_and_reports_what_it_shadowed() {
+        // The rule both spawn sites now share (#488). It lived in zest-app as
+        // `apply_shell_settings` and was therefore reachable only from the
+        // in-process fallback -- the path almost nobody takes -- while the
+        // daemon applied nothing at all.
+        let mut spec = CommandSpec {
+            command_line: "zsh".into(),
+            cwd: None,
+            env: vec![("TERM".into(), "xterm-256color".into())],
+        };
+        // Stand in for what `enable_shell_integration` appends: the mark is
+        // taken before, the keys are whatever landed after it.
+        let mark = spec.env.len();
+        spec.env.push(("ZDOTDIR".into(), "/from/integration".into()));
+        let injected = spec.injected_since(mark);
+        assert_eq!(injected, vec!["ZDOTDIR".to_string()], "only the suffix counts as injected");
+
+        spec.layer_env(
+            [
+                ("ZDOTDIR".to_string(), "/from/the/user".to_string()),
+                ("TERM".to_string(), "screen-256color".to_string()),
+            ],
+            &injected,
+        );
+
+        // Appended, never merged in place: both backends read the vector in
+        // order, so "wins" and "is last" are the same statement, and a shape
+        // that deduplicated here would have to re-decide the precedence that
+        // the order already encodes.
+        let effective = |k: &str| {
+            spec.env.iter().rev().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap()
+        };
+        assert_eq!(
+            effective("ZDOTDIR"),
+            "/from/the/user",
+            "a configured entry must win the collision -- an entry that is silently discarded \
+             is a setting that does nothing, which is the bug this exists to fix"
+        );
+        assert_eq!(
+            effective("TERM"),
+            "screen-256color",
+            "overriding TERM is a real thing people do, and both Alacritty and WezTerm allow it"
+        );
+    }
+
+    #[test]
+    fn injected_since_survives_a_mark_past_the_end() {
+        // `injected_since` is handed a length the caller took earlier, and a
+        // caller that reordered its own code could hand it a stale one. A
+        // panic there would take a session down over bookkeeping, which the
+        // never-crash rule does not allow -- and the honest answer for "what
+        // was appended after the end" is nothing.
+        let spec = CommandSpec { command_line: "sh".into(), cwd: None, env: Vec::new() };
+        assert!(spec.injected_since(9).is_empty());
     }
 
     /// The order that decides whether a Windows user gets command blocks at all.

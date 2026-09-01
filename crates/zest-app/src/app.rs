@@ -2653,6 +2653,7 @@ impl App {
             // process that will do the spawning.
             command: self.config.shell.as_deref().unwrap_or_default(),
             cwd: "",
+            env: &self.config.shell_env,
             cols,
             rows,
             scrollback: self.config.scrollback,
@@ -2815,6 +2816,12 @@ impl App {
                 // line would ask a Mac to run this machine's PowerShell.
                 command: "",
                 cwd: "",
+                // Empty, and not this window's `shell.env`: that is a
+                // *machine's* setting, and the daemon that spawns the shell
+                // applies its own (#488). Sending a Mac's entries to a Linux
+                // box would be this window's configuration quietly deciding
+                // another machine's shells.
+                env: &[],
                 cols,
                 rows,
                 scrollback: self.config.scrollback,
@@ -3671,6 +3678,11 @@ impl App {
                     // Remote either way: the far host runs its own default.
                     HostRoute::Tcp(_) | HostRoute::Relay { .. } => String::new(),
                 };
+                    // This machine's `shell.env` only when the shell runs
+                    // here: it is a machine's own setting, and a remote
+                    // daemon applies its own (#488).
+                let env: &[(String, String)] =
+                    if route.is_local() { &self.config.shell_env } else { &[] };
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -3678,6 +3690,7 @@ impl App {
                         label: "zesterm",
                         command: &command,
                         cwd: "",
+                        env,
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -3807,6 +3820,10 @@ impl App {
         let scrollback = self.config.scrollback;
         let command =
             if local { self.config.shell.clone().unwrap_or_default() } else { String::new() };
+        // Owned before the worker takes it, beside `command`, and empty for a
+        // remote host for `command`'s own reason: `shell.env` is a machine's
+        // setting and the far daemon applies its own (#488).
+        let env = if local { self.config.shell_env.clone() } else { Vec::new() };
         let on_pending = (!local).then(|| self.pairing_notifier(host_label.clone()));
         let pairing = Arc::clone(&self.pairing);
         let spawned = std::thread::Builder::new().name("zest-pane-open".into()).spawn(move || {
@@ -3815,6 +3832,7 @@ impl App {
                 label: "zesterm",
                 command: &command,
                 cwd: "",
+                env: &env,
                 cols,
                 rows,
                 scrollback,
@@ -9222,6 +9240,10 @@ impl App {
         let local = route.is_local();
         let command =
             if local { self.config.shell.clone().unwrap_or_default() } else { String::new() };
+        // Owned before the worker takes it, beside `command`, and empty for a
+        // remote host for `command`'s own reason: `shell.env` is a machine's
+        // setting and the far daemon applies its own (#488).
+        let env = if local { self.config.shell_env.clone() } else { Vec::new() };
 
         self.next_placeholder += 1;
         let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
@@ -9261,6 +9283,7 @@ impl App {
                 label: "zesterm",
                 command: &command,
                 cwd: "",
+                env: &env,
                 cols,
                 rows,
                 scrollback,
@@ -9334,8 +9357,7 @@ impl App {
         if self.settings.prompt.compact_ps1 {
             spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
         }
-        let injected: Vec<String> =
-            spec.env[injected_from..].iter().map(|(k, _)| k.clone()).collect();
+        let injected = spec.injected_since(injected_from);
         apply_shell_settings(&mut spec, &self.config, &injected);
         spec
     }
@@ -9610,6 +9632,11 @@ impl App {
                                     label: "zesterm",
                                     command: &command,
                                     cwd: &cwd,
+                                    // Remote by construction (`local: false`
+                                    // below), so this machine's `shell.env`
+                                    // stays home; the far daemon applies its
+                                    // own (#488).
+                                    env: &[],
                                     cols,
                                     rows,
                                     scrollback,
@@ -9721,6 +9748,19 @@ impl App {
                         label: "zesterm",
                         command: &command,
                         cwd: cwd.as_deref().unwrap_or_default(),
+                        // The daemon-backed twin of what `apply_shell_settings`
+                        // does for the in-process path. Without it the two
+                        // disagree about the user's own configuration, and the
+                        // one that wins is the one nobody takes (#488).
+                        //
+                        // Not redundant with the daemon reading the same file:
+                        // this is the *resolved* value, so it carries layers
+                        // the daemon cannot see -- `--profile` above all, which
+                        // the daemon loads with `Options::default()` and
+                        // therefore never applies. Where they do agree the
+                        // entry simply arrives twice with the same value, and
+                        // last-wins makes that a no-op.
+                        env: if route.is_local() { &self.config.shell_env } else { &[] },
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -14991,33 +15031,16 @@ fn theme_id(config: &Config, system_light: bool) -> &str {
 /// `starting_directory` is applied after `build_spec` returns and has to win,
 /// being the more specific of the two.
 ///
-/// **env goes last, so the user's entries win a collision** — both pty backends
-/// apply in order. Deliberately that way round: a `shell.env` entry that is
-/// silently discarded is a setting that does nothing, which is the entire class
-/// of bug this is fixing, and overriding `TERM` is a real thing people do —
-/// Alacritty and WezTerm both allow it. The stale-identity variables
-/// `terminal_env` clears stay cleared unless the user names one back, which is
-/// theirs to decide.
-///
-/// `injected` names what `enable_shell_integration` just added, and exists so
-/// that one collision is *loud*. zsh is hooked entirely through `ZDOTDIR`, so a
-/// user who sets that in `shell.env` wins — and silently loses every command
-/// block, which reads as the blocks feature being broken rather than as their
-/// own setting doing exactly what they asked. Winning is still right: the
-/// alternative is their entry doing nothing, which is the bug this is fixing.
-/// Saying so is what makes it a trade rather than a trap.
+/// **env goes last, so the user's entries win a collision**, and `injected`
+/// makes one collision loud. Both rules, and the reasoning behind them, live on
+/// [`CommandSpec::layer_env`] — the daemon needs the identical behaviour and
+/// this function is not reachable from it. Which mattered more than it sounds:
+/// while this was the only copy, the only path that applied `shell.env` at all
+/// was the in-process `--no-daemon` fallback, so the setting did nothing for
+/// every ordinary session (#488).
 fn apply_shell_settings(spec: &mut CommandSpec, config: &Config, injected: &[String]) {
     spec.cwd.clone_from(&config.shell_cwd);
-    for (key, value) in &config.shell_env {
-        if injected.iter().any(|k| k == key) {
-            tracing::warn!(
-                key = %key,
-                "shell.env overrides a variable shell integration needs; \
-                 this session will have no command blocks"
-            );
-        }
-        spec.env.push((key.clone(), value.clone()));
-    }
+    spec.layer_env(config.shell_env.iter().cloned(), injected);
 }
 
 /// The most rows one wheel event may move, in either direction.

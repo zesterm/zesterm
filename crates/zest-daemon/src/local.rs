@@ -642,7 +642,7 @@ mod tests {
         } else {
             "/bin/echo over-the-socket".to_string()
         };
-        conn.create(&cmd, "", 80, 24).expect("create a session over the socket");
+        conn.create(&cmd, "", 80, 24, Vec::new()).expect("create a session over the socket");
         let sessions = conn.list().expect("list sessions");
 
         assert_eq!(sessions.len(), 1, "the session was not created");

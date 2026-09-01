@@ -248,6 +248,25 @@ pub enum ClientMessage {
         cwd: String,
         cols: u16,
         rows: u16,
+        /// Extra environment for the child, layered over the host's own.
+        ///
+        /// Ordered and last-wins, and **an empty value unsets** — the same
+        /// convention `CommandSpec.env` and the `shell.env` setting already
+        /// carry, kept identical here so a launch can be handed straight to
+        /// the pty rather than translated on the way.
+        ///
+        /// No new privilege: `command` is already arbitrary execution on the
+        /// host, which is the argument `ReadFile` below makes about itself.
+        /// What this *is* is the seam a per-profile environment needs — without
+        /// it `shell.env` is a setting that does nothing, because the only
+        /// path that applied it was the in-process `--no-daemon` fallback
+        /// (#488).
+        ///
+        /// Skipped when empty so an ordinary launch is byte-identical to what
+        /// a daemon predating the field sent, and the conformance fixtures do
+        /// not move.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<(String, String)>,
     },
     /// Begin receiving updates for a session.
     ///
@@ -1231,10 +1250,57 @@ mod tests {
             cwd: r"\\wsl$\Ubuntu-24.04\home\andy".to_string(),
             cols: 120,
             rows: 34,
+            env: Vec::new(),
         };
         let body = crate::frame::encode_body(&msg).expect("encode");
         let back: ClientMessage = crate::frame::decode(&body).expect("decode");
         assert_eq!(msg, back, "command, cwd and size all survive the frame");
+    }
+
+    #[test]
+    fn a_create_sessions_env_crosses_the_wire_and_costs_nothing_when_empty() {
+        // Two claims, because the second is what lets this field be added to a
+        // frozen contract at all (#488).
+        //
+        // One: order and the empty-value-unsets convention survive the frame.
+        // `Vec<(String, String)>` rather than a map precisely so both do --
+        // last-wins needs an order, and a map would silently keep one of two
+        // entries naming the same variable.
+        let msg = ClientMessage::CreateSession {
+            command: String::new(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+            env: vec![
+                ("CLAUDE_CONFIG_DIR".into(), "/home/a/.config/zesterm/work".into()),
+                ("TERM".into(), "xterm-256color".into()),
+                // The unset spelling. A map would round-trip this identically;
+                // the assertion that matters is that it is still *here* and
+                // still last, because the daemon applies it in order.
+                ("WT_SESSION".into(), String::new()),
+            ],
+        };
+        let body = crate::frame::encode_body(&msg).expect("encode");
+        let back: ClientMessage = crate::frame::decode(&body).expect("decode");
+        assert_eq!(msg, back, "the launch environment survives the frame in order");
+
+        // Two: an ordinary launch is byte-identical to what a peer predating
+        // the field sent. `skip_serializing_if` is doing that work, and
+        // without it every `CreateSession` on every machine in the fleet would
+        // grow a field, and the conformance fixtures would move for a feature
+        // nobody in them uses.
+        let bare = ClientMessage::CreateSession {
+            command: String::new(),
+            cwd: String::new(),
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+        };
+        let encoded = crate::frame::encode_body(&bare).expect("encode");
+        assert!(
+            !String::from_utf8_lossy(&encoded).contains("env"),
+            "an empty launch env must not reach the wire at all"
+        );
     }
 
     #[test]

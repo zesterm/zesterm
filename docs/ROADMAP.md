@@ -317,6 +317,19 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
 
 ### Protocol & daemon
 
+- [x] **A launch can name its child's environment** (#488). `CreateSession`
+      grew an additive `env`, skipped when empty so an ordinary launch is
+      byte-identical to what a peer predating it sent. It is a bug fix wearing
+      a feature's clothes: `shell.env` had been a setting that did nothing for
+      every ordinary session, because the only code applying it —
+      `apply_shell_settings` — is reachable only from the in-process
+      `--no-daemon` fallback, and the daemon that actually spawns the shell was
+      never told. The daemon now reads its own `shell.env` at spawn (the shell
+      runs on *this* machine, so this machine's settings decide) and layers the
+      launch's entries on top. One copy of the ordering and its loud
+      `ZDOTDIR` collision warning, `CommandSpec::layer_env`, because two copies
+      is how the daemon came to have none. Groundwork for a profile that
+      carries its own environment (#487).
 - [ ] **Assert client scrollback equals the host's.** `SbPush` is emitted only
       when the encoder calls a viewport move a scroll, and a jump larger than
       the viewport deliberately is not one — so the host can push history the
