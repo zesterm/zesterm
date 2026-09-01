@@ -1781,6 +1781,7 @@ process moved **out** into `process::Shared`, reached through an `Rc`:
 | `remote_identity` | prompt the keychain once per window |
 | `local_context` | build two context engines for one machine's in-process sessions |
 | `restart_pending` | let one window's settings tab forget a restart another window's owed |
+| `activity` | stop the sidebar's age column for a tab moved to another window (#501): the tab's wake callback keeps the map it was built with, so that map must be the one every window reads — it is per-session data anyway |
 
 `config` and `settings` are deliberately **per-window clones**: a reload
 lands as a broadcast and each window re-derives its own `Config`, which is
@@ -1805,8 +1806,14 @@ because each of those arms was already a no-op for a window it does not
 concern.
 
 `App` never calls `el.exit()` and never opens a window. It records intent in
-`WindowRequests { close, new_window, persist }` and the process drains that
-after every dispatch. That is what makes "close this window" and "quit"
+`WindowRequests { close, new_window, persist, tear_off }` and the process
+drains that after every dispatch. A tear-off (#501) is the same shape one
+step further: the process takes the `Tab` out of one window whole — its
+session, its connection, its wake callback — and opens a window around it
+(`FirstTab::Adopt`), which sizes the pty against what the tab was *last
+told* rather than against the new grid's defaults; the source window,
+emptied, asks to close in the same pass. Address routing makes the moved
+tab's wakeups follow it with no further work. That is what makes "close this window" and "quit"
 different things: the process drops the closing `App` — every tab's session
 detaches in its destructor, exactly as before — and exits the loop only when
 no window is left. The probes and `--screenshot` are `FirstOnly` flags handed

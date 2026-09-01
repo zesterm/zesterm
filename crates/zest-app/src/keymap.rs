@@ -30,6 +30,11 @@ pub enum Action {
     /// daemon. Closing the *window* has always done this to every tab; this
     /// is the same outcome for one of them, on purpose (ADR-007).
     DetachTab,
+    /// Take the active tab out of this window and open a window of its own
+    /// around it, on the same session (#501) — Windows Terminal's "Move tab
+    /// to new window". Palette-only: ⌘M is minimize on macOS, and nothing
+    /// free is memorable enough to spend on it.
+    MoveTabToNewWindow,
     ToggleFleetPicker,
     /// 0-based; ⌘1..⌘8.
     ActivateTab(u8),
@@ -120,6 +125,11 @@ pub enum Mods {
     /// a palette row and a clickable affordance; `chord_label` prints
     /// nothing off macOS rather than naming a chord that runs something else.
     SuperShift,
+    /// No chord at all: a row the palette lists and nothing on the keyboard
+    /// reaches. For actions that deserve discovery but not a key — the
+    /// palette is rendered from this table, so this is the only way to be
+    /// in it without being a chord.
+    Palette,
 }
 
 /// The key half of a chord, stored as winit *delivers* it, never as the
@@ -207,6 +217,21 @@ const fn b(
     Binding { mods, key, action, when: When::Always, keycap, name, category, show: true }
 }
 
+/// A palette row with no chord. `ChordKey::Char("")` matches no key, and
+/// `Mods::Palette` matches no modifier state, so both halves refuse.
+const fn palette_only(action: Action, name: &'static str, category: Category) -> Binding {
+    Binding {
+        mods: Mods::Palette,
+        key: ChordKey::Char(""),
+        action,
+        when: When::Always,
+        keycap: "",
+        name,
+        category,
+        show: true,
+    }
+}
+
 const fn hidden(mods: Mods, key: ChordKey, action: Action, category: Category) -> Binding {
     Binding { mods, key, action, when: When::Always, keycap: "", name: "", category, show: false }
 }
@@ -258,6 +283,7 @@ pub static BINDINGS: &[Binding] = &[
         "Detach tab (leave it running)",
         Category::Tabs,
     ),
+    palette_only(Action::MoveTabToNewWindow, "Move tab to new window", Category::Tabs),
     // Each digit is its own palette command — "go to tab 3" must be
     // searchable and runnable, not a footnote of "1–8". Matched by position:
     // see `ChordKey::Code` for why a digit is the one thing that cannot be
@@ -381,6 +407,7 @@ fn mods_match(m: Mods, s: ModifiersState) -> Option<Form> {
         Mods::SuperShift => {
             (cfg!(target_os = "macos") && s.super_key() && s.shift_key()).then_some(Form::Super)
         }
+        Mods::Palette => None,
     }
 }
 
@@ -508,6 +535,8 @@ pub fn chord_label(binding: &Binding) -> String {
                 return String::new();
             }
         }
+        // No chord anywhere; no chip.
+        Mods::Palette => return String::new(),
     };
     // The keycap spells its own shift for the ⌘ forms — `⇧[`, `⇧E`. Every
     // non-mac prefix already ends in `Shift+`, so keeping it would print
@@ -764,6 +793,22 @@ mod tests {
                 "'{}' is reachable with ⌘ and must be reachable with Ctrl+Shift",
                 binding.name
             );
+        }
+    }
+
+    #[test]
+    fn a_palette_only_row_is_listed_and_reached_by_no_key() {
+        let row = BINDINGS
+            .iter()
+            .find(|b| b.action == Action::MoveTabToNewWindow)
+            .expect("the move-to-window row exists");
+        assert!(row.show, "palette-only means listed, not hidden");
+        assert_eq!(chord_label(row), "", "no chord, so no chip");
+        // Every modifier state, an empty character, and a plausible letter:
+        // nothing on the keyboard may land on a row that promises no chord.
+        for mods in [ModifiersState::empty(), SUPER, CTRL_SHIFT, CTRL, SHIFT, SUPER.union(SHIFT)] {
+            assert_ne!(action_for(&char_key(""), mods), Some(Action::MoveTabToNewWindow), "{mods:?}");
+            assert_ne!(action_for(&char_key("m"), mods), Some(Action::MoveTabToNewWindow), "{mods:?}");
         }
     }
 
