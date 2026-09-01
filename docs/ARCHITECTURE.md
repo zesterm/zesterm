@@ -1723,3 +1723,99 @@ no dependency on the image-format zoo; `image` is already linked into
 dialog. The settings row is a text field, so every prefix of a path someone is
 typing is a file that does not exist, and the only honest behaviour is for the
 window to look exactly as it did before they started.
+
+## ADR-018 — One process, many windows: `App` is the window, `Process` is the process
+
+**Status:** accepted (#490; the epic is #489).
+
+For as long as there was one window, `App` was the whole application: it
+implemented winit's `ApplicationHandler`, held the one `Window`, the one GPU
+surface, the one tab strip, and `window_event` threw its `WindowId` away.
+Closing it was `el.exit()`. A second window meant a second process — which
+fought the first over one `tabs.json`, started a second mDNS browser, and on
+macOS asked the Keychain a second time.
+
+### The split goes the cheap way round
+
+Nearly every field on `App` is genuinely the window's — its surface, its
+strip, its overlays, its pointer, its animation springs. The alternative that
+sounds cleaner, a new `Window` struct that those ~120 fields move *into*, is
+fifteen thousand lines of `self.x` becoming `win.x` for no behavioural gain.
+So `App` stayed the window, and the handful of things that are one per
+process moved **out** into `process::Shared`, reached through an `Rc`:
+
+| On `Shared` | Because two windows each having their own would… |
+|---|---|
+| `next_placeholder` | mint the same placeholder address twice, and a placeholder address is what routes `TabExited` / `SessionGone` / `Attention` to a window — a tab's exit would close a tab in the wrong window |
+| `fleet` | run two mDNS browsers and two probers |
+| `approval` | show the pairing modal in one window and not the other, for a question that is about the machine |
+| `clipboard` | on X11, take the copied text with the window that set it |
+| `remote_identity` | prompt the keychain once per window |
+| `local_context` | build two context engines for one machine's in-process sessions |
+| `restart_pending` | let one window's settings tab forget a restart another window's owed |
+
+`config` and `settings` are deliberately **per-window clones**: a reload
+lands as a broadcast and each window re-derives its own `Config`, which is
+also what ADR-012's "one `ChromeColors` per window" needs. The account state
+machine stays per-window too; it is driven by a Fleet screen inside a window,
+and hoisting it would put ~44 sites behind `RefCell` borrows across the
+longest methods in the crate for a limitation that costs nothing today.
+
+The rule for the next field someone adds to `App`: *would two windows break
+by each having their own?* If yes, it goes on `Shared`. If the answer is
+merely "it would be duplicated", it stays.
+
+### A window asks; the process decides
+
+`Process` implements `ApplicationHandler` and owns `Vec<App>`. It routes
+each `window_event` by id, and each `Wakeup` by a pure, exhaustive
+`process::route`: a wakeup that names a session goes to the window whose
+strip holds it (`TabStrip::owns`, tabs *and* panes), the fleet latch is
+consumed once by the process — `take_changed` clears one flag, so a broadcast
+would starve every window but the first — and everything else is broadcast,
+because each of those arms was already a no-op for a window it does not
+concern.
+
+`App` never calls `el.exit()` and never opens a window. It records intent in
+`WindowRequests { close, new_window, persist }` and the process drains that
+after every dispatch. That is what makes "close this window" and "quit"
+different things: the process drops the closing `App` — every tab's session
+detaches in its destructor, exactly as before — and exits the loop only when
+no window is left. The probes and `--screenshot` are `FirstOnly` flags handed
+to the first window alone; they measure or photograph *a* window and leave
+from inside it, which is why `Process::resumed` checks `el.exiting()` after
+each open.
+
+### The file remembers windows, and closing one is a decision about it
+
+`windows.json` replaces `tabs.json`: every window's tabs plus its geometry,
+in physical pixels because that is what winit reports and takes back. The
+old file is read as one window with no geometry until the first successful
+save of the new one, then removed. A saved size outranks `window.columns` /
+`window.rows` — a person resized *that* window; the setting describes windows
+with no memory yet. A saved position is kept only where at least 64×64 px of
+the window would still land on some monitor (`windows_state::place`), because
+a window restored off-screen is a window the user cannot find.
+
+Closing one window of several **forgets it**; closing the last remembers it.
+The first is what the user asked for, the second is quitting, and the single
+window always came back after quitting. `snapshot_after_close` is the whole
+rule, and it is tested.
+
+### What this deliberately does not do yet
+
+- **Share the GPU device.** Each window has its own `Gpu` — instance,
+  adapter, device, pipelines, atlas. `Renderer` already takes the device by
+  reference, so sharing is a mechanical split of `init_gpu`; it lands when a
+  measured second-window cost says it should, not before.
+- **Address `Redraw`.** `wake_for` stamps a session address on `Attention`
+  and could on `Redraw`; today `Redraw` is broadcast and each non-owner's
+  `RedrawRequested` finds nothing dirty and skips. The follow-up is one line
+  if profiling ever asks for it.
+- **Stay alive with no windows on macOS.** winit 0.30 exposes no
+  `applicationShouldHandleReopen`; closing the last window quits on every
+  platform.
+- **Answer a second launch.** That is #489's next step: a per-user app
+  socket beside the daemon's, over which `zesterm` run again opens a window
+  in the running process.
+

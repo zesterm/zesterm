@@ -630,7 +630,7 @@
         },
         "columns": {
           "default": 100,
-          "description": "Initial size in cells.",
+          "description": "Initial size in cells, for a window that remembers no size of its\nown: a restored window comes back the size it was closed at.",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -668,7 +668,7 @@
         },
         "rows": {
           "default": 30,
-          "description": "Initial size in cells.",
+          "description": "Initial size in cells, for a window that remembers no size of its\nown: a restored window comes back the size it was closed at.",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,

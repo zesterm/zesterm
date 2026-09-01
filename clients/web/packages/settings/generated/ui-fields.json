@@ -701,7 +701,7 @@
     "key": "window.columns",
     "group": "Window",
     "widget": "number",
-    "description": "Initial size in cells.",
+    "description": "Initial size in cells, for a window that remembers no size of its\nown: a restored window comes back the size it was closed at.",
     "range": [
       0.0,
       65535.0
@@ -759,7 +759,7 @@
     "key": "window.rows",
     "group": "Window",
     "widget": "number",
-    "description": "Initial size in cells.",
+    "description": "Initial size in cells, for a window that remembers no size of its\nown: a restored window comes back the size it was closed at.",
     "range": [
       0.0,
       65535.0

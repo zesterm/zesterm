@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty) |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
@@ -67,6 +67,15 @@ the history behind them is in closed issues and PRs.
       from `WM_NCMOUSEMOVE`.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
+- [ ] Multi-window, the rest of #489 after #490 landed the windows: a second
+      `zesterm` launch opening in the running one (a per-user app socket,
+      `window.launch = window | tab | instance`); a tab moved to a new window
+      (palette, then drag-out); one GPU device shared across windows, if the
+      measured cost of a second window says so. Known edges: closing the last
+      window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
+      `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
+      size-only (no global coordinates), and two windows on the Fleet screen
+      run two account watchers (idempotent, so merely wasteful).
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 - [ ] The tab-signal tail (#379–#385 left these deliberately): a right-click tab
       menu, which is where Detach belongs once there is one — today it is ⌘B, the

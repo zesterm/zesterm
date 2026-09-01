@@ -1,6 +1,11 @@
-//! The remembered tab set: what this window reopens as.
+//! The remembered tab set of the single-window days, read for migration.
 //!
-//! This file is what retires the adopt guess (#23): launching used to pick
+//! Superseded by [`crate::windows_state`], which remembers every window and
+//! reads this file as one window with no geometry until its own first save
+//! replaces it. The tab record itself lives on here — it is the same tab
+//! whichever window holds it.
+//!
+//! This file is what retired the adopt guess (#23): launching used to pick
 //! *any* unattached session — once, one another machine was mid-command in —
 //! because the app had no memory of what it was showing. Now it does. State,
 //! not settings: it lives in `paths::state_dir`, never in the watched config
@@ -44,6 +49,7 @@ pub struct SavedTab {
 }
 
 impl SavedTabs {
+    #[cfg(test)]
     pub fn new(active: usize, tabs: Vec<SavedTab>) -> Self {
         Self { version: VERSION, active, tabs }
     }
@@ -63,21 +69,12 @@ pub fn load() -> Option<SavedTabs> {
     (saved.version == VERSION && !saved.tabs.is_empty()).then_some(saved)
 }
 
-/// Persist the tab set. Atomic (temp + rename) so a crash mid-write leaves
-/// the previous set rather than half a file; never fatal, because losing the
-/// memory of tabs must not take the tabs with it.
-pub fn save(saved: &SavedTabs) {
-    let Some(path) = file() else { return };
-    let Some(dir) = path.parent() else { return };
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(saved).unwrap_or_default())?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
-    };
-    if let Err(e) = write() {
-        tracing::warn!(error = %e, "could not save the tab set");
+/// Forget the old single-window file, once `windows.json` has replaced it.
+/// Never fatal and never loud: a file that was never there is the common
+/// case after the first launch on this version.
+pub(crate) fn remove() {
+    if let Some(path) = file() {
+        let _ = std::fs::remove_file(path);
     }
 }
 
