@@ -3582,6 +3582,9 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(),
             Action::NewWindow => self.requests.new_window = true,
+            // Filled in with the tear-off (#501); the row exists first so the
+            // palette and the keymap land together.
+            Action::MoveTabToNewWindow => {}
             Action::CloseTab => {
                 // App tabs first, whichever holds the pane: closing one is
                 // closing a tab (§11's rule), and ⌘W is one of the three
