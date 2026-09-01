@@ -1622,6 +1622,55 @@ impl Connection {
                 vec![crate::files::read_file(&path, &cwd)]
             }
 
+            // The config surface's two questions (#498). On the serve loop for
+            // `ReadFile`'s reason and with one more of its own: a read is one
+            // `read_to_string` plus a pure cascade, a write is one parse and
+            // one atomic rename, and the only unbounded thing either could
+            // have done -- scanning a themes directory -- is bounded by
+            // `zest_theme::dir::MAX_THEMES` rather than by a deadline here.
+            ClientMessage::GetConfig { keys, profile, want_fields, want_themes } => {
+                vec![crate::config::get(
+                    self.config.settings.as_ref(),
+                    &keys,
+                    &profile,
+                    want_fields,
+                    want_themes,
+                )]
+            }
+
+            ClientMessage::SetConfig { op, key, profile, value, to } => {
+                let reply = crate::config::set(
+                    self.config.settings.as_ref(),
+                    op,
+                    &key,
+                    &profile,
+                    &value,
+                    &to,
+                );
+                // Logged like `WriteFile` and for its reason: this one changes
+                // somebody's disk, and "which client wrote that" is the
+                // question asked afterwards. It matters more here than there,
+                // because a config edit is the one change that leaves no other
+                // trace -- a session shows up in `sessions`, a written file
+                // shows up in a diff, and a settings key that quietly moved
+                // shows up nowhere at all.
+                //
+                // The outcome is recorded too, since a refused write and a
+                // completed one must not read alike in a log.
+                if let HostMessage::ConfigWritten { path, conflict, error, .. } = &reply {
+                    tracing::info!(
+                        remote = %self.remote,
+                        op = ?op,
+                        key = %key,
+                        profile = %profile,
+                        path = %path,
+                        wrote = !conflict && error.is_empty(),
+                        "client changed this machine's configuration"
+                    );
+                }
+                vec![reply]
+            }
+
             ClientMessage::WriteFile { path, cwd, data, base_hash } => {
                 let reply = crate::files::write_file(&path, &cwd, &data, &base_hash);
                 // Logged, unlike a read: this one changes somebody's disk, and
@@ -2416,14 +2465,19 @@ mod tests {
             min_delta_interval: Duration::ZERO,
             enroll: None,
             offer: None,
+            settings: None,
         }
     }
 
     fn conn() -> (Connection, Arc<Registry>) {
+        conn_with(config())
+    }
+
+    fn conn_with(cfg: DaemonConfig) -> (Connection, Arc<Registry>) {
         let registry = Arc::new(Registry::new());
         (
             Connection::new(
-                config(),
+                cfg,
                 Arc::clone(&registry),
                 // Loopback, which is what these tests exercise: the handshake
                 // still runs, the trust store is not consulted.
@@ -4772,6 +4826,642 @@ mod tests {
         peer.send(&mut c, &ClientMessage::Detach { session: addr });
         assert_eq!(registry.len(), 1, "detaching removed the session");
         assert!(registry.get(addr.session).is_some());
+    }
+
+    /// A daemon whose config surface points at a scratch file.
+    ///
+    /// Every test below writes that file first and then asserts the *file*
+    /// says what the test thinks before asserting anything about a reply.
+    /// Without that, a seam pointed at the wrong path makes the daemon answer
+    /// out of compiled defaults and every one of these passes vacuously —
+    /// which is the trap `zest-proto`'s resize fixtures paid for (#291): a
+    /// fixture must assert it reached the state under test.
+    struct ConfigScratch(std::path::PathBuf);
+    impl ConfigScratch {
+        fn new(tag: &str, contents: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("zest-srv-config-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch");
+            let path = dir.join("config.toml");
+            std::fs::write(&path, contents).expect("seed config");
+            Self(path)
+        }
+        fn text(&self) -> String {
+            std::fs::read_to_string(&self.0).unwrap_or_default()
+        }
+        fn daemon(&self, writes: bool) -> DaemonConfig {
+            DaemonConfig {
+                settings: Some(crate::config::ConfigSeam { path: self.0.clone(), writes }),
+                ..config()
+            }
+        }
+    }
+    impl Drop for ConfigScratch {
+        fn drop(&mut self) {
+            if let Some(dir) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    fn state(out: Vec<HostMessage>) -> (Vec<zest_proto::ConfigValue>, HostMessage) {
+        let one = out.into_iter().next().expect("a reply");
+        match &one {
+            HostMessage::ConfigState { values, .. } => (values.clone(), one),
+            other => panic!("expected ConfigState, got {other:?}"),
+        }
+    }
+
+    fn written(out: Vec<HostMessage>) -> HostMessage {
+        let one = out.into_iter().next().expect("a reply");
+        assert!(
+            matches!(one, HostMessage::ConfigWritten { .. }),
+            "expected ConfigWritten, got {one:?}"
+        );
+        one
+    }
+
+    #[test]
+    fn a_config_read_says_which_layer_wrote_each_value() {
+        // Provenance is the thing a client cannot reconstruct by scraping the
+        // file, so it is what this pair is *for*. Asserting one `user` row and
+        // one `default` row proves the cascade ran, where checking only that
+        // some values came back would pass against a hard-coded default tree.
+        let s = ConfigScratch::new("read", "[typography]\nsize_pt = 20.0\n");
+        assert!(s.text().contains("20.0"), "the scratch config was not seeded");
+
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+        let (values, _) = state(peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: vec!["typography".into()],
+                profile: String::new(),
+                want_fields: false,
+                want_themes: false,
+            },
+        ));
+
+        let size = values
+            .iter()
+            .find(|v| v.key == "typography.size_pt")
+            .expect("the key that was set is in scope");
+        assert_eq!(size.value, "20.0", "the file's value, not the compiled default");
+        assert_eq!(size.source, "user", "and it is attributed to the file that set it");
+
+        let untouched = values
+            .iter()
+            .find(|v| v.key == "typography.line_height")
+            .expect("a sibling the file does not set");
+        assert_eq!(
+            untouched.source, "default",
+            "a value nobody set must say so, or a client cannot tell what it may safely change"
+        );
+    }
+
+    #[test]
+    fn a_key_filter_matches_on_dots_rather_than_string_prefixes() {
+        // `starts_with` would make `window` select a `windows_*` key. A filter
+        // that quietly returns a neighbouring key is worse than one that
+        // returns nothing, because the caller acts on it.
+        let s = ConfigScratch::new("filter", "");
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+        let (values, _) = state(peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: vec!["window".into()],
+                profile: String::new(),
+                want_fields: false,
+                want_themes: false,
+            },
+        ));
+        assert!(!values.is_empty(), "the group exists and has keys");
+        for v in &values {
+            assert!(
+                v.key.starts_with("window."),
+                "`{}` is not under the group that was asked for",
+                v.key
+            );
+        }
+    }
+
+    #[test]
+    fn a_config_write_lands_in_the_file_and_reports_what_it_costs() {
+        let s = ConfigScratch::new("write", "[typography]\nsize_pt = 14.0\n");
+        assert!(s.text().contains("14.0"), "the scratch config was not seeded");
+
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "typography.size_pt".into(),
+                profile: String::new(),
+                value: "20.0".into(),
+                to: String::new(),
+            },
+        ));
+
+        assert!(
+            s.text().contains("size_pt = 20.0"),
+            "the reply claimed success but the file still reads: {}",
+            s.text()
+        );
+        let HostMessage::ConfigWritten { invalidation, needs_restart, effective, error, .. } =
+            &reply
+        else {
+            unreachable!()
+        };
+        assert!(error.is_empty(), "unexpected refusal: {error}");
+        assert_eq!(invalidation, "geometry", "a font size resizes the pty");
+        assert!(!needs_restart, "and geometry is not a relaunch");
+        let effective = effective.as_ref().expect("a set reports what it now resolves to");
+        assert_eq!(effective.value, "20.0");
+        assert_eq!(effective.source, "user");
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_type_is_refused_and_the_file_is_untouched() {
+        // The reason this message pair exists rather than leaving clients on
+        // `WriteFile`. `cascade::resolve` ends in
+        // `try_into::<Settings>().unwrap_or_default()`, so one wrongly-typed
+        // value resets the *entire* settings tree to defaults in every running
+        // client — themes, fonts, padding, the lot — with no error anywhere.
+        // A writer that hands bytes to a file cannot prevent that.
+        let s = ConfigScratch::new(
+            "wrongtype",
+            "[typography]\nsize_pt = 14.0\n\n[appearance]\ntheme = \"nord\"\n",
+        );
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "typography.size_pt".into(),
+                profile: String::new(),
+                value: "\"big\"".into(),
+                to: String::new(),
+            },
+        ));
+
+        let HostMessage::ConfigWritten { error, path, .. } = &reply else { unreachable!() };
+        assert!(!error.is_empty(), "a string in a float's slot must be refused");
+        assert!(path.is_empty(), "an empty path is what says nothing was written");
+        assert!(
+            s.text().contains("size_pt = 14.0") && s.text().contains("nord"),
+            "the refused write still reached the file, taking every other setting \
+             with it on the next load: {}",
+            s.text()
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_with_the_keys_that_are_close() {
+        // A key that silently does nothing is indistinguishable from one this
+        // version ignores, so a typo reads as an unimplemented feature.
+        let s = ConfigScratch::new("typo", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "typography.sizept".into(),
+                profile: String::new(),
+                value: "20.0".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.contains("no setting named"), "{error}");
+        assert!(
+            error.contains("size_pt"),
+            "a refusal has to name the thing to try instead: {error}"
+        );
+    }
+
+    #[test]
+    fn a_rename_onto_a_live_profile_conflicts_rather_than_destroying_it() {
+        let s = ConfigScratch::new(
+            "rename",
+            "[profiles.work]\ncommand = \"bash\"\n\n[profiles.play]\ncommand = \"zsh\"\n",
+        );
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::RenameProfile,
+                key: String::new(),
+                profile: "work".into(),
+                value: String::new(),
+                to: "play".into(),
+            },
+        ));
+        let HostMessage::ConfigWritten { conflict, error, .. } = &reply else { unreachable!() };
+        assert!(conflict, "a taken name is a branch the client acts on, not a message");
+        assert!(!error.is_empty(), "and it still says why");
+        let text = s.text();
+        assert!(
+            text.contains("[profiles.work]") && text.contains("[profiles.play]"),
+            "both profiles must survive a refused rename: {text}"
+        );
+        assert!(text.contains("bash") && text.contains("zsh"), "and keep their commands: {text}");
+    }
+
+    #[test]
+    fn the_defaults_layer_is_not_a_profile_anyone_can_create() {
+        // `profiles.defaults` is the layer every profile falls through, so a
+        // launcher row for it would offer to start a thing that is not a
+        // launch target.
+        let s = ConfigScratch::new("reserved", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::CreateProfile,
+                key: String::new(),
+                profile: "defaults".into(),
+                value: String::new(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.contains("inherits"), "the refusal must say what defaults is: {error}");
+    }
+
+    #[test]
+    fn resetting_a_key_that_was_never_set_is_success_and_not_an_error() {
+        // Reset-to-default has to be idempotent: "make this not set" is
+        // already true, and a client that treats that as a failure would show
+        // an error for the thing it just achieved.
+        let s = ConfigScratch::new("reset", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Reset,
+                key: "typography.size_pt".into(),
+                profile: String::new(),
+                value: String::new(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, effective, .. } = &reply else { unreachable!() };
+        assert!(error.is_empty(), "an idempotent reset is not a refusal: {error}");
+        assert_eq!(
+            effective.as_ref().expect("a reset reports what now stands").source,
+            "default",
+            "and what stands afterwards is the compiled default"
+        );
+    }
+
+    #[test]
+    fn resetting_a_key_that_does_not_exist_is_refused_rather_than_quietly_doing_nothing() {
+        // The asymmetry this guards: `remove_value` treats a missing key as
+        // already-absent, which is right for a *known* key and hides a typo
+        // for an unknown one. Without the check, `set typography.sizept` is
+        // refused with a did-you-mean while `reset typography.sizept` reports
+        // success -- so the same typo behaves differently depending on which
+        // half of the tool you reached for, and the reset half tells you it
+        // worked.
+        let s = ConfigScratch::new("resettypo", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Reset,
+                key: "typography.sizept".into(),
+                profile: String::new(),
+                value: String::new(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.contains("no setting named"), "{error}");
+        assert!(error.contains("size_pt"), "and it names the likely intent: {error}");
+    }
+
+    #[test]
+    fn a_daemon_that_serves_config_read_only_refuses_writes_in_the_reply_shape() {
+        // Never `HostMessage::Error`: a sessionless Error is what an *old*
+        // daemon sends when it cannot decode `SetConfig` at all, and a client
+        // reads that as "this host is too old". A fixable refusal must not
+        // look like an unfixable one.
+        let s = ConfigScratch::new("readonly", "");
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "appearance.theme".into(),
+                profile: String::new(),
+                value: "\"nord\"".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.contains("read-only"), "{error}");
+    }
+
+    #[test]
+    fn a_daemon_with_no_config_seam_refuses_in_the_reply_shape_too() {
+        let (mut c, _r) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: Vec::new(),
+                profile: String::new(),
+                want_fields: false,
+                want_themes: false,
+            },
+        );
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { error, .. } = &one else {
+            panic!("a refusal must wear the reply's shape, not Error: {one:?}")
+        };
+        assert!(!error.is_empty(), "and it has to say why");
+    }
+
+    #[test]
+    fn a_machine_with_no_config_file_says_so_rather_than_looking_empty() {
+        // A machine running on pure defaults and a failed read are different
+        // facts, and `values` cannot tell them apart -- the cascade answers
+        // with the full default tree either way.
+        let s = ConfigScratch::new("missing", "");
+        std::fs::remove_file(&s.0).expect("remove the seeded file");
+
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: vec!["appearance.theme".into()],
+                profile: String::new(),
+                want_fields: false,
+                want_themes: false,
+            },
+        );
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { exists, values, error, .. } = &one else {
+            panic!("expected ConfigState")
+        };
+        assert!(!exists, "the file is gone and the reply has to say so");
+        assert!(error.is_empty(), "but that is not a failure");
+        assert_eq!(values.len(), 1, "and the defaults still resolve");
+        assert_eq!(values[0].source, "default");
+
+        // And a first write creates it.
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "appearance.theme".into(),
+                profile: String::new(),
+                value: "\"nord\"".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.is_empty(), "a first write must create the file: {error}");
+        assert!(s.0.is_file(), "the file was not created");
+        assert!(s.text().contains("nord"), "{}", s.text());
+    }
+
+    #[test]
+    fn a_profile_write_is_priced_by_its_key_and_not_by_a_root_diff() {
+        // The trap: the daemon resolves with no profile selected, so the root
+        // settings are identical before and after a profile edit and
+        // `diff` answers `None` -- a geometry change reported as costing
+        // nothing. And a profile-*only* key is in no KEYS row, so `class_of`
+        // would fall back to Restart, telling somebody to relaunch to rename
+        // a tab.
+        let s = ConfigScratch::new("profilecost", "[profiles.work]\ncommand = \"bash\"\n");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "typography.size_pt".into(),
+                profile: "work".into(),
+                value: "18.0".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { invalidation, error, .. } = &reply else {
+            unreachable!()
+        };
+        assert!(error.is_empty(), "{error}");
+        assert_eq!(
+            invalidation, "geometry",
+            "a root diff after a profile write is empty, so pricing off it reports \
+             a pty resize as free"
+        );
+
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "icon".into(),
+                profile: "work".into(),
+                value: "\"\u{1f680}\"".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { invalidation, needs_restart, error, .. } = &reply
+        else {
+            unreachable!()
+        };
+        assert!(error.is_empty(), "a profile-only key is legal inside a profile: {error}");
+        assert_eq!(invalidation, "free", "a running session keeps what it launched with");
+        assert!(!needs_restart);
+    }
+
+    #[test]
+    fn a_profile_may_set_any_settings_key_not_just_the_editor_s_shortlist() {
+        // `PROFILE_SETTINGS_KEYS` scopes the settings *editor*, not the
+        // cascade. Checking a write against it would refuse the feature's
+        // headline use -- a profile that recolours its own window -- for a key
+        // the cascade applies perfectly well.
+        let s = ConfigScratch::new("profileany", "");
+        let (mut c, _r) = conn_with(s.daemon(true));
+        let mut peer = authenticate(&mut c);
+        let reply = written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "tabs.position".into(),
+                profile: "k8s".into(),
+                value: "\"left\"".into(),
+                to: String::new(),
+            },
+        ));
+        let HostMessage::ConfigWritten { error, .. } = &reply else { unreachable!() };
+        assert!(error.is_empty(), "a profile may set a settings key: {error}");
+        let text = s.text();
+        assert!(
+            text.contains("[profiles.k8s.tabs]") && text.contains("position = \"left\""),
+            "the override did not land under the profile: {text}"
+        );
+    }
+
+    #[test]
+    fn a_profile_reads_back_with_the_host_key_a_published_one_hides() {
+        let s = ConfigScratch::new(
+            "profileread",
+            "[profiles.defaults]\nicon = \"D\"\n\n[profiles.k8s]\nhost = \"big-linux\"\ncommand = \"bash\"\n",
+        );
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: vec!["nothing.at.all".into()],
+                profile: "k8s".into(),
+                want_fields: false,
+                want_themes: false,
+            },
+        );
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { profiles, profile_detail, .. } = &one else {
+            panic!("expected ConfigState")
+        };
+        assert!(
+            profiles.contains(&"k8s".to_string()),
+            "profile names come back whatever the key filter says: {profiles:?}"
+        );
+        assert!(
+            !profiles.contains(&"defaults".to_string()),
+            "`defaults` is a layer, not a profile: {profiles:?}"
+        );
+        let d = profile_detail.as_ref().expect("the named profile");
+        assert_eq!(d.host, "big-linux", "a file view shows the host key it was asked to edit");
+        assert_eq!(d.command, "bash");
+        assert_eq!(d.icon, "D", "and a value inherited from the defaults layer");
+    }
+
+    #[test]
+    fn the_field_metadata_and_theme_roster_arrive_only_when_asked() {
+        // The reply's expensive halves. `ui::fields()` is roughly twenty times
+        // the size of the values, so a read that always carried it would make
+        // the cheap common case pay for the rare one.
+        let s = ConfigScratch::new("slices", "");
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+
+        let ask = |want_fields, want_themes| ClientMessage::GetConfig {
+            keys: vec!["appearance.theme".into()],
+            profile: String::new(),
+            want_fields,
+            want_themes,
+        };
+
+        let out = peer.send(&mut c, &ask(false, false));
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { fields, themes, .. } = &one else { panic!() };
+        assert!(fields.is_empty() && themes.is_empty(), "unasked slices must not be sent");
+
+        let out = peer.send(&mut c, &ask(true, true));
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { fields, themes, .. } = &one else { panic!() };
+        assert_eq!(fields.len(), 1, "the key filter applies to the fields too");
+        assert_eq!(fields[0].key, "appearance.theme");
+        assert!(
+            themes.iter().any(|t| t.id == "obsidian" && t.builtin),
+            "the roster must carry this machine's built-ins: {themes:?}"
+        );
+    }
+
+    #[test]
+    fn a_wire_write_republishes_the_offer_only_when_the_offer_actually_changed() {
+        // The write/reload cycle, and why it terminates at depth one.
+        //
+        // A daemon write fires its own config `Watcher`, which calls
+        // `OfferSource::reload` -- so the obvious worry is a loop. It cannot
+        // be one, for a reason worth pinning rather than reasoning about
+        // again: nothing in the reload path writes, and `set` bumps the
+        // generation *only* when the recomputed offer differs. So a write of a
+        // key the offer does not carry costs one file read and no wire
+        // traffic, and a write of one it does costs exactly one republish.
+        //
+        // Asserted against `profiles_of` directly rather than through a real
+        // watcher, because the watcher lives in `main.rs` and a timing-based
+        // test of it would be the flake this reasoning is meant to avoid.
+        // Seeded to match what `offer_with` synthesizes, so the precondition
+        // below is a real starting point rather than a difference the first
+        // recompute would report as a change.
+        let s = ConfigScratch::new("republish", "[profiles.work]\ncommand = \"run-work\"\n");
+        let source = crate::offer::OfferSource::new(offer_with(&["work"]));
+        let mut cfg = s.daemon(true);
+        cfg.offer = Some(source.clone());
+
+        let recompute = |source: &crate::offer::OfferSource| {
+            let text = std::fs::read_to_string(&s.0).unwrap_or_default();
+            let table = text.parse::<toml::Table>().expect("the file still parses");
+            let resolved = zest_config::cascade::resolve(&[zest_config::Layer {
+                source: zest_config::Source::User,
+                table,
+            }]);
+            let mut offer = offer_with(&[]);
+            offer.profiles = crate::offer::profiles_of(&resolved.settings);
+            source.set(offer)
+        };
+
+        assert!(
+            !recompute(&source),
+            "precondition: the seeded file already describes the offer under test"
+        );
+
+        let (mut c, _r) = conn_with(cfg);
+        let mut peer = authenticate(&mut c);
+
+        written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "typography.size_pt".into(),
+                profile: String::new(),
+                value: "20.0".into(),
+                to: String::new(),
+            },
+        ));
+        assert!(
+            !recompute(&source),
+            "a font size is not in the offer, so reloading after that write must \
+             publish nothing -- otherwise every settings edit wakes every client \
+             in the fleet"
+        );
+
+        written(peer.send(
+            &mut c,
+            &ClientMessage::SetConfig {
+                op: zest_proto::ConfigOp::Set,
+                key: "command".into(),
+                profile: "work".into(),
+                value: "\"fish\"".into(),
+                to: String::new(),
+            },
+        ));
+        assert!(
+            recompute(&source),
+            "a profile's command *is* in the offer, so the launcher must learn about it"
+        );
+        assert!(
+            !recompute(&source),
+            "and exactly once: a second reload of an unchanged file must be a no-op, \
+             which is what stops the watcher's own write-notify from cycling"
+        );
     }
 
     /// A scratch directory for the file tests, cleaned up on drop.

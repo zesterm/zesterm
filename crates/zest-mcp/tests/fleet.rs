@@ -66,6 +66,7 @@ fn machine(label: &str, gated: bool) -> Machine {
         offer: Some(zest_daemon::offer::OfferSource::new(zest_daemon::offer::facts(
             format!("{label}-shell"),
         ))),
+        settings: None,
     };
     let registry = Arc::new(Registry::new());
 

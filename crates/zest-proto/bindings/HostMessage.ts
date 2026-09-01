@@ -4,6 +4,11 @@ import type { AttrDef } from "./AttrDef";
 import type { AuthFailure } from "./AuthFailure";
 import type { BlockPayload } from "./BlockPayload";
 import type { ClientId } from "./ClientId";
+import type { ConfigField } from "./ConfigField";
+import type { ConfigOp } from "./ConfigOp";
+import type { ConfigProfile } from "./ConfigProfile";
+import type { ConfigTheme } from "./ConfigTheme";
+import type { ConfigValue } from "./ConfigValue";
 import type { CursorState } from "./CursorState";
 import type { Delta } from "./Delta";
 import type { HostId } from "./HostId";
@@ -270,5 +275,134 @@ untracked: Array<string>, untracked_truncated: boolean,
  * Why there is no diff, when there is none for a reason — not a
  * repository, or git did not answer. Empty when the tree is simply
  * clean, which must not render as a failure.
+ */
+error: string, } | { "t": "config_state", 
+/**
+ * The request's `keys`, echoed.
+ */
+keys: Array<string>, 
+/**
+ * The request's `profile`, echoed.
+ */
+profile: string, 
+/**
+ * The file this machine reads and writes, host-absolute. Empty when
+ * the machine has no config directory at all.
+ */
+path: string, 
+/**
+ * Whether that file exists yet.
+ *
+ * A machine running on pure defaults is not a broken one, and a
+ * client about to write needs to know which it is looking at — an
+ * empty `values` list would otherwise read as a failed read.
+ */
+exists: boolean, 
+/**
+ * One row per settings key in scope, effective after the cascade.
+ */
+values: Array<ConfigValue>, 
+/**
+ * Every profile's name.
+ *
+ * Always sent, unfiltered by `keys`: it is a handful of short strings
+ * and it is the answer to "what is there to edit", which a client
+ * otherwise has to ask a second time to find out.
+ */
+profiles: Array<string>, 
+/**
+ * The named profile in full, when one was asked for.
+ *
+ * Boxed, and only for the enum's shape: `ConfigProfile` is a dozen
+ * `String`s, which made `ConfigState` more than twice the size of
+ * every other `HostMessage` variant — and every variant pays that,
+ * including the `Update` sent thousands of times a second. `Box` is
+ * transparent to serde and to `ts-rs`, so the wire and the binding
+ * are byte-for-byte what they were.
+ */
+profile_detail?: ConfigProfile, 
+/**
+ * What each key accepts, when `want_fields` asked. Filtered by `keys`
+ * like `values`, because this is the large half of the reply.
+ */
+fields: Array<ConfigField>, 
+/**
+ * This machine's theme roster, when `want_themes` asked.
+ *
+ * There is deliberately **no `active_theme` field**: the active theme
+ * is `appearance.theme` in `values`, beside `appearance.light_theme`
+ * and `appearance.follow_system_theme`, which together decide it. Two
+ * fields that must agree are two fields that can disagree.
+ */
+themes: Array<ConfigTheme>, 
+/**
+ * Keys in the file the schema does not know — a typo, or a config
+ * written for a newer zesterm. Reported rather than dropped, because
+ * those two look identical and only the person can tell them apart.
+ */
+unknown_keys: Array<string>, 
+/**
+ * Layers that could not be read, phrased for a person.
+ *
+ * Not a refusal: the values above are still the best this machine
+ * could resolve, which is exactly what it is running on.
+ */
+problems: Array<string>, 
+/**
+ * Why there is nothing, when there is nothing for a reason. Empty
+ * when the read simply succeeded — a machine on pure defaults and a
+ * refused read must not render the same.
+ */
+error: string, } | { "t": "config_written", 
+/**
+ * The request's `op`, echoed — with `key`, `profile` and `to`, the
+ * whole of the correlation this pair has.
+ */
+op: ConfigOp, key: string, profile: string, to: string, 
+/**
+ * The file that changed, host-absolute. Empty when nothing was
+ * written, which is what separates a refusal from a no-op.
+ */
+path: string, 
+/**
+ * What the change costs, as this machine computed it: `none`,
+ * `free`, `atlas-bump`, `geometry`, `surface-rebuild`, `restart`.
+ *
+ * A **string**, where [`ConfigOp`] is a typed enum, and the asymmetry
+ * is deliberate. An op a client names is either one that exists or a
+ * bug in the client; an invalidation class is something the *host*
+ * computed and the client displays. Typing it here would make a
+ * seventh class a coordinated wire change across every consumer, to
+ * buy a match arm nobody branches on.
+ */
+invalidation: string, 
+/**
+ * The running app will not pick this up on its own.
+ *
+ * The one thing a client must *branch* on rather than show, which is
+ * the bar `FileWritten.conflict` sets for a bool on this wire.
+ */
+needs_restart: boolean, 
+/**
+ * What the key now *resolves* to, when the op had a key.
+ *
+ * "I wrote it" and "it is in force" are different facts: a profile
+ * layer or a command-line flag can shadow a write, and a client that
+ * reported success while the value did not move would be telling the
+ * truth about the wrong thing.
+ */
+effective?: ConfigValue, 
+/**
+ * The edit was refused because a name is taken or a source is gone —
+ * a rename onto a live profile, a copy from one that is not there.
+ *
+ * A bool rather than one of several error strings for
+ * `FileWritten.conflict`'s reason: the client's next act is to pick
+ * another name, which is a branch and not a message.
+ */
+conflict: boolean, 
+/**
+ * Why nothing was written, phrased for a person. Empty on success —
+ * an idempotent reset and a refused one must not read the same.
  */
 error: string, };

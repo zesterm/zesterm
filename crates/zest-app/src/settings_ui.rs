@@ -770,38 +770,17 @@ pub fn to_toml(
     }
 }
 
-/// Plain Levenshtein edit distance, for the unknown-keys suggestions. Small
-/// and in-crate on purpose: two dotted keys are ~25 characters, a config has
-/// a handful of unknowns, and a dependency for this would be all cost.
-#[must_use]
-pub fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
-}
-
-/// "did you mean `size_pt`?" — the nearest schema key when the distance is
-/// small enough to read as a typo (≤ 2 edits), else nothing: a stretch
-/// suggestion is worse than none.
-#[must_use]
-pub fn suggest_key(unknown: &str, schema_keys: &[String]) -> Option<String> {
-    schema_keys
-        .iter()
-        .map(|k| (levenshtein(unknown, k), k))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, k)| k.clone())
-}
+/// The did-you-mean for an unknown settings key.
+///
+/// Re-exported rather than defined here: it moved to `zest-config` with #509,
+/// because this crate is a `[[bin]]` and the daemon refusing an unknown key
+/// over the wire could not reach it — it would have grown a second, worse copy
+/// and the two would have suggested different keys for the same typo.
+///
+/// `levenshtein` is deliberately not re-exported beside it: nothing in this
+/// crate calls it any more, and an unused `pub use` in a bin crate is a hard
+/// error under `-D warnings`.
+pub use zest_config::schema::suggest_key;
 
 /// The f64 that *displays* as the f32 the user meant.
 ///
@@ -1452,21 +1431,10 @@ mod tests {
 
     #[test]
     fn unknown_keys_suggest_only_plausible_typos() {
+        // `suggest_key` itself is tested where it now lives
+        // (`zest_config::schema`); what is left here is the row this crate
+        // builds out of it.
         let keys: Vec<String> = zest_config::schema::keys();
-        assert_eq!(
-            suggest_key("typography.size_px", &keys).as_deref(),
-            Some("typography.size_pt"),
-            "one edit away is the canonical did-you-mean"
-        );
-        assert_eq!(
-            suggest_key("window.blur_radius", &keys),
-            None,
-            "far from everything: no match beats a stretch"
-        );
-        // The ≤2 boundary itself, pinned with arithmetic rather than vibes.
-        assert_eq!(levenshtein("size_pt", "size_px"), 1);
-        assert_eq!(levenshtein("opacity", "opac"), 3);
-        assert_eq!(levenshtein("", "ab"), 2);
         let (rows, actions) = build_unknown_rows(
             &["typography.size_px".to_string(), "window.blur_radius".to_string()],
             &BTreeMap::new(),

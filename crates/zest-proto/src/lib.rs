@@ -395,6 +395,256 @@ pub enum ClientMessage {
     /// [`HostMessage::GitDiffResult`], and degrading on an old daemon through
     /// the same could-not-understand `Error`.
     GitDiff { cwd: String },
+    /// What is this machine configured to do, and where did each value come
+    /// from? (#498)
+    ///
+    /// Host-scoped like [`Self::ReadFile`]: the config is on the machine that
+    /// answers, and the connection is the routing. The `Enroll` bargain
+    /// applies — an old daemon cannot decode the variant, answers its generic
+    /// could-not-understand `Error` and keeps serving.
+    ///
+    /// Answered by [`HostMessage::ConfigState`].
+    ///
+    /// **No more authority than the client already holds.** `ReadFile` reads
+    /// this exact file today, with no path restriction of any kind, and
+    /// pairing grants `CreateSession { command }`. What this adds over
+    /// scraping the file is not access, it is the cascade: an effective value
+    /// with the layer that wrote it, which a reader of the raw TOML cannot
+    /// reconstruct.
+    GetConfig {
+        /// Restrict the answer to these dotted keys, or to prefixes of them —
+        /// `window` means every `window.*`. Empty means every key.
+        ///
+        /// A filter on the *reply's size*, never on permission. The whole
+        /// value set is a kilobyte or two and is meant to be asked for
+        /// unfiltered; the field metadata is twenty times that, which is what
+        /// this exists for.
+        #[serde(default)]
+        keys: Vec<String>,
+        /// Also describe this profile: what it overrides, its launch
+        /// metadata, and where each value came from. Empty means no profile
+        /// detail — the *names* come back either way.
+        #[serde(default)]
+        profile: String,
+        /// Also send the editable-field metadata — widget, range, variants,
+        /// default, description. Large, so it is opt-in, and `keys` filters
+        /// it too.
+        #[serde(default)]
+        want_fields: bool,
+        /// Also send this machine's theme roster: its built-ins and whatever
+        /// it found in its own themes directory.
+        #[serde(default)]
+        want_themes: bool,
+    },
+    /// Change one thing about this machine's configuration (#498).
+    ///
+    /// Answered by [`HostMessage::ConfigWritten`], and refused there rather
+    /// than obeyed when the key is unknown, the value is illegal, or the edit
+    /// would leave a file that no longer parses as settings.
+    ///
+    /// **There is no `base_hash`, unlike [`Self::WriteFile`], and that is a
+    /// decision rather than an omission.** A per-key edit goes through
+    /// `toml_edit` into whatever is on disk at the moment of the write, so two
+    /// writers touching different keys both survive — which is the common
+    /// case, a person in the settings tab while an agent sets something else.
+    /// A whole-file precondition would refuse edits that do not conflict, and
+    /// the failure it would prevent — last-writer-wins on *one* key — costs a
+    /// keystroke rather than a file.
+    SetConfig {
+        op: ConfigOp,
+        /// The dotted settings key, for `set` and `reset`. Ignored otherwise.
+        key: String,
+        /// The profile the edit is scoped to; empty is the root settings. For
+        /// the profile operations, the profile being acted on.
+        #[serde(default)]
+        profile: String,
+        /// The new value in its TOML spelling, for `set`. Ignored otherwise —
+        /// `op` is the discriminator, so an empty string stays a legal value
+        /// rather than a second way to spell "reset".
+        #[serde(default)]
+        value: String,
+        /// The destination name, for `copy-profile` and `rename-profile`.
+        #[serde(default)]
+        to: String,
+    },
+}
+
+/// What a [`ClientMessage::SetConfig`] does.
+///
+/// A typed enum rather than a string because these are the operations that
+/// exist and a client naming one that does not is a bug in the client, not a
+/// value to display. Contrast [`HostMessage::ConfigWritten::invalidation`],
+/// which is a string precisely because a new class must not be a coordinated
+/// wire change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ConfigOp {
+    /// Write `key` = `value`.
+    Set,
+    /// Remove `key`, so it falls back to whatever the weaker layers say.
+    /// Idempotent: a key that was never set is a success, not an error.
+    Reset,
+    /// Create an empty profile. Idempotent, like the config crate's own.
+    CreateProfile,
+    /// Duplicate `profile` as `to`.
+    CopyProfile,
+    /// Rename `profile` to `to`.
+    RenameProfile,
+    /// Delete `profile`.
+    RemoveProfile,
+}
+
+/// One settings value, as this machine resolves it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ConfigValue {
+    /// Dotted, e.g. `typography.size_pt`.
+    pub key: String,
+    /// The value in its **TOML spelling** — `20.0`, `true`, `"nord"`,
+    /// `["Berkeley Mono", "monospace"]`.
+    ///
+    /// Not JSON, and not a typed sum, for three reasons that all point the
+    /// same way. The file is TOML, so an agent reading `size_pt = 20.0` in
+    /// `config.toml` and reading this see the same text, and the two pictures
+    /// compose. The write direction takes the same spelling straight to
+    /// `toml_edit`, so `14` stays `14` rather than becoming `14.0` in
+    /// somebody's hand-written file — the exact problem `UiField.integer`
+    /// exists for. And it costs `zest-proto` no dependency, in a crate whose
+    /// manifest says it is "data and the rules for encoding it, nothing else".
+    ///
+    /// The same trade [`HostMessage::GitDiffResult::diff`] makes: parsing is a
+    /// small pure function in each client, where a wire-level value vocabulary
+    /// would be a large surface frozen on the day it ships.
+    pub value: String,
+    /// Which layer wrote it: `default`, `user`, `profile:<name>`,
+    /// `workspace`, `command-line`.
+    ///
+    /// The machine-readable spelling, deliberately **not** `Source`'s
+    /// `Display` — that one is prose ("set by profile `k8s-prod`"), and a
+    /// client parsing prose is the thing this field exists to avoid.
+    pub source: String,
+}
+
+/// What one settings key accepts — the wire half of `zest_config::ui::UiField`.
+///
+/// Restated here rather than imported, exactly as [`HostProfile`] restates
+/// `ProfileMeta` and for the same reason (ADR-014): `zest-proto` importing
+/// `zest-config` would put a settings cascade inside the frozen wire crate.
+/// The projection lives in the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ConfigField {
+    pub key: String,
+    /// The display group the settings UIs put it in.
+    pub group: String,
+    /// `toggle`, `number`, `slider`, `select`, `theme-picker`, … — the
+    /// kebab-case spelling of `zest_config::ui::Widget`.
+    pub widget: String,
+    /// The field's doc comment, which is what a person or a model reads to
+    /// decide what to set it to.
+    pub description: String,
+    /// Schema minimum and maximum, when the schema gives both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub range: Option<(f64, f64)>,
+    /// The schema types this as an integer, so a write must spell it `14`
+    /// rather than `14.0`.
+    #[serde(default)]
+    pub integer: bool,
+    /// The legal values, when there is a closed set of them. Empty for a
+    /// picker whose roster is live state rather than schema — a theme list is
+    /// [`ConfigState::themes`], not this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ConfigVariant>,
+    /// The schema default, in the same TOML spelling as
+    /// [`ConfigValue::value`], so "is this still the default" is a string
+    /// comparison rather than a second encoding to agree about.
+    #[serde(default)]
+    pub default: String,
+    /// The schema's advisory restart flag. `invalidate::class_of` is the
+    /// authoritative answer and is what [`HostMessage::ConfigWritten`]
+    /// reports; this covers fewer keys and exists for a client holding only
+    /// the schema.
+    #[serde(default)]
+    pub restart_hint: bool,
+}
+
+/// One option of a [`ConfigField`] with a closed set of values.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ConfigVariant {
+    /// The wire value, exactly as it must be spelled in the file.
+    pub value: String,
+    /// The variant's doc comment; empty when it has none.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// One profile as its file describes it.
+///
+/// **Carries `host` and `ask_host`, which [`HostProfile`] deliberately does
+/// not**, and the difference is the whole reason these are two types rather
+/// than one. `HostProfile` is a *launch target*: a client resolves it and then
+/// dials, so a `host` key there invites resolution against the **viewer's**
+/// fleet, which is the one way that feature could start a command on the wrong
+/// computer (ADR-014). This is a *view of a file*, for a client about to edit
+/// that file, and nothing launches from it.
+///
+/// Nothing structural enforces that. A launcher wired to this type later would
+/// reintroduce exactly the bug ADR-014 removed, so the rule lives here, in the
+/// tool descriptions that expose it, and nowhere else it can be missed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ConfigProfile {
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    /// The machine this profile is pinned to, as the *file* spells it. Empty
+    /// means the machine that answered.
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub ask_host: bool,
+    #[serde(default)]
+    pub starting_directory: String,
+    /// `from-shell`, `profile-name`, or the literal custom title.
+    #[serde(default)]
+    pub tab_title: String,
+    #[serde(default)]
+    pub color_scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub tab_color: Option<u8>,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub color_from: String,
+    /// The settings keys this profile overrides, each with `source` reading
+    /// `profile:<name>` or `profile:defaults` — so "this profile sets it" and
+    /// "it fell through to Defaults" are distinguishable, which is the
+    /// question anyone editing a profile is actually asking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<ConfigValue>,
+    /// Keys in the profile's table that are neither profile-only nor schema
+    /// keys — the typo surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_keys: Vec<String>,
+}
+
+/// One theme a machine has.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ConfigTheme {
+    pub id: String,
+    pub name: String,
+    /// `dark` or `light`.
+    #[serde(default)]
+    pub mode: String,
+    /// Shipped with zesterm rather than imported by this machine's user. What
+    /// separates "everyone has this" from "this one is on that laptop".
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// What a host sends.
@@ -787,6 +1037,143 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         error: String,
     },
+    /// The answer to [`ClientMessage::GetConfig`] (#498).
+    ///
+    /// A plain reply, not a push, so — like `DirListing`, `FileContents` and
+    /// `GitDiffResult` — **no `Hello` flag guards it**: a peer that cannot
+    /// decode this tag structurally never asks for it. `keys` and `profile`
+    /// echo the question, which is the correlation; a client that moved on
+    /// while a slow answer was in flight drops the stale one by comparing them.
+    ///
+    /// A refusal is *this* message with `error` set, never
+    /// [`Self::Error`] — a sessionless `Error` is what an **old** daemon
+    /// sends, and a client reads that as "this daemon is too old". The two
+    /// must not be confusable.
+    ConfigState {
+        /// The request's `keys`, echoed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keys: Vec<String>,
+        /// The request's `profile`, echoed.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        profile: String,
+        /// The file this machine reads and writes, host-absolute. Empty when
+        /// the machine has no config directory at all.
+        #[serde(default)]
+        path: String,
+        /// Whether that file exists yet.
+        ///
+        /// A machine running on pure defaults is not a broken one, and a
+        /// client about to write needs to know which it is looking at — an
+        /// empty `values` list would otherwise read as a failed read.
+        #[serde(default)]
+        exists: bool,
+        /// One row per settings key in scope, effective after the cascade.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        values: Vec<ConfigValue>,
+        /// Every profile's name.
+        ///
+        /// Always sent, unfiltered by `keys`: it is a handful of short strings
+        /// and it is the answer to "what is there to edit", which a client
+        /// otherwise has to ask a second time to find out.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        profiles: Vec<String>,
+        /// The named profile in full, when one was asked for.
+        ///
+        /// Boxed, and only for the enum's shape: `ConfigProfile` is a dozen
+        /// `String`s, which made `ConfigState` more than twice the size of
+        /// every other `HostMessage` variant — and every variant pays that,
+        /// including the `Update` sent thousands of times a second. `Box` is
+        /// transparent to serde and to `ts-rs`, so the wire and the binding
+        /// are byte-for-byte what they were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        profile_detail: Option<Box<ConfigProfile>>,
+        /// What each key accepts, when `want_fields` asked. Filtered by `keys`
+        /// like `values`, because this is the large half of the reply.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<ConfigField>,
+        /// This machine's theme roster, when `want_themes` asked.
+        ///
+        /// There is deliberately **no `active_theme` field**: the active theme
+        /// is `appearance.theme` in `values`, beside `appearance.light_theme`
+        /// and `appearance.follow_system_theme`, which together decide it. Two
+        /// fields that must agree are two fields that can disagree.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        themes: Vec<ConfigTheme>,
+        /// Keys in the file the schema does not know — a typo, or a config
+        /// written for a newer zesterm. Reported rather than dropped, because
+        /// those two look identical and only the person can tell them apart.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unknown_keys: Vec<String>,
+        /// Layers that could not be read, phrased for a person.
+        ///
+        /// Not a refusal: the values above are still the best this machine
+        /// could resolve, which is exactly what it is running on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        problems: Vec<String>,
+        /// Why there is nothing, when there is nothing for a reason. Empty
+        /// when the read simply succeeded — a machine on pure defaults and a
+        /// refused read must not render the same.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
+    /// The answer to [`ClientMessage::SetConfig`] (#498).
+    ///
+    /// Reply-only, like [`Self::ConfigState`], and refused the same way: this
+    /// message with `error` set, never [`Self::Error`].
+    ConfigWritten {
+        /// The request's `op`, echoed — with `key`, `profile` and `to`, the
+        /// whole of the correlation this pair has.
+        op: ConfigOp,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        key: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        profile: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        to: String,
+        /// The file that changed, host-absolute. Empty when nothing was
+        /// written, which is what separates a refusal from a no-op.
+        #[serde(default)]
+        path: String,
+        /// What the change costs, as this machine computed it: `none`,
+        /// `free`, `atlas-bump`, `geometry`, `surface-rebuild`, `restart`.
+        ///
+        /// A **string**, where [`ConfigOp`] is a typed enum, and the asymmetry
+        /// is deliberate. An op a client names is either one that exists or a
+        /// bug in the client; an invalidation class is something the *host*
+        /// computed and the client displays. Typing it here would make a
+        /// seventh class a coordinated wire change across every consumer, to
+        /// buy a match arm nobody branches on.
+        #[serde(default)]
+        invalidation: String,
+        /// The running app will not pick this up on its own.
+        ///
+        /// The one thing a client must *branch* on rather than show, which is
+        /// the bar `FileWritten.conflict` sets for a bool on this wire.
+        #[serde(default)]
+        needs_restart: bool,
+        /// What the key now *resolves* to, when the op had a key.
+        ///
+        /// "I wrote it" and "it is in force" are different facts: a profile
+        /// layer or a command-line flag can shadow a write, and a client that
+        /// reported success while the value did not move would be telling the
+        /// truth about the wrong thing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        effective: Option<ConfigValue>,
+        /// The edit was refused because a name is taken or a source is gone —
+        /// a rename onto a live profile, a copy from one that is not there.
+        ///
+        /// A bool rather than one of several error strings for
+        /// `FileWritten.conflict`'s reason: the client's next act is to pick
+        /// another name, which is a branch and not a message.
+        #[serde(default)]
+        conflict: bool,
+        /// Why nothing was written, phrased for a person. Empty on success —
+        /// an idempotent reset and a refused one must not read the same.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
 }
 
 /// Why a session is asking to be noticed.
@@ -1125,6 +1512,178 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: HostMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(msg, back, "and a present one round-trips");
+    }
+
+    #[test]
+    fn config_messages_round_trip() {
+        // Every TOML shape the settings schema actually holds, because
+        // `ConfigValue.value` is a string carrying a *spelling* — a bool, an
+        // integer, a float, a string and an array all have to survive as the
+        // text a client would put in the file.
+        for value in ["true", "14", "20.0", "\"nord\"", "[\"Berkeley Mono\", \"monospace\"]"] {
+            let msg = HostMessage::ConfigState {
+                keys: vec!["typography".into()],
+                profile: String::new(),
+                path: "/home/a/.config/zesterm/config.toml".into(),
+                exists: true,
+                values: vec![ConfigValue {
+                    key: "typography.size_pt".into(),
+                    value: value.into(),
+                    source: "user".into(),
+                }],
+                profiles: vec!["work".into()],
+                profile_detail: None,
+                fields: Vec::new(),
+                themes: Vec::new(),
+                unknown_keys: Vec::new(),
+                problems: Vec::new(),
+                error: String::new(),
+            };
+            let bytes = rmp_serde::to_vec_named(&msg).expect("encode");
+            let back: HostMessage = rmp_serde::from_slice(&bytes).expect("decode");
+            assert_eq!(msg, back, "a `{value}` did not survive the wire");
+        }
+
+        for op in [
+            ConfigOp::Set,
+            ConfigOp::Reset,
+            ConfigOp::CreateProfile,
+            ConfigOp::CopyProfile,
+            ConfigOp::RenameProfile,
+            ConfigOp::RemoveProfile,
+        ] {
+            let msg = ClientMessage::SetConfig {
+                op,
+                key: "window.opacity".into(),
+                profile: "work".into(),
+                value: "0.95".into(),
+                to: "work-2".into(),
+            };
+            let bytes = rmp_serde::to_vec_named(&msg).expect("encode");
+            let back: ClientMessage = rmp_serde::from_slice(&bytes).expect("decode");
+            assert_eq!(msg, back, "{op:?} did not survive the wire");
+        }
+    }
+
+    #[test]
+    fn a_config_reply_with_no_optional_slices_still_decodes() {
+        // Every field but `op` is `#[serde(default)]`, so a daemon that omits
+        // the lot must still produce something a client can read — the shape
+        // an older host, or a refusal, actually sends.
+        let json = r#"{"t":"config_written","op":"reset"}"#;
+        let back: HostMessage = serde_json::from_str(json).expect("decode");
+        match back {
+            HostMessage::ConfigWritten { op, key, needs_restart, effective, conflict, .. } => {
+                assert_eq!(op, ConfigOp::Reset);
+                assert!(key.is_empty() && !needs_restart && !conflict);
+                assert!(effective.is_none());
+            }
+            other => panic!("decoded as the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_expensive_half_of_a_config_reply_costs_nothing_when_unasked() {
+        // The whole justification for `want_fields`/`want_themes` being opt-in
+        // rather than always sent: the common read is values only, and the
+        // field metadata is roughly twenty times their size. Without
+        // `skip_serializing_if` a client pays for two empty lists on every
+        // read, which is the shape `an_absent_offer_is_absent_on_the_wire`
+        // already argues about for `Sessions`.
+        let msg = HostMessage::ConfigState {
+            keys: Vec::new(),
+            profile: String::new(),
+            path: "/c.toml".into(),
+            exists: true,
+            values: vec![ConfigValue {
+                key: "appearance.theme".into(),
+                value: "\"nord\"".into(),
+                source: "user".into(),
+            }],
+            profiles: Vec::new(),
+            profile_detail: None,
+            fields: Vec::new(),
+            themes: Vec::new(),
+            unknown_keys: Vec::new(),
+            problems: Vec::new(),
+            error: String::new(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        for absent in ["fields", "themes", "profile_detail", "unknown_keys", "problems", "error"] {
+            assert!(!json.contains(absent), "an unasked `{absent}` costs bytes: {json}");
+        }
+    }
+
+    #[test]
+    fn a_config_refusal_is_a_config_reply_and_never_a_sessionless_error() {
+        // The two must not be confusable, and the reason is directional: a
+        // sessionless `Error` is what an *old* daemon sends when it cannot
+        // decode `GetConfig` at all, and a client reads that as "this host is
+        // too old for the config surface". A daemon that answered a bad key
+        // with `Error` would make a fixable mistake look like an unfixable
+        // one, and the client would stop asking.
+        let refusal = HostMessage::ConfigWritten {
+            op: ConfigOp::Set,
+            key: "typography.sizept".into(),
+            profile: String::new(),
+            to: String::new(),
+            path: String::new(),
+            invalidation: String::new(),
+            needs_restart: false,
+            effective: None,
+            conflict: false,
+            error: "no setting named `typography.sizept`".into(),
+        };
+        assert!(
+            matches!(refusal, HostMessage::ConfigWritten { .. }),
+            "a refusal must wear the reply's own shape"
+        );
+        let HostMessage::ConfigWritten { path, error, .. } = &refusal else { unreachable!() };
+        assert!(!error.is_empty(), "a refusal has to say why");
+        assert!(path.is_empty(), "an empty path is what says nothing was written");
+
+        let read_refusal = HostMessage::ConfigState {
+            keys: Vec::new(),
+            profile: String::new(),
+            path: String::new(),
+            exists: false,
+            values: Vec::new(),
+            profiles: Vec::new(),
+            profile_detail: None,
+            fields: Vec::new(),
+            themes: Vec::new(),
+            unknown_keys: Vec::new(),
+            problems: Vec::new(),
+            error: "this machine has no config directory".into(),
+        };
+        assert!(matches!(read_refusal, HostMessage::ConfigState { .. }));
+    }
+
+    #[test]
+    fn a_config_profile_keeps_the_host_key_that_a_published_one_drops() {
+        // The pair `a_published_profile_names_no_host_of_its_own` guards from
+        // the other side. `HostProfile` is a launch target and must not carry
+        // `host`, because a client resolves it against its *own* fleet and
+        // then dials — ADR-014. `ConfigProfile` is a view of a file for a
+        // client about to edit that file, so dropping `host` would hide a key
+        // the person plainly wrote. Two types, opposite rules, and this test
+        // exists so a later "why are these not one struct" tidy-up has to
+        // read the reason first.
+        let fields = serde_json::to_value(ConfigProfile {
+            name: "k8s".into(),
+            host: "big-linux".into(),
+            ask_host: true,
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(fields.get("host").is_some(), "a file view must show the host key");
+        assert!(fields.get("ask_host").is_some());
+
+        let published = serde_json::to_value(HostProfile::default()).expect("serialize");
+        assert!(
+            published.get("host").is_none(),
+            "a launch target must not carry a host for the viewer to re-resolve"
+        );
     }
 
     #[test]

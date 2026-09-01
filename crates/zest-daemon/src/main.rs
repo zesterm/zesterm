@@ -38,6 +38,7 @@ fn main() {
              --socket-path       print the default socket path and exit\n\
              --identity          print this host's id and exit\n\
              --ephemeral         use a throwaway key, not the OS keychain\n\
+             --no-config-writes  answer config questions, refuse config edits\n\
              --enroll <code>     join this machine to an account, using a code\n\
              \x20                   from its devices screen, and exit\n\
              --logout            forget the account token this machine holds\n\
@@ -427,6 +428,21 @@ fn main() {
             _ => None,
         },
         shell_integration: !flag("--no-shell-integration"),
+        // The config surface (#498). The path comes from `zest-config`'s own
+        // rule rather than being composed here, because portable mode's file
+        // is `zesterm.toml` beside the binary and a second copy of that
+        // ordering is how portable mode breaks silently.
+        //
+        // Writes are on. The authority to make them is the pairing, not a
+        // switch here (ADR-019): `WriteFile` already reaches this exact file
+        // with no path restriction of any kind, and `CreateSession` already
+        // runs arbitrary commands — so refusing here would not withhold the
+        // capability, only the validation, and push a client back to editing
+        // the file blind. `--no-config-writes` exists for someone who wants
+        // the read half alone.
+        settings: zest_config::paths::config_write_target().map(|path| {
+            zest_daemon::config::ConfigSeam { path, writes: !flag("--no-config-writes") }
+        }),
         // Zero unless asked. The relay transport is what needs a floor, and it
         // sets its own; a flag exists so the effect can be seen on loopback
         // without a Cloudflare account. → `DaemonConfig::min_delta_interval`.
@@ -485,9 +501,12 @@ fn main() {
     // stops the watching, and a `let _ =` here would arm a reload that fires
     // exactly never.
     let _config_watch = config.offer.as_ref().and_then(|source| {
-        let path = zest_config::paths::config_file().or_else(|| {
-            zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE))
-        })?;
+        // The same file the config surface writes, by construction rather
+        // than by two copies of the portable-mode ordering agreeing: a
+        // watcher pointed at `config.toml` while writes land in a portable
+        // `zesterm.toml` would publish a stale offer forever, with the reload
+        // path looking perfectly correct.
+        let path = zest_config::paths::config_write_target()?;
         let source = source.clone();
         // `Watcher` already debounces, and `OfferSource::set` drops a reload
         // that changed nothing — so a save that touches an unrelated setting

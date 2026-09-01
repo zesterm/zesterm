@@ -1879,3 +1879,90 @@ not carry it — and the probes and `--screenshot` never touch the endpoint.
 `window.launch = window | tab | instance` is the setting; the values are the
 flag suffixes so the override needs no table.
 
+
+## ADR-019 — A paired device may edit a host's config; the gate is the pairing, not the transport
+
+**Status:** accepted (#498, #509).
+
+The config surface (`GetConfig`/`ConfigState`, `SetConfig`/`ConfigWritten`) lets any
+paired client read and change a machine's settings, profiles and theme choice —
+over the LAN and through the relay, not only from loopback. That is a security
+posture, and it runs against the shape of every other *authority* in the daemon:
+`PairingDecision`, `Enroll` and `watch_pairings` are all loopback-only, on the
+argument that joining a machine to an account is the authority of whoever is
+sitting at it. This one is not, and the reason has to be written down, because
+"make it loopback-only like the others" is the obvious review comment and it is
+the wrong call.
+
+### It is not a new privilege, and that is measured rather than assumed
+
+`resolve_for_write` (`crates/zest-daemon/src/files.rs`) joins, canonicalizes and
+follows symlinks. **There is no path allowlist of any kind** — not to a repo, not
+to a cwd, not to anything. So `ClientMessage::WriteFile`, which shipped for the
+editor (#446), already lets a paired device rewrite
+`~/.config/zesterm/config.toml` byte for byte. `CreateSession { command }` already
+runs an arbitrary command as the daemon's user. A paired device is, today, in
+full control of the machine it is paired to.
+
+Refusing `SetConfig` over anything but loopback would therefore withhold no
+capability. It would withhold only the **validation**, and push a client that
+wants to change a setting back to writing the file blind — which is strictly
+worse, for a reason specific to this file:
+
+`cascade::resolve` ends in `try_into::<Settings>().unwrap_or_default()`. A single
+wrongly-typed value — `typography.size_pt = "big"` — resets the **entire settings
+tree** to defaults in every running client. Themes, fonts, padding, tab layout,
+all of it, silently, with nothing anywhere naming the cause. `zest-daemon`'s
+`config::check` applies the edit in memory and refuses if the result no longer
+deserializes. That check is the whole value this message pair adds over the status
+quo, and a gate that routes around it buys a feeling of safety by removing the
+only real safety there is.
+
+### Three things that *are* different from `CreateSession`, and what answers them
+
+Naming them is the point; each is already true of `WriteFile`, so none is
+introduced here, but a reader deserves them stated rather than waved past.
+
+**Persistence.** A session dies with the process. A written `shell.command` runs on
+every tab the *human* opens from then on, outliving the paired device's access —
+revoking a pairing does not revoke a config edit. Nothing structural answers this;
+it is the honest cost of the file being editable at all, and it argues for the
+audit line below rather than for a gate.
+
+**Reach.** An agent's session is the agent's. A config edit changes the person's
+own windows.
+
+**Invisibility.** This is the one worth engineering against. A session appears in
+`sessions`; a file write appears in a diff; a settings key that quietly moved
+appears *nowhere*. So every `SetConfig` is logged at `info` with the remote, the
+op, the key, the resolved path and the **outcome** — a refused write and a
+completed one must not read alike in a log — on `WriteFile`'s own precedent.
+
+### What is refused anyway, and why those are different
+
+Two things are declined regardless of who asks, because neither is about trust:
+
+- **A workspace `.zesterm.toml` is never the target.** `trust::is_trusted` gates
+  workspace configs precisely *because* they can set `shell.command`, and a wire
+  write cannot add the trust entry — that is a person's decision at the machine.
+  A written-but-untrusted workspace file is one that is silently never loaded: a
+  write that reports success and does nothing, which is the worst outcome
+  available.
+- **`profiles.defaults` is not a profile.** It is the layer every profile falls
+  through, and creating or renaming it would put a launch target in the launcher
+  that starts nothing.
+
+`--no-config-writes` exists for a host that wants to answer questions and refuse
+edits. It is a **daemon flag and never a settings key**, for `shell_integration`'s
+reason sharpened: a config key authorizing config writes is a key the first write
+can flip.
+
+### What this extends
+
+ADR-015 says an agent is a client, and that it "cannot see a session a paired
+device could not". The config surface is that sentence applied to a second
+resource, with one clause added that ADR-015 did not have to make: **an agent
+cannot change anything a paired device could not — and persistence is the one
+place where "could not" is doing less work than it looks like it is.** A
+capability that outlives the access that used it is worth a log line even when it
+is not worth a gate.

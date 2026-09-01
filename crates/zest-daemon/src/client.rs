@@ -65,6 +65,8 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::FileWritten { .. } => "FileWritten",
         HostMessage::DirListing { .. } => "DirListing",
         HostMessage::GitDiffResult { .. } => "GitDiffResult",
+        HostMessage::ConfigState { .. } => "ConfigState",
+        HostMessage::ConfigWritten { .. } => "ConfigWritten",
     };
     tracing::warn!(
         message = kind,
@@ -716,6 +718,7 @@ mod tests {
             min_delta_interval: Duration::ZERO,
             enroll: None,
             offer: None,
+            settings: None,
         };
         {
             let registry = Arc::clone(&registry);

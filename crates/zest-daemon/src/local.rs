@@ -696,6 +696,7 @@ mod tests {
             min_delta_interval: Duration::ZERO,
             enroll: None,
             offer: None,
+            settings: None,
         }
     }
 
@@ -916,6 +917,7 @@ mod unix_tests {
             min_delta_interval: std::time::Duration::ZERO,
             enroll: None,
             offer: None,
+            settings: None,
         };
         let listen_path = p.clone();
         std::thread::spawn(move || {
