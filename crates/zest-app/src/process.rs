@@ -67,6 +67,10 @@ pub struct Shared {
     /// window (#501) keeps the callback it was built with, so the map it
     /// stamps must be the one every window reads.
     pub activity: ActivityMap,
+    /// The GPU device every window draws with (#505), brought up by the
+    /// first window. On `Shared` for the plainest reason of all: a device
+    /// per window is ~700 ms of serial driver init per ⌘N on Windows.
+    pub gpu: OnceCell<crate::app::GpuHost>,
 }
 
 impl Shared {
@@ -86,6 +90,7 @@ impl Shared {
             local_context: std::sync::OnceLock::new(),
             restart_pending: RefCell::new(std::collections::BTreeSet::new()),
             activity: ActivityMap::default(),
+            gpu: OnceCell::new(),
         }
     }
 

@@ -12254,13 +12254,31 @@ impl App {
             b: f64::from(bg.b) / 255.0,
             a: f64::from(self.config.opacity),
         };
-        let gpu = pollster::block_on(init_gpu(
-            &window,
-            self.config.opacity < 1.0,
-            clear,
-            self.effective_antialias(),
-        ));
-        tracing::debug!(elapsed_ms = t0.elapsed().as_millis(), "gpu ready");
+        // One device for every window (#505): the first window brings it up
+        // and every later one only makes a surface on it. A surface the
+        // shared adapter cannot present to — a window on another GPU — gets
+        // a private device through the old path, so the ladder still ends in
+        // a window rather than a panic.
+        let want_transparency = self.config.opacity < 1.0;
+        let antialias = self.effective_antialias();
+        let gpu = match self.shared.gpu.get() {
+            Some(host) => host.surface_for(&window, None, want_transparency, clear, antialias),
+            None => pollster::block_on(GpuHost::new(&window)).and_then(|(host, surface)| {
+                let gpu = host.surface_for(&window, Some(surface), want_transparency, clear, antialias);
+                let _ = self.shared.gpu.set(host);
+                gpu
+            }),
+        };
+        let shared_device = gpu.is_some();
+        let gpu = match gpu {
+            Some(gpu) => gpu,
+            None => pollster::block_on(init_gpu(&window, want_transparency, clear, antialias)),
+        };
+        tracing::debug!(
+            elapsed_ms = t0.elapsed().as_millis(),
+            shared_device,
+            "gpu ready"
+        );
         // The renderer may have refused subpixel because the device cannot
         // blend per channel. The rasterizer follows it, never the config —
         // see `sync_antialias` for what going the other way costs.
@@ -14771,26 +14789,133 @@ fn alpha_mode_for(
     wgpu::CompositeAlphaMode::Opaque
 }
 
-async fn init_gpu(
+/// The GPU every window of this process draws with (#505): one instance,
+/// adapter, device and queue, and one pipeline cache. What is per window —
+/// the surface, its configuration, the renderer and its atlas — is made by
+/// [`GpuHost::surface_for`]. The renderer stays per window because `Fonts`
+/// is per scale factor and antialias-coupled (`sync_antialias`), and an
+/// atlas shared across windows on different monitors would be cleared by
+/// either one's DPI change.
+pub(crate) struct GpuHost {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    cache: Option<wgpu::PipelineCache>,
+    info: wgpu::AdapterInfo,
+    max_dim: u32,
+    /// How much of the cache was on disk last time it was written, so a
+    /// window that compiled nothing new does not rewrite the file.
+    cache_len: std::cell::Cell<usize>,
+}
+
+impl GpuHost {
+    /// Bring the device up against the first window, whose surface chose
+    /// the adapter — returned so that window does not create it twice.
+    /// `None` is the ladder finding no adapter at all, which the private
+    /// path then reports with its full diagnosis.
+    async fn new(window: &Arc<Window>) -> Option<(Self, wgpu::Surface<'static>)> {
+        let t = std::time::Instant::now();
+        let (instance, surface, adapter) = pick_adapter(window).await?;
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "adapter");
+        tracing::info!(adapter = %adapter.get_info().name, backend = ?adapter.get_info().backend, "gpu");
+
+        let want_cache = adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
+        let mut features = wgpu::Features::empty();
+        if want_cache {
+            features |= wgpu::Features::PIPELINE_CACHE;
+        }
+        if adapter.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING) {
+            features |= wgpu::Features::DUAL_SOURCE_BLENDING;
+        }
+        let adapter_limits = adapter.limits();
+        let limits = wgpu::Limits {
+            max_texture_dimension_1d: adapter_limits.max_texture_dimension_1d,
+            max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+            max_texture_dimension_3d: adapter_limits.max_texture_dimension_3d,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+        let max_dim = limits.max_texture_dimension_2d;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("zesterm"),
+                required_features: features,
+                required_limits: limits,
+                ..Default::default()
+            })
+            .await
+            .expect("request device");
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "device");
+
+        let info = adapter.get_info();
+        let cached = pipeline_cache::load(&info);
+        let cache_len = std::cell::Cell::new(cached.as_ref().map_or(0, Vec::len));
+        let cache = pipeline_cache::create(&device, want_cache, cached.as_deref());
+        Some((Self { instance, adapter, device, queue, cache, info, max_dim, cache_len }, surface))
+    }
+
+    /// A surface, its configuration and a renderer for `window` on the
+    /// shared device. `None` when the shared adapter cannot present to this
+    /// window — the caller then opens a private device instead.
+    fn surface_for(
+        &self,
+        window: &Arc<Window>,
+        surface: Option<wgpu::Surface<'static>>,
+        want_transparency: bool,
+        clear_color: wgpu::Color,
+        antialias: zest_font::TextAntialias,
+    ) -> Option<Gpu> {
+        let t = std::time::Instant::now();
+        let surface = match surface {
+            Some(s) => s,
+            None => self.instance.create_surface(Arc::clone(window)).ok()?,
+        };
+        if !self.adapter.is_surface_supported(&surface) {
+            tracing::info!("this window's surface is not on the shared adapter; opening a private device");
+            return None;
+        }
+        let caps = surface.get_capabilities(&self.adapter);
+        let config = surface_config(&caps, want_transparency, window.inner_size(), self.max_dim);
+        surface.configure(&self.device, &config);
+        clear_to(&self.device, &self.queue, &surface, clear_color);
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "surface painted");
+
+        let mut renderer =
+            Renderer::with_cache(&self.device, config.format, self.cache.as_ref(), antialias);
+        renderer.resize(&self.device, config.width, config.height);
+        if let Some(cache) = self.cache.as_ref() {
+            // Saved by whichever window compiled something new; `save`
+            // itself skips a cache that did not grow.
+            pipeline_cache::save(cache, &self.info, self.cache_len.get());
+            self.cache_len.set(cache.get_data().map_or(0, |d| d.len()));
+        }
+        tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "pipelines");
+
+        Some(Gpu {
+            surface,
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            config,
+            renderer,
+            transparent: want_transparency,
+            alpha_modes: caps.alpha_modes.clone(),
+        })
+    }
+}
+
+/// Walk the backend ladder until one produces an adapter for `window`.
+///
+/// One backend at a time, preferred first. Probing several costs real
+/// startup latency -- initializing a Vulkan *and* a DX12 instance, then
+/// enumerating adapters on both, was ~670ms of the ~1.9s launch.
+/// `Backends::all()` is worse still, since it also spins up an OpenGL stack
+/// we will never use. Vulkan leads on Windows because it is the only backend
+/// that reports `PreMultiplied` alpha there (ADR-003); DX12 reports `Opaque`
+/// on every adapter, so preferring it would silently cost transparency.
+async fn pick_adapter(
     window: &Arc<Window>,
-    want_transparency: bool,
-    clear_color: wgpu::Color,
-    antialias: zest_font::TextAntialias,
-) -> Gpu {
-    let t = std::time::Instant::now();
-
-    // One backend at a time, preferred first.
-    //
-    // Probing several costs real startup latency -- initializing a Vulkan *and*
-    // a DX12 instance, then enumerating adapters on both, was ~670ms of the
-    // ~1.9s launch. `Backends::all()` is worse still, since it also spins up an
-    // OpenGL stack we will never use.
-    //
-    // Vulkan leads on Windows because it is the only backend that reports
-    // `PreMultiplied` alpha there (ADR-003); DX12 reports `Opaque` on every
-    // adapter, so preferring it would silently cost transparency.
+) -> Option<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
     let preferred: &[wgpu::Backends] = preferred_backends();
-
     // `ZESTERM_BACKEND=dx12|vulkan|gl` forces one, for measuring.
     let forced = std::env::var("ZESTERM_BACKEND").ok().and_then(|s| {
         match s.to_ascii_lowercase().as_str() {
@@ -14803,7 +14928,6 @@ async fn init_gpu(
     let forced_list = forced.map(|b| vec![b]);
     let preferred: &[wgpu::Backends] = forced_list.as_deref().unwrap_or(preferred);
 
-    let mut found = None;
     for &backends in preferred {
         let t_inst = std::time::Instant::now();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -14820,13 +14944,61 @@ async fn init_gpu(
             })
             .await
         {
-            found = Some((surface, adapter));
-            break;
+            return Some((instance, surface, adapter));
         }
         tracing::debug!(?backends, "no adapter; trying the next backend");
     }
+    None
+}
+
+/// The one surface configuration rule, for the shared and the private path.
+fn surface_config(
+    caps: &wgpu::SurfaceCapabilities,
+    want_transparency: bool,
+    size: winit::dpi::PhysicalSize<u32>,
+    max_dim: u32,
+) -> wgpu::SurfaceConfiguration {
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| !f.is_srgb())
+        .unwrap_or_else(|| {
+            tracing::warn!("no non-sRGB surface format; colours will be over-bright");
+            caps.formats[0]
+        });
+    let alpha_mode = alpha_mode_for(want_transparency, &caps.alpha_modes);
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        color_space: wgpu::SurfaceColorSpace::Auto,
+        width: size.width.clamp(1, max_dim),
+        height: size.height.clamp(1, max_dim),
+        present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        },
+        desired_maximum_frame_latency: 2,
+        alpha_mode,
+        view_formats: vec![],
+    }
+}
+
+/// A device of this window's own: the fallback when the shared adapter
+/// cannot present to it, and the path that reports "no adapter" in full.
+async fn init_gpu(
+    window: &Arc<Window>,
+    want_transparency: bool,
+    clear_color: wgpu::Color,
+    antialias: zest_font::TextAntialias,
+) -> Gpu {
+    let t = std::time::Instant::now();
+
+    let found = pick_adapter(window).await.map(|(_, surface, adapter)| (surface, adapter));
 
     let Some((surface, adapter)) = found else {
+        let preferred = preferred_backends();
         // Not `expect`: "no suitable GPU adapter" is the most common way for
         // this to fail on Linux and the bare message told the user nothing
         // they could act on -- not which backends were tried, and above all
@@ -14907,40 +15079,7 @@ async fn init_gpu(
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "device");
 
     let caps = surface.get_capabilities(&adapter);
-
-    // A NON-sRGB format, deliberately. The resolve pass performs the sRGB
-    // encode itself so that premultiplication happens in encoded space; an sRGB
-    // surface would encode a second time and wash everything out. -> ADR-003.
-    let format = caps
-        .formats
-        .iter()
-        .copied()
-        .find(|f| !f.is_srgb())
-        .unwrap_or_else(|| {
-            tracing::warn!("no non-sRGB surface format; colours will be over-bright");
-            caps.formats[0]
-        });
-
-    let alpha_mode = alpha_mode_for(want_transparency, &caps.alpha_modes);
-
-    let size = window.inner_size();
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        color_space: wgpu::SurfaceColorSpace::Auto,
-        width: size.width.clamp(1, max_dim),
-        height: size.height.clamp(1, max_dim),
-        // Mailbox where available: no tearing, lower latency than Fifo because
-        // it replaces the queued frame rather than queueing behind it.
-        present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        },
-        desired_maximum_frame_latency: 2,
-        alpha_mode,
-        view_formats: vec![],
-    };
+    let config = surface_config(&caps, want_transparency, window.inner_size(), max_dim);
     surface.configure(&device, &config);
     tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "surface configured");
 
@@ -14957,7 +15096,7 @@ async fn init_gpu(
     let cache = pipeline_cache::create(&device, want_cache, cached.as_deref());
 
     let mut renderer =
-        Renderer::with_cache(&device, format, cache.as_ref(), antialias);
+        Renderer::with_cache(&device, config.format, cache.as_ref(), antialias);
     renderer.resize(&device, config.width, config.height);
     tracing::debug!(
         elapsed_ms = t.elapsed().as_millis(),
