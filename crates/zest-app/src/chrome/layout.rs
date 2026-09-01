@@ -5324,6 +5324,35 @@ mod tests {
     }
 
     #[test]
+    fn an_active_app_tab_puts_no_host_in_the_vertical_header() {
+        // The header names the machine the *active tab's shell* runs on, and
+        // an app tab has none — it is a place. The layout already declines
+        // an empty host ("a pill with an empty label is chrome lint"), so
+        // what this pins is the other half: that the app never fills the
+        // field in. Profiles did, harmlessly, for as long as it could only
+        // appear in the horizontal strip — which draws no header — so
+        // showing it in both positions is what would have surfaced a
+        // "Profiles · local" pill on a tab with no shell behind it.
+        for kind in [TabKind::Settings, TabKind::Profiles] {
+            let mut app = tab(9, TabOrigin::Local, TabPresence::Online);
+            app.kind = kind;
+            app.title = "App".into();
+            app.host = String::new();
+            app.cwd = String::new();
+            let mut mo = model(vec![app], TabsPosition::Left);
+            mo.active = 0;
+            let l = layout(&mo, &colors(), &metrics(900.0, 600.0, 1.0), &mut measure);
+            // The header band is above the sidebar rows; nothing in it may
+            // name a host for a tab that has none.
+            assert!(
+                !l.texts.iter().any(|t| t.text == "local" || t.text.contains(" \u{b7} ")),
+                "{kind:?}: the header says no host for an app tab: {:?}",
+                l.texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn the_two_app_tabs_wear_different_glyphs() {
         // Both drew ⚙ before #494, which is two chips you have to read the
         // label of to tell apart — the glyph is doing no work at that point.

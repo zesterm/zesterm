@@ -6307,7 +6307,13 @@ impl App {
                 addr: crate::tabs::profiles_tab_addr(),
                 kind: crate::chrome::model::TabKind::Profiles,
                 title: "Profiles".into(),
-                host: local_label.clone(),
+                // Empty, like Settings': an app tab is a place, not a shell
+                // on a host, and the vertical header draws its host pill off
+                // exactly this field. The local label sat here harmlessly
+                // while Profiles was horizontal-only — the horizontal strip
+                // has no header — so making the tab appear in both positions
+                // is what turned it into a visible "Profiles · local".
+                host: String::new(),
                 cwd: String::new(),
                 origin: TabOrigin::Local,
                 presence: TabPresence::Online,
