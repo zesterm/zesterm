@@ -867,6 +867,23 @@ fn a_run_against_a_real_shell_returns_the_shells_own_exit_code() {
          was sent: {v}"
     );
 
+    // The end-to-end provenance claim, and the reason it is asserted here
+    // rather than in a unit test: the id has to cross the handshake, the
+    // session's latch, the parser, the encoder and the wire. Every one of
+    // those is mocked away somewhere cheaper, and a break in any of them
+    // leaves `author` silently absent -- the `Exited.code` trap, where the
+    // field and the missing producer read identically (#299). This is the one
+    // cross-platform test that would notice.
+    assert_eq!(
+        v["block"]["author"], "you",
+        "this agent wrote the input, so the block it opened must name this agent: {v}"
+    );
+    assert_eq!(
+        v["block"]["author_source"], "daemon_witness",
+        "the author is the daemon's record of the connection, not the shell's word \
+         like `exit_code_source` beside it: {v}"
+    );
+
     // A second command in the same shell, which is the reason `run` exists at
     // all: the session persists, so this one inherits the first's environment
     // and working directory. Its block is a *new* id, minted by the prompt that

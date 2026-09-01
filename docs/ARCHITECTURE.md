@@ -1306,6 +1306,34 @@ any shell reached through `ssh` or `tmux`, which injection structurally cannot
 touch — but its *primary* property is that its status cannot be forged by the
 thing it is running.
 
+### A third provenance class, and it is not the shell's at all
+
+*(Amendment, #491.)* Both exit codes above are facts *about the session's
+contents*, and the argument between them is which one a program inside the
+terminal could have printed. A block's `author` is not in that argument. The
+daemon records it from the authenticated connection that wrote the bytes, so
+nothing inside the terminal can influence it — which is why it carries
+`daemon_witness` rather than joining `ExitSource`.
+
+The limit belongs in the same breath, because it is the one an agent will
+otherwise over-read. OSC 133 decides *when* a block opens. A shell can
+therefore mint a block nobody typed, and it will bear whoever wrote last. What
+it cannot do is make a block bear a *different* client's id. Provenance, never
+authorization — and the apparently stronger design, refusing to open a block
+with no recent input, was rejected because a nested integrated shell
+legitimately produces one.
+
+The same retention answers a second question the daemon could not previously
+ask. `may_approve_devices` is a property of the *transport*, so every loopback
+client could answer `PairingDecision` and enrol an arbitrary remote key. An
+agent now declines that authority for itself in its `Hello`, and the honest
+claim is narrow: the declaration is made at startup, before the agent has read
+any terminal text, so an injection that later steers it is steering a
+connection that already gave it up. A hostile program that omits the flag is
+untouched, and cannot be caught here — on loopback the socket *is* the
+authorization. The flag's default is therefore `false`, the permissive answer,
+because every already-shipped client omits it.
+
 ### The anchor is the tail block, not the next id
 
 `run` writes a command into a shell somebody is already using and then has to

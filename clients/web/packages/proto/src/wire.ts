@@ -186,6 +186,16 @@ export interface BlockPayload {
    * Display only, like every context fact.
    */
   readonly context?: BlockContextPayload;
+  /**
+   * The client the daemon saw write the input that started this command,
+   * as 64 lowercase hex characters. Absent when it recorded nobody.
+   *
+   * Unlike `command` and the exit status this is not the shell's word —
+   * nothing running in the terminal can change whose id a block carries. It
+   * is still not authorization: OSC 133 decides *when* a block opens, so a
+   * block nobody typed carries whoever wrote last.
+   */
+  readonly author?: string;
 }
 
 export interface BlockContextPayload {
@@ -343,11 +353,16 @@ export function parseBlockPayload(v: unknown): BlockPayload {
     o['context'] === undefined || o['context'] === null
       ? undefined
       : parseBlockContext(o['context']);
+  const author =
+    o['author'] === undefined || o['author'] === null
+      ? undefined
+      : str(o['author'], 'BlockPayload.author');
   return {
     ...payload,
     ...(started === undefined ? {} : { started_ms: started }),
     ...(ended === undefined ? {} : { ended_ms: ended }),
     ...(context === undefined ? {} : { context }),
+    ...(author === undefined ? {} : { author }),
   };
 }
 

@@ -523,16 +523,32 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       client receives, and the agent-facing number is the stable one. A
       `cargo build --workspace` is 40 KB of pty (~16k tokens) against 1,667
       bytes of `screen` (~417) — the tail, which is what "did it build" wants.
-- [ ] **Provenance.** An author on `Block`, so scrollback records who ran what.
-      Needs the daemon to stop forgetting: `welcome()` reads the `ClientId` and
-      then `Gate::Served` drops the transcript. Core cannot hold a `ClientId`
-      (`zest-proto` depends on `zest-core`, not the reverse), so it holds 32
-      opaque bytes and the wire converts, as `LineId` becomes `i64` today.
-- [ ] **An agent may not approve devices.** `may_approve_devices()` is a
-      property of the *transport* alone, so any loopback client can answer
-      `PairingDecision` and enrol an arbitrary remote key, unattended. Worth
-      closing while a general local gate is not: a prompt-injected
-      *cooperating* agent has only the tools it was given.
+- [x] **Provenance.** `Block.author`, so scrollback records who ran what: 32
+      opaque bytes in core (`zest-proto` depends on `zest-core`, not the
+      reverse) that the wire converts to a `ClientId`, as `LineId` becomes
+      `i64`. The daemon stopped forgetting — `Gate::Served` now carries the
+      client it served — and the session latches whoever last wrote, which the
+      reader stamps at OSC 133;C. `zest-mcp` reports it as `"you"` or a short
+      id beside `author_source: daemon_witness`, a third provenance class
+      stronger than either `ExitSource`: it is a fact about the *connection*,
+      so nothing inside the terminal can influence it.
+      What it does **not** mean, and every consumer says so: OSC 133 decides
+      *when* a block opens, so a block nobody typed carries whoever wrote
+      last. It cannot be made to carry a *different* client. Provenance, never
+      authorization. → #491.
+- [x] **An agent may not approve devices.** `Hello.agent` — a client declining
+      the authority for itself, at startup, before it has read a byte of
+      terminal text — and `Connection::device_authority` refuses it
+      `PairingDecision` and `Enroll` even on loopback, and never subscribes it
+      to the approval queue (the push carries the six-digit code, so refusing
+      the answer while streaming the code closes one door and leaves the other
+      open).
+      Deliberately narrow, and the doc comments say it: this binds a
+      **cooperating** agent, so a prompt injection that later steers it is
+      steering a connection that already gave this up. A hostile local program
+      omits the flag and is untouched — on loopback the socket *is* the
+      authorization. A general local gate is different work and this is not a
+      down payment on it. → #491.
 - [ ] Per-block consent and redaction, in `zest-core`, masking the delta so
       every client sees one masked truth — ADR-015's amendment records why a
       prompt-boundary filter is rejected. Plus fleet-wide block search and the

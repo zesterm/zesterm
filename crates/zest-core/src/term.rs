@@ -319,6 +319,10 @@ pub struct TermState {
     /// bytes refreshes this first; stale by at most one read burst, which is
     /// precision to spare for "51.2s".
     pub(crate) now_ms: Option<u64>,
+    /// Who last wrote into this session's pty, as the embedder saw it — the
+    /// [`Self::now_ms`] pattern, for a fact this crate equally cannot obtain.
+    /// Read at OSC 133;C and stamped onto the block that opens there.
+    pub(crate) input_author: Option<[u8; 32]>,
 }
 
 impl Terminal {
@@ -356,6 +360,21 @@ impl Terminal {
     /// no times when nobody says.
     pub fn set_now_ms(&mut self, ms: u64) {
         self.state.now_ms = Some(ms);
+    }
+
+    /// Tell the terminal who is writing, for attributing command blocks.
+    ///
+    /// Callers set this before [`Self::advance`], like [`Self::set_now_ms`]
+    /// and for the same reason: a parser cannot ask who is on the other end of
+    /// a socket. Never required; blocks simply carry no author when nobody
+    /// says. See [`crate::blocks::Block::author`] for what the stamp claims.
+    ///
+    /// Deliberately does **not** touch the sequence. Who is typing is not
+    /// state a subscriber can observe until a block records it, and bumping
+    /// `seq` here would hand every subscriber a delta per pty read for the
+    /// rest of the session.
+    pub fn set_input_author(&mut self, author: Option<[u8; 32]>) {
+        self.state.input_author = author;
     }
 
     #[must_use]
@@ -643,6 +662,7 @@ impl TermState {
             prompt_end: None,
             pending_command: None,
             now_ms: None,
+            input_author: None,
         }
     }
 

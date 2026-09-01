@@ -906,6 +906,79 @@ fn block_timestamps_come_from_the_embedder_and_only_from_it() {
 }
 
 #[test]
+fn a_blocks_author_comes_from_the_embedder_and_only_from_it() {
+    // The clock's reason exactly: a `no_std` parser cannot know who is on the
+    // other end of a socket. And a field whose only producer never fills it
+    // reads identically to one nothing can fill -- the `Exited.code` trap
+    // (#299) -- so both halves are asserted here.
+    let mut silent = Terminal::new(20, 4, 100);
+    silent.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n");
+    assert_eq!(
+        silent.blocks().last().expect("one block").author,
+        None,
+        "nobody told this terminal who is writing, so the block must claim nobody"
+    );
+
+    let mut told = Terminal::new(20, 4, 100);
+    told.set_input_author(Some([0xa1; 32]));
+    told.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n");
+    assert_eq!(
+        told.blocks().last().expect("one block").author,
+        Some([0xa1; 32]),
+        "C is where the command starts, so C is where the author is stamped"
+    );
+}
+
+#[test]
+fn a_second_writer_authors_only_the_block_it_started() {
+    // Two people in one shell is the feature, not an edge case. A stamp that
+    // could be revised would rewrite the first person's history the moment the
+    // second one typed.
+    let mut t = Terminal::new(20, 4, 100);
+    t.set_input_author(Some([0xa1; 32]));
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07x\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+    t.set_input_author(Some([0xb2; 32]));
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07y\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+
+    let blocks = t.blocks().blocks();
+    assert_eq!(blocks.len(), 2, "two commands, two blocks");
+    assert_eq!(blocks[0].author, Some([0xa1; 32]), "the first command keeps its author");
+    assert_eq!(blocks[1].author, Some([0xb2; 32]), "the second names whoever ran it");
+}
+
+#[test]
+fn an_author_that_arrives_after_a_block_started_does_not_reach_it() {
+    // The anti-race property, and the only place it can be asserted
+    // deterministically: a keystroke landing during a long build must not
+    // steal that build's author.
+    let mut t = Terminal::new(20, 4, 100);
+    t.set_input_author(Some([0xa1; 32]));
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07make\x1b]133;C\x07\r\n");
+    t.set_input_author(Some([0xb2; 32]));
+    t.advance(b"still building\r\n\x1b]133;D;0\x07");
+    assert_eq!(
+        t.blocks().last().expect("one block").author,
+        Some([0xa1; 32]),
+        "the author is read once at C; output arriving later cannot re-attribute it"
+    );
+}
+
+#[test]
+fn a_block_the_shell_opened_with_no_writer_has_no_author() {
+    // A shell can emit the markers on its own -- a nested integrated shell, a
+    // scheduled job's preexec, or a file containing them being `cat`ed. With
+    // nobody having written, such a block must read unattributed rather than
+    // inventing one.
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cron\x1b]133;C\x07\r\n\x1b]133;D;0\x07");
+    assert_eq!(
+        t.blocks().last().expect("one block").author,
+        None,
+        "no input ever reached this terminal, so no client may be named"
+    );
+}
+
+#[test]
 fn a_nonzero_status_survives_a_trailing_key_value_tail() {
     // `133;D;1;aid=7` is what several shells actually emit. Parsing the status
     // as "the whole parameter" would make it unknown, which reads as a command

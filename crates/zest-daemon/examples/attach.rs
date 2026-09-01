@@ -147,6 +147,7 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         },
     );
     // The session is created once the handshake completes, not before: a host

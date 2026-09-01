@@ -189,6 +189,24 @@ pub enum ClientMessage {
         /// today's behaviour at both ends.
         #[serde(default)]
         watch_signals: bool,
+        /// This connection is a program acting for a model, not a person.
+        ///
+        /// Set once at startup, before the client has read a byte of terminal
+        /// text, and it only ever *removes* authority: a connection that says
+        /// this is refused [`Self::PairingDecision`] and [`Self::Enroll`] even
+        /// on loopback, and is never subscribed to the approval queue, so the
+        /// six-digit matching code never enters a model's context.
+        ///
+        /// `#[serde(default)]` for `watch_sessions`' reason, with one
+        /// difference worth stating plainly: absent means `false`, and `false`
+        /// is the *permissive* answer. It has to be — every already-shipped
+        /// client omits the field, and a default that revoked their authority
+        /// would break the desktop approval modal against a new daemon. So it
+        /// binds a **cooperating** client that declares itself, and is not a
+        /// gate against one that stays quiet; `zest_daemon::auth::Auth` carries
+        /// the rest of that argument.
+        #[serde(default)]
+        agent: bool,
     },
     /// The client's proof, answering [`HostMessage::Challenge`].
     ///
@@ -1051,6 +1069,7 @@ mod tests {
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClientMessage = serde_json::from_str(&json).expect("deserialize");
@@ -1182,6 +1201,47 @@ mod tests {
     }
 
     #[test]
+    fn a_hello_without_the_agent_flag_still_decodes_and_keeps_its_authority() {
+        // Every client shipped before this flag omits it, so absent has to
+        // mean `false` -- and `false` is the *permissive* answer here, unlike
+        // the `watch_*` flags above where absent simply means "no pushes".
+        // A default that revoked authority would refuse the desktop approval
+        // modal the moment it met a newer daemon.
+        #[derive(serde::Serialize)]
+        struct OldHello<'a> {
+            t: &'a str,
+            version: u16,
+            client: ClientId,
+            label: &'a str,
+            nonce: Nonce32,
+            dh: Pub32,
+            watch_sessions: bool,
+            watch_pairings: bool,
+        }
+        let old = rmp_serde::to_vec_named(&OldHello {
+            t: "hello",
+            version: PROTOCOL_VERSION,
+            client: ClientId::from_bytes([9; 32]),
+            label: "old-client",
+            nonce: Nonce32::from_bytes([1; 32]),
+            dh: Pub32::from_bytes([2; 32]),
+            watch_sessions: true,
+            watch_pairings: true,
+        })
+        .expect("encode");
+        let parsed: ClientMessage = crate::frame::decode(&old).expect("an old Hello must decode");
+        let ClientMessage::Hello { watch_pairings, agent, .. } = parsed else {
+            panic!("expected Hello");
+        };
+        assert!(watch_pairings, "the fields the old client did send survive");
+        assert!(
+            !agent,
+            "a client that says nothing is taken to be a person's -- the flag removes \
+             authority from clients that ask for that, and binds nobody else"
+        );
+    }
+
+    #[test]
     fn a_pairing_requested_without_the_new_fields_still_decodes() {
         // An app talking to an older daemon: `expires_in_secs` and `resolved`
         // are `#[serde(default)]` so its pushes still parse -- 0 reads as
@@ -1226,6 +1286,7 @@ mod tests {
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         };
         let ClientMessage::Hello { nonce, dh, .. } = msg else { panic!("expected Hello") };
         assert!(nonce.is_absent());

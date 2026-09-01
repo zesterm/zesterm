@@ -12,7 +12,7 @@
 //! | fresh nonces, mutual signature | yes | yes |
 //! | trust-store lookup | **no** | **yes** |
 //! | approval prompt | never | on an unknown client |
-//! | accepts a pairing decision | **yes** | **never** |
+//! | accepts a pairing decision | **unless it said it is an agent** | **never** |
 //!
 //! Loopback still runs the *proof* — the wire is uniform, which matters
 //! because ADR-007 makes the desktop app a client of its own daemon — but it
@@ -139,6 +139,14 @@ impl Auth {
     /// that you are logged in at this machine, which is exactly the authority
     /// enrolling a device requires. Accepting it over the LAN would let one
     /// paired device enrol others.
+    ///
+    /// **This answers the transport half only, and is no longer the whole
+    /// question.** A client may also decline the authority itself
+    /// (`Hello.agent`), which is a claim the *peer* makes rather than a fact
+    /// this type establishes — putting it here would sit a self-report inside
+    /// the enum whose entire value is that it cannot be self-reported. The two
+    /// are combined in `Connection::device_authority`, which is what every
+    /// call site asks.
     #[must_use]
     pub const fn may_approve_devices(&self) -> bool {
         matches!(self, Self::Transport(_))

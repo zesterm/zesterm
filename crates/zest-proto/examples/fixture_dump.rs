@@ -66,6 +66,10 @@ enum Step {
     /// (`reconcile_size`): the grid reflows, then every subscriber gets a
     /// keyframe under the new numbering.
     Resize(u16, u16),
+    /// A different client starts writing, the way the daemon tells the
+    /// terminal (`set_input_author`). Emits no frame of its own — it changes
+    /// nothing a subscriber can observe until a block records it.
+    Author(ClientId),
 }
 
 /// The recordings, at the sizes `conformance.rs` replays them.
@@ -98,6 +102,32 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
     // client already parsed, so the wire shape is identical and a second fixture
     // would be a second thing to regenerate for no coverage.
     ("blocks-zsh", 120, 30, Source::Vtrec("blocks-zsh")),
+    // `Block.author`, which no recording can contain: it is stamped by the
+    // *daemon* from the connection that wrote the input, so a vtrec — which is
+    // a byte stream and nothing else — structurally cannot carry one. Without
+    // this entry a client that dropped the field would pass every fixture
+    // here, the `combining-marks` argument verbatim.
+    //
+    // Two devices rather than one, because the fact under test is that a block
+    // names *which* client: a single author is indistinguishable from a client
+    // that hard-codes the only id it ever saw. And not folded into
+    // `width-change`, which exists to prove reflow renumbering — one fixture
+    // standing for two rules is how one of them quietly stops being checked.
+    (
+        "blocks-authored",
+        40,
+        6,
+        Source::Script(&[
+            Step::Author(FIXTURE_AUTHOR_A),
+            Step::Text("\u{1b}]7;file:///tmp/a\u{7}\u{1b}]133;A\u{7}$ "),
+            Step::Text("\u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("built\r\n\u{1b}]133;D;0\u{7}"),
+            Step::Author(FIXTURE_AUTHOR_B),
+            Step::Text("\u{1b}]133;A\u{7}$ "),
+            Step::Text("\u{1b}]133;B\u{7}ls\u{1b}]133;C\u{7}\r\n"),
+            Step::Text("a  b\r\n\u{1b}]133;D;0\u{7}"),
+        ]),
+    ),
     // The same recordings at a viewport short enough to force heavy scrolling,
     // mirroring `conformance.rs::every_recording_survives_a_short_viewport`.
     //
@@ -172,6 +202,12 @@ const CORPUS: &[(&str, usize, usize, Source)] = &[
 /// The decoder does not care which host sent a frame, but `SessionAddr` is not
 /// optional on the wire and a random id would rewrite every file on every run.
 const FIXTURE_HOST: HostId = HostId::from_bytes([0x2e; 32]);
+
+/// Two devices, for `blocks-authored`. Byte-stable for [`FIXTURE_HOST`]'s
+/// reason: a fixture whose ids moved between runs would diff on every
+/// regeneration.
+const FIXTURE_AUTHOR_A: ClientId = ClientId::from_bytes([0xa1; 32]);
+const FIXTURE_AUTHOR_B: ClientId = ClientId::from_bytes([0xb2; 32]);
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -331,6 +367,7 @@ fn replay(
     enum Play {
         Bytes(Vec<u8>),
         Resize(u16, u16),
+        Author(ClientId),
     }
     let input: Vec<Play> = match source {
         Source::Vtrec(recording) => chunks(recording).into_iter().map(Play::Bytes).collect(),
@@ -339,6 +376,7 @@ fn replay(
             .map(|s| match s {
                 Step::Text(t) => Play::Bytes(t.as_bytes().to_vec()),
                 Step::Resize(c, r) => Play::Resize(*c, *r),
+                Step::Author(c) => Play::Author(*c),
             })
             .collect(),
     };
@@ -361,6 +399,13 @@ fn replay(
     for (step, play) in input.iter().enumerate() {
         let chunk = match play {
             Play::Bytes(bytes) => bytes,
+            Play::Author(client) => {
+                // No frame: who is typing is not state a subscriber can see
+                // until a block records it, which is the same reason
+                // `set_input_author` does not touch the sequence.
+                term.set_input_author(Some(client.0));
+                continue;
+            }
             Play::Resize(cols, rows) => {
                 // A resize reflows the host's grid, renumbering every line id,
                 // and the keyframe below is a subscriber's only account of it —
@@ -627,6 +672,9 @@ struct Coverage {
     blocks_expected: usize,
     /// Mid-stream keyframes whose `cols` differ from the grid's before them.
     width_changes: usize,
+    /// Distinct block authors seen on the wire. Distinct rather than counted:
+    /// one author proves the field rides, two prove a client reads *which*.
+    authors: BTreeSet<[u8; 32]>,
     ops: BTreeSet<&'static str>,
 }
 
@@ -644,6 +692,7 @@ impl Coverage {
         // A field rather than an op, so it is invisible to the `ops` set below
         // and needs counting of its own.
         self.blocks += d.blocks.len();
+        self.authors.extend(d.blocks.iter().filter_map(|b| b.author).map(|c| c.0));
         for op in &d.ops {
             match op {
                 DeltaOp::Scroll { .. } => {
@@ -694,7 +743,8 @@ impl Coverage {
     fn assert_the_corpus_is_worth_replaying(&self) {
         println!(
             "coverage: {} scrolls, {} sb_push, {} screen switches, {} titles, \
-             {} styled attrs, {} wide runs, {} marks, {} block updates, {} width changes",
+             {} styled attrs, {} wide runs, {} marks, {} block updates, {} block authors, \
+             {} width changes",
             self.scrolls,
             self.sb_pushes,
             self.screen_switches,
@@ -703,6 +753,7 @@ impl Coverage {
             self.wide,
             self.marks,
             self.blocks,
+            self.authors.len(),
             self.width_changes
         );
         println!("ops seen: {:?}", self.ops);
@@ -738,6 +789,13 @@ impl Coverage {
             self.blocks_expected > 0,
             "no frame *expects* blocks -- the wire carried them but the expectations \
              would hold no client to applying them, which is the half that matters"
+        );
+        assert!(
+            self.authors.len() > 1,
+            "fewer than two distinct block authors -- `Block.author` is stamped by the \
+             daemon and no recording can carry one, so without the synthetic fixture a \
+             client that dropped the field, or hard-coded the only id it ever saw, would \
+             pass every fixture here"
         );
         assert!(
             self.width_changes > 0,
@@ -791,6 +849,7 @@ fn write_client_messages(path: &Path) {
                 watch_hosts: true,
                 // …and the same for #383's, for the same reason.
                 watch_signals: true,
+                agent: false,
             },
         ),
         ("auth", ClientMessage::Auth { signature: Sig64::from_bytes([0xef; 64]) }),

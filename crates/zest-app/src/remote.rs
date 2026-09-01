@@ -859,6 +859,9 @@ fn connect_daemon(
                 label,
                 expect_host,
                 watch,
+                // A person is at this window; the app is the client that
+                // answers the approval modal.
+                zest_daemon::client::ClientKind::Interactive,
                 Some(&adapter),
             )
         }

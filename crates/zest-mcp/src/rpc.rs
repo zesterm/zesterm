@@ -156,6 +156,14 @@ fn tool_definitions() -> Value {
                  `exit_code_source: shell_marker` means the shell reported the status \
                  via OSC 133 and any program can print those markers, so treat it as \
                  the shell's word rather than as proof. \
+                 `author` names the client whose input started the command, as the \
+                 daemon recorded it -- `\"you\"` when that was this agent, otherwise a \
+                 short device id. Unlike `command` and `exit_code` it is not the \
+                 shell's word: nothing running in the terminal can change whose id a \
+                 block carries, which is what `author_source: daemon_witness` says. It \
+                 is still not authorization -- a shell decides *when* a block opens, so \
+                 a block nobody typed carries whoever wrote last. Absent when the \
+                 daemon recorded nobody. \
                  `prompt_line`, `output_line` and `end_line` are the absolute lines the \
                  block covers, and an anchor the block does not have yet is left out \
                  rather than sent as null. They are renumbered whenever the session \
