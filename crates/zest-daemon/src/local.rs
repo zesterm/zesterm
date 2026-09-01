@@ -460,6 +460,20 @@ mod imp {
         pub fn try_clone(&self) -> io::Result<Self> {
             Ok(Self { shared: std::sync::Arc::clone(&self.shared) })
         }
+
+        /// Abort whatever another thread has parked in on this handle.
+        ///
+        /// There is no read timeout on an overlapped pipe — `GetOverlappedResult`
+        /// waits forever — so a caller that gave up on a peer has to unpark its
+        /// reader from outside: the pending read completes with
+        /// `ERROR_OPERATION_ABORTED`, the reader returns, and the thread ends
+        /// instead of holding a handle for the life of the process.
+        pub fn cancel_io(&self) {
+            use windows_sys::Win32::System::IO::CancelIoEx;
+            // SAFETY: a live handle; a null OVERLAPPED cancels every pending
+            // operation on it from any thread.
+            unsafe { CancelIoEx(self.shared.handle, ptr::null()) };
+        }
     }
 
     /// One end of a connected local stream.

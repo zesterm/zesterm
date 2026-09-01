@@ -74,9 +74,22 @@ pub struct BuildId {
     pub exe_mtime: u64,
 }
 
+/// Read once per process. Not per call: a dev loop replaces the binary on
+/// disk under a running instance, and a re-`stat` would then show *both*
+/// sides the new file — the stale instance would answer the new launcher
+/// with its own build id and the launch would forward into the program it
+/// was rebuilt to replace. Primed when the endpoint is claimed and before a
+/// forward, so what the running process remembers is the binary that
+/// started it.
+static BUILD: std::sync::OnceLock<BuildId> = std::sync::OnceLock::new();
+
 impl BuildId {
     #[must_use]
     pub fn current() -> Self {
+        BUILD.get_or_init(Self::read).clone()
+    }
+
+    fn read() -> Self {
         let (exe_len, exe_mtime) = std::env::current_exe()
             .and_then(std::fs::metadata)
             .map(|m| {
@@ -222,6 +235,17 @@ fn activation_token() -> Option<String> {
     None
 }
 
+/// Abort a stream another thread is parked in, so that thread ends.
+#[cfg(unix)]
+fn abort(stream: &LocalStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+#[cfg(windows)]
+fn abort(stream: &LocalStream) {
+    stream.cancel_io();
+}
+
 /// What forwarding came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -266,27 +290,50 @@ fn write_frame<W: Write, T: Serialize>(stream: &mut W, msg: &T) -> std::io::Resu
 /// The I/O runs on a helper thread and the caller waits on a channel:
 /// `PipeStream` has no read timeout (`GetOverlappedResult` waits forever), and
 /// the READ_POLL lesson from the daemon says a peer that stays up and says
-/// nothing is exactly the case a timeout exists for. On timeout the thread is
-/// abandoned; this process either exits or becomes a window of its own, and
-/// the handle closes with it.
+/// nothing is exactly the case a timeout exists for. On timeout the caller
+/// aborts the stream the thread is parked in, so the thread ends rather than
+/// holding a handle for as long as this process — which, having given up on
+/// the instance, goes on to be a window of its own.
 #[must_use]
 pub fn forward(path: &str, request: &OpenRequest, budget: Duration) -> Verdict {
+    // Before the thread, so a binary replaced mid-flight cannot change the
+    // answer between the greeting and the reply.
+    let _ = BuildId::current();
     let (tx, rx) = crossbeam_channel::bounded(1);
+    let (tx_stream, rx_stream) = crossbeam_channel::bounded(1);
     let path = path.to_string();
     let request = request.clone();
     let spawned = std::thread::Builder::new().name("zesterm-forward".into()).spawn(move || {
-        let _ = tx.send(forward_blocking(&path, &request, budget));
+        let _ = tx.send(forward_blocking(&path, &request, budget, &tx_stream));
     });
     if spawned.is_err() {
         return Verdict::NoInstance;
     }
-    rx.recv_timeout(budget).unwrap_or(Verdict::NoAnswer)
+    match rx.recv_timeout(budget) {
+        Ok(verdict) => verdict,
+        Err(_) => {
+            if let Ok(stream) = rx_stream.try_recv() {
+                abort(&stream);
+            }
+            Verdict::NoAnswer
+        }
+    }
 }
 
-fn forward_blocking(path: &str, request: &OpenRequest, budget: Duration) -> Verdict {
+fn forward_blocking(
+    path: &str,
+    request: &OpenRequest,
+    budget: Duration,
+    handle: &crossbeam_channel::Sender<LocalStream>,
+) -> Verdict {
     let Ok(mut stream) = zest_daemon::connect(path) else {
         return Verdict::NoInstance;
     };
+    // A second half for the caller to abort from, should the budget elapse
+    // while this thread is parked in the read below.
+    if let Ok(half) = stream.try_clone() {
+        let _ = handle.send(half);
+    }
     #[cfg(unix)]
     let _ = stream.set_read_timeout(Some(budget));
     #[cfg(windows)]
@@ -368,6 +415,10 @@ pub struct Claim {
 
 /// Claim the endpoint; `Err` means another process serves it.
 pub fn claim() -> Result<Claim, String> {
+    // The build id is fixed now, from the binary that started this process:
+    // a later launcher must not find this instance describing whatever has
+    // since been copied over that path.
+    let _ = BuildId::current();
     let path = socket_path();
     let listener = LocalListener::bind_exclusive(&path).map_err(|e| e.to_string())?;
     Ok(Claim { listener, path })
@@ -376,12 +427,18 @@ pub fn claim() -> Result<Claim, String> {
 /// The running instance's end: accepts launches and parks them for the
 /// event loop.
 pub struct InstanceServer {
+    /// Only the unix `Drop` reads it, so only unix has it: on Windows a
+    /// field nothing reads is `dead_code`, which `-D warnings` makes a
+    /// build failure on the platform that cannot see it (#472's lesson).
+    #[cfg(unix)]
     path: String,
 }
 
 impl InstanceServer {
     pub fn start(claim: Claim, proxy: EventLoopProxy<Wakeup>, pending: PendingOpens) -> Self {
         let Claim { mut listener, path } = claim;
+        #[cfg(not(unix))]
+        let _ = &path;
         let spawned = std::thread::Builder::new().name("zesterm-instance".into()).spawn(move || {
             loop {
                 let stream = match listener.accept() {
@@ -413,7 +470,10 @@ impl InstanceServer {
         if let Err(e) = spawned {
             tracing::warn!(error = %e, "no thread for the instance endpoint; later launches open their own window");
         }
-        Self { path }
+        Self {
+            #[cfg(unix)]
+            path,
+        }
     }
 }
 
