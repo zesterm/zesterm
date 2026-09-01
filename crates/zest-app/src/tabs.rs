@@ -344,6 +344,16 @@ pub struct Tab {
     /// The profile this tab was launched from, when it was launched from one.
     /// `None` is every plain tab: it follows the window's palette and accent.
     pub identity: Option<ProfileIdentity>,
+    /// The environment this tab's session was launched with, kept so a split
+    /// can be given the same one.
+    ///
+    /// Stored rather than re-resolved from `identity.name`: a profile
+    /// published by another host and a local profile can share a name and mean
+    /// different things, so looking the name up in *this* machine's config
+    /// would hand a pane somebody else's environment. Unexpanded, exactly as
+    /// it crossed the wire — the host resolves the placeholders, and a pane on
+    /// the same host resolves them the same way.
+    pub launch_env: Vec<(String, String)>,
     /// Bytes waiting for this tab's session to exist (#324) — see
     /// [`Tab::with_pending_input`].
     pending_input: Option<Vec<u8>>,
@@ -518,6 +528,7 @@ impl Tab {
             connecting: false,
             sized,
             dial_hint: None,
+            launch_env: Vec::new(),
             pending_input: None,
             identity: None,
         }
@@ -540,6 +551,7 @@ impl Tab {
             connecting: true,
             sized,
             dial_hint: None,
+            launch_env: Vec::new(),
             pending_input: None,
             identity: None,
         }
@@ -605,6 +617,7 @@ impl Tab {
             sized: (80, 24),
             dial_hint: None,
             identity: None,
+            launch_env: Vec::new(),
             pending_input: None,
         }
     }
@@ -612,6 +625,12 @@ impl Tab {
     #[must_use]
     pub fn with_identity(mut self, identity: Option<ProfileIdentity>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    #[must_use]
+    pub fn with_launch_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.launch_env = env;
         self
     }
 
@@ -626,6 +645,7 @@ impl Tab {
             connecting: false,
             sized,
             dial_hint: None,
+            launch_env: Vec::new(),
             pending_input: None,
             identity: None,
         }

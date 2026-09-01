@@ -233,6 +233,7 @@ fn a_paired_device_drives_a_session_over_websocket() {
             cols: 80,
             rows: 24,
             env: Vec::new(),
+            profile: String::new(),
         },
     );
     let listing = wait_for(&mut ws, &mut frames, &mut ch, |m| {

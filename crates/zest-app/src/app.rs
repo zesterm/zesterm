@@ -2759,6 +2759,9 @@ impl App {
             command: self.config.shell.as_deref().unwrap_or_default(),
             cwd: "",
             env: &self.config.shell_env,
+            // Restore reattaches sessions that already exist; a created one
+            // here has no profile behind it.
+            profile: "",
             cols,
             rows,
             scrollback: self.config.scrollback,
@@ -2926,6 +2929,7 @@ impl App {
                 // box would be this window's configuration quietly deciding
                 // another machine's shells.
                 env: &[],
+                profile: "",
                 cols,
                 rows,
                 scrollback: self.config.scrollback,
@@ -3621,7 +3625,7 @@ impl App {
                 // command the session's *shell* and kill the tab the moment it
                 // finished. A pty holds type-ahead, so this needs no callback
                 // waiting for the prompt.
-                self.open_shell_tab(None, None, cwd);
+                self.open_shell_tab(None, None, cwd, Vec::new());
                 if let Some(s) = self.tabs.active_source() {
                     s.write(bytes);
                 }
@@ -3877,6 +3881,23 @@ impl App {
                     // daemon applies its own (#488).
                 let env: &[(String, String)] =
                     if route.is_local() { &self.config.shell_env } else { &[] };
+                // A pane shares its tab's identity until panes carry their own
+                // profile, and an identity that is a colour but not an
+                // environment is only half of one: splitting a tab running one
+                // account's CLI would hand the new pane a different account.
+                // Verbatim from the tab, never re-resolved from the name --
+                // see `Tab::launch_env`.
+                let (tab_env, tab_profile) = self
+                    .tabs
+                    .active()
+                    .map(|t| {
+                        let name =
+                            t.identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+                        (t.launch_env.clone(), name)
+                    })
+                    .unwrap_or_default();
+                let env: Vec<(String, String)> =
+                    env.iter().cloned().chain(tab_env.iter().cloned()).collect();
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -3884,7 +3905,8 @@ impl App {
                         label: "zesterm",
                         command: &command,
                         cwd: "",
-                        env,
+                        env: &env,
+                        profile: &tab_profile,
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -4025,6 +4047,7 @@ impl App {
                 command: &command,
                 cwd: "",
                 env: &env,
+                profile: "",
                 cols,
                 rows,
                 scrollback,
@@ -9491,6 +9514,7 @@ impl App {
                 command: &command,
                 cwd: "",
                 env: &env,
+                profile: "",
                 cols,
                 rows,
                 scrollback,
@@ -9583,7 +9607,7 @@ impl App {
     /// button used to do this directly and now opens the launcher instead —
     /// the chord is how the default stays one keystroke away).
     fn new_tab(&mut self) {
-        self.open_shell_tab(None, None, None);
+        self.open_shell_tab(None, None, None, Vec::new());
     }
 
     /// The command a command-less launch resolves to — the launcher rows'
@@ -9679,6 +9703,15 @@ impl App {
                     (!command.is_empty()).then_some(command),
                     Some(identity),
                     (!cwd.is_empty()).then_some(cwd),
+                    // A published profile belongs to the machine that
+                    // published it, and `HostProfile` deliberately carries no
+                    // environment: a host must not hand its profiles'
+                    // environments to every paired device. Resolving the name
+                    // against *this* machine's config instead would be worse
+                    // than nothing -- a local profile can share a name with a
+                    // remote one and mean something else entirely. The host
+                    // applying its own is #487's phase 3.
+                    Vec::new(),
                 );
             }
             target => self.spawn_connecting_tab(name, identity, command, cwd, label, target),
@@ -9726,7 +9759,12 @@ impl App {
         let cwd = meta.starting_directory.clone();
         match target {
             crate::launch::HostTarget::Local => {
-                self.open_shell_tab(meta.command.clone(), Some(identity), cwd);
+                self.open_shell_tab(
+                    meta.command.clone(),
+                    Some(identity),
+                    cwd,
+                    meta.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                );
             }
             target => {
                 let command = crate::launch::launch_command(
@@ -9841,6 +9879,7 @@ impl App {
                                     // stays home; the far daemon applies its
                                     // own (#488).
                                     env: &[],
+                                    profile: "",
                                     cols,
                                     rows,
                                     scrollback,
@@ -9917,12 +9956,19 @@ impl App {
     /// inline: creating on an already-proven route is sub-millisecond on
     /// loopback and a few on the LAN — the picker's cold dials are the ones
     /// that must not block, and they arrive with the fleet model.
+    /// `env` is the profile's own, unexpanded: `${profile_dir}` names a
+    /// directory on the machine that runs the shell, so the host resolves it.
+    /// The profile's *name* travels beside it, taken from `identity` — which
+    /// already carries it, and is the only thing here that knows whether there
+    /// is a profile at all.
     fn open_shell_tab(
         &mut self,
         command: Option<String>,
         identity: Option<crate::tabs::ProfileIdentity>,
         cwd: Option<String>,
+        env: Vec<(String, String)>,
     ) {
+        let profile = identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
         let (cols, rows) = self.current_dims();
         // Seeded before the first byte arrives, so the grid never flashes
         // the window's palette under a profile's scheme.
@@ -9944,6 +9990,13 @@ impl App {
                     route.is_local(),
                     self.config.shell.as_deref(),
                 );
+                let launch_env: Vec<(String, String)> = if route.is_local() {
+                    self.config.shell_env.iter().cloned().chain(env.iter().cloned()).collect()
+                } else {
+                    // A remote host applies its own `shell.env`; only the
+                    // profile's entries are this launch's to carry.
+                    env.clone()
+                };
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -9963,7 +10016,14 @@ impl App {
                         // therefore never applies. Where they do agree the
                         // entry simply arrives twice with the same value, and
                         // last-wins makes that a no-op.
-                        env: if route.is_local() { &self.config.shell_env } else { &[] },
+                        //
+                        // The profile's own entries go after, so the more
+                        // specific of the two wins: a profile names the
+                        // identity this tab is *for*, and losing to a
+                        // machine-wide default would make it the identity of
+                        // whoever configured the box.
+                        env: &launch_env,
+                        profile: &profile,
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -9984,7 +10044,9 @@ impl App {
                         // A create should never collide, but the daemon owns
                         // session ids — adopt guards every path the same way
                         // (#188); a refused duplicate detaches on drop.
-                        let tab = Tab::daemon(session, local, (cols, rows)).with_identity(identity);
+                        let tab = Tab::daemon(session, local, (cols, rows))
+                            .with_identity(identity)
+                            .with_launch_env(env.clone());
                         if let Some(dup) = self.tabs.adopt(tab, true) {
                             tracing::info!(addr = %dup.addr, "session already open; activating its tab");
                             drop(dup);
@@ -10009,6 +10071,22 @@ impl App {
                 if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
                     spec.cwd = Some(dir.into());
                 }
+                // The profile's own environment, after `build_spec` has
+                // applied `shell.env`, so the more specific wins. Expanded
+                // here because here *is* the host: with no daemon there is
+                // nobody else to resolve `${profile_dir}` against, and the
+                // answer has to be the same one the daemon would give or the
+                // two paths would put a profile's files in two places.
+                let ctx = zest_config::profiles::ExpandContext {
+                    profile: profile.clone(),
+                    config_dir: zest_config::paths::config_dir(),
+                    home: crate::launch::home_dir(),
+                };
+                let injected = spec.injected_since(spec.env.len());
+                spec.layer_env(
+                    env.iter().map(|(k, v)| (k.clone(), zest_config::profiles::expand(v, &ctx))),
+                    &injected,
+                );
                 match Session::spawn(
                     &spec,
                     PtySize::new(cols, rows),
@@ -10017,8 +10095,11 @@ impl App {
                 ) {
                     Ok(session) => {
                         self.seed_terminal(&mut session.terminal().lock(), seed);
-                        self.tabs
-                            .push(Tab::in_process(session, addr, (cols, rows)).with_identity(identity));
+                        self.tabs.push(
+                            Tab::in_process(session, addr, (cols, rows))
+                                .with_identity(identity)
+                                .with_launch_env(env.clone()),
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not spawn a new in-process tab");

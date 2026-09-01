@@ -358,6 +358,26 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
 
 ### Protocol & daemon
 
+- [x] **A profile carries its own environment** (#496, epic #487). `[profiles.x.env]`
+      is a profile-only key, not the `shell.env` setting: that one *replaces*
+      wholesale through the cascade, so a profile naming one variable would
+      drop the user's whole global env. Defaults' env merges key by key — the
+      one `fold_meta` field that does, because `profiles.defaults.env` is where
+      fleet-wide variables live. Values carry `${profile_dir}`, `${profile}`
+      and `${home}` and nothing else (`$FOO` is not expanded: there is no shell
+      here to do it), resolved on the machine that *runs* the profile, so a
+      launch sends the profile's **name** beside its unexpanded values and the
+      host fills them in — ADR-014's rule, now applied to the environment.
+      `${profile_dir}` is created at spawn, 0700, and only when something
+      actually points into it. What this buys, measured rather than assumed: a
+      profile with `CLAUDE_CONFIG_DIR = "${profile_dir}/claude"` is a separate
+      Claude Code login — the same binary reports `Not logged in` under a fresh
+      config dir — and `GH_CONFIG_DIR`, `KUBECONFIG` and `GIT_CONFIG_GLOBAL`
+      are the same one-line shape. A split pane inherits its tab's environment
+      verbatim (panes still carry no profile of their own). Open: a *published*
+      profile's environment, which is the host's to apply — `HostProfile`
+      deliberately carries none, so no machine hands its profiles'
+      environments to every paired device (phase 3).
 - [x] **A launch can name its child's environment** (#488). `CreateSession`
       grew an additive `env`, skipped when empty so an ordinary launch is
       byte-identical to what a peer predating it sent. It is a bug fix wearing

@@ -285,6 +285,23 @@ pub enum ClientMessage {
         /// not move.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         env: Vec<(String, String)>,
+        /// The profile this launch came from, for resolving `env`'s
+        /// placeholders. Empty when no profile is behind it.
+        ///
+        /// A *name*, not the resolved values, because `${profile_dir}` has to
+        /// name a directory on the machine that runs the shell. Expanded
+        /// client-side, a profile launched on another host would carry this
+        /// machine's config path — a Mac handing a Linux box `/Users/...` and
+        /// calling it configuration. Same rule ADR-014 already applies to
+        /// `starting_directory`.
+        ///
+        /// It resolves placeholders and nothing else: the host does **not**
+        /// look this name up in its own config. A launch says what environment
+        /// it wants; only where `${profile_dir}` lands is the host's to decide.
+        /// (A published profile the host owns is #487's phase 3, and a
+        /// different question.)
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        profile: String,
     },
     /// Begin receiving updates for a session.
     ///
@@ -1871,6 +1888,7 @@ mod tests {
             cols: 120,
             rows: 34,
             env: Vec::new(),
+            profile: String::new(),
         };
         let body = crate::frame::encode_body(&msg).expect("encode");
         let back: ClientMessage = crate::frame::decode(&body).expect("decode");
@@ -1899,6 +1917,7 @@ mod tests {
                 // still last, because the daemon applies it in order.
                 ("WT_SESSION".into(), String::new()),
             ],
+            profile: String::new(),
         };
         let body = crate::frame::encode_body(&msg).expect("encode");
         let back: ClientMessage = crate::frame::decode(&body).expect("decode");
@@ -1915,6 +1934,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: Vec::new(),
+            profile: String::new(),
         };
         // Decoded as a map and checked by *key*, not by searching the bytes
         // for the text "env": a MessagePack body is arbitrary bytes, so a

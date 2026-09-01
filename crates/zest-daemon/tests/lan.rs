@@ -280,6 +280,7 @@ fn a_paired_device_drives_a_session_over_tcp() {
             cols: 80,
             rows: 24,
             env: Vec::new(),
+            profile: String::new(),
         },
     );
     // Accept `Error` too, so a spawn failure names itself instead of timing out.

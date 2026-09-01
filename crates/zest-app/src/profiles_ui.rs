@@ -20,10 +20,15 @@ use crate::settings_ui::{self, EditBuffer, RowAction};
 /// one of these, so a schema group the list does not name cannot vanish.
 pub const SECTION_ORDER: &[&str] = &["Launch", "Appearance", "Cursor"];
 
-/// The launch identity trio: never a chip, never a dot. They are what makes
+/// The launch identity fields: never a chip, never a dot. They are what makes
 /// the profile a profile, so "inheriting" them is meaningless (§12) — and a
 /// reset dot on `command` would read as "remove what this profile is".
-pub const NEVER_CHIP: &[&str] = &["command", "host", "starting_directory"];
+///
+/// `env` is here for a second reason on top of that one. Its chip would have
+/// to say *one* thing about a row that is genuinely both: `fold_meta` merges
+/// it key by key, so a profile's env is routinely part inherited and part its
+/// own, and either chip would be a lie about half the rows.
+pub const NEVER_CHIP: &[&str] = &["command", "host", "starting_directory", "env"];
 
 /// The icon roster: BMP glyphs reachable by ordinary font fallback (the same
 /// argument as the Settings chip's ⚙ — PUA icons need a Nerd Font that may
@@ -252,6 +257,18 @@ pub fn effective_value(
         "starting_directory" => {
             serde_json::Value::String(meta.starting_directory.clone().unwrap_or_default())
         }
+        // The *merged* env, Defaults' entries included, because that is what
+        // the launch will actually use — `fold_meta` merges this one field
+        // key by key rather than picking. An editor showing only the profile's
+        // own rows would describe a different environment than the session
+        // gets, which is the whole failure `shell_env_replaces_wholesale...`
+        // guards against on the settings side.
+        "env" => serde_json::Value::Object(
+            meta.env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        ),
         "tab_title" => serde_json::Value::String(match &meta.tab_title {
             TabTitle::FromShell => "from-shell".to_string(),
             TabTitle::ProfileName => "profile-name".to_string(),
@@ -671,6 +688,54 @@ mod tests {
             error: false,
             append: false,
         })
+    }
+
+    #[test]
+    fn the_env_row_shows_the_merged_environment_the_launch_will_use() {
+        // Caught a real gap: `effective_value` matches profile-only keys by
+        // name and falls through to `Null`, so a new key renders as an empty
+        // row — a control that looks like "nothing set" over a profile that
+        // has three variables. Nothing else would have noticed, because
+        // `every_profile_field_arrives_renderable` asserts the field exists,
+        // not that it carries its value.
+        //
+        // Merged, Defaults included, because that is what the *launch* uses:
+        // an editor showing only the profile's own entries would describe a
+        // different environment than the session gets.
+        let c = config(
+            "[profiles.defaults.env]\nSHARED = \"1\"\n\
+             [profiles.work.env]\nOWN = \"2\"\n",
+        );
+        let resolved = resolve_profile(&c, "work");
+        let values = window_values();
+        let schemes = scheme_swatches();
+        let shown = effective_value(
+            &fields()[field_index("env")],
+            &resolved,
+            &serde_json::Value::Null,
+            &ctx(&values, &schemes, false),
+        );
+        let map = shown.as_object().expect("the env row is an object, which KeyValue renders");
+        assert_eq!(map.get("OWN").and_then(|v| v.as_str()), Some("2"));
+        assert_eq!(
+            map.get("SHARED").and_then(|v| v.as_str()),
+            Some("1"),
+            "Defaults' entries are part of what this profile launches with, so the row shows them"
+        );
+    }
+
+    #[test]
+    fn the_env_row_never_claims_a_single_inheritance() {
+        // Every other row's chip says one of two things. `env` is genuinely
+        // both at once -- `fold_meta` merges it key by key -- so either chip
+        // would be a lie about half the rows.
+        let c = config("[profiles.work.env]\nOWN = \"2\"\n");
+        let (rows, chips, _) = build(&resolve_profile(&c, "work"), false);
+        let idx = rows
+            .iter()
+            .position(|r| matches!(r, SettingsRowModel::Setting { key, .. } if key == "env"))
+            .expect("the env row is rendered");
+        assert!(chips[idx].is_none(), "env must carry no inheritance chip");
     }
 
     #[test]

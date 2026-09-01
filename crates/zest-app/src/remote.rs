@@ -107,6 +107,14 @@ pub struct AttachOptions<'a> {
     /// environment, so a profile that appeared to apply would be describing an
     /// identity the shell does not have.
     pub env: &'a [(String, String)],
+    /// The profile `env` came from, for its placeholders. Empty for a launch
+    /// with no profile behind it.
+    ///
+    /// Travels beside the unexpanded values rather than being resolved into
+    /// them: `${profile_dir}` names a directory on the machine that *runs* the
+    /// shell, so the host expands it. Resolved here, a profile launched on
+    /// another machine would carry this one's paths.
+    pub profile: &'a str,
     pub cols: u16,
     pub rows: u16,
     pub scrollback: usize,
@@ -302,6 +310,7 @@ impl RemoteSession {
             command,
             cwd,
             env,
+            profile,
             cols,
             rows,
             scrollback,
@@ -316,12 +325,13 @@ impl RemoteSession {
         // The handshake runs inline, before any thread starts, so a failure is
         // an error the caller can fall back from rather than a window that
         // opens and then reports it has nothing to show.
+        let launch = zest_daemon::client::Launch { command, cwd, env, profile };
         let (read, write) = dial()?;
         let mut conn = connect_daemon(read, write, identity, label, expect_host, on_pending.as_ref())?;
         let addr = match target {
-            Target::Open => conn.open_session(command, cwd, cols, rows, adopt, env.to_vec())?,
+            Target::Open => conn.open_session(&launch, cols, rows, adopt)?,
             Target::Existing(a) => a,
-            Target::Create => conn.create(command, cwd, cols, rows, env.to_vec())?,
+            Target::Create => conn.create(&launch, cols, rows)?,
         };
         let (keyframe_seq, keyframe) = conn.attach(addr, cols, rows)?;
         let host_label = conn.host_label().to_string();
@@ -443,6 +453,7 @@ impl RemoteSession {
             // environment dropped on reconnect is a profile that silently
             // stops applying the first time the daemon restarts.
             let env = env.to_vec();
+            let profile = profile.to_string();
             let on_pending = on_pending.clone();
             let addr_cell = Arc::clone(&addr_cell);
             let size_cell = Arc::clone(&size_cell);
@@ -748,7 +759,17 @@ impl RemoteSession {
                                 // be typed into again, rather than one that
                                 // never recovers.
                                 Rebind::AdoptOrCreate => conn
-                                    .open_session(&command, &cwd, cols, rows, true, env.clone())
+                                    .open_session(
+                                        &zest_daemon::client::Launch {
+                                            command: &command,
+                                            cwd: &cwd,
+                                            env: &env,
+                                            profile: &profile,
+                                        },
+                                        cols,
+                                        rows,
+                                        true,
+                                    )
                                     .and_then(|fresh| {
                                         addr = fresh;
                                         *addr_cell.lock() = fresh;
@@ -1360,6 +1381,7 @@ mod tests {
                     command,
                     cwd: "",
                     env: &[],
+            profile: "",
                     cols: 40,
                     rows: 6,
                     scrollback: 100,
@@ -1554,7 +1576,13 @@ mod tests {
             false,
         )
         .expect("handshake");
-        let addr = conn.create(&dripping("tail"), "", 40, 6, Vec::new()).expect("create");
+        let addr = conn
+            .create(
+                &zest_daemon::client::Launch { command: &dripping("tail"), ..Default::default() },
+                40,
+                6,
+            )
+            .expect("create");
         let _ = conn.attach(addr, 40, 6).expect("attach");
 
         let pending = conn.pending();
@@ -1606,6 +1634,7 @@ mod tests {
                 command: "/bin/sh",
                 cwd: "",
                 env: &[],
+            profile: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -1959,6 +1988,7 @@ mod tests {
                 command: "",
                 cwd: "",
                 env: &[],
+            profile: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -2025,6 +2055,7 @@ mod tests {
                 command: "",
                 cwd: "",
                 env: &[],
+            profile: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,
@@ -2070,6 +2101,7 @@ mod tests {
             command: "/bin/sh",
             cwd: "",
             env: &[],
+            profile: "",
             cols: 40,
             rows: 6,
             scrollback: 100,
@@ -2212,6 +2244,7 @@ mod tests {
                 command: "/bin/sh",
                 cwd: "",
                 env: &[],
+            profile: "",
                 cols: 40,
                 rows: 6,
                 scrollback: 100,

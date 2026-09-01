@@ -34,6 +34,7 @@ pub const PROFILE_ONLY_KEYS: &[&str] = &[
     "host",
     "ask_host",
     "starting_directory",
+    "env",
     "tab_title",
     "color_scheme",
     "tab_color",
@@ -95,6 +96,26 @@ pub struct ProfileMeta {
     pub ask_host: bool,
     /// Working directory — possibly a path this machine has never heard of.
     pub starting_directory: Option<String>,
+    /// Environment for the shell this profile launches, layered over the
+    /// host's own `shell.env`; last-wins, and **an empty value unsets**.
+    ///
+    /// Profile-only rather than the `shell.env` settings key, which it looks
+    /// like and is not. Three reasons, and each one is a bug avoided:
+    ///
+    /// - The cascade treats `shell.env` as a value that happens to be a table,
+    ///   so it **replaces wholesale** ([`cascade::merge_into`]). A profile
+    ///   setting one variable would silently drop the user's entire global env.
+    /// - A profile's settings layer is process-wide (`--profile`), not per tab.
+    ///   Applying it per launch means threading the whole cascade through every
+    ///   one.
+    /// - [`ProfileMeta::starting_directory`] is already exactly this: a
+    ///   profile-only key beside a settings key (`shell.cwd`) that means the
+    ///   same thing at a different scope.
+    ///
+    /// Values may carry [`expand`]'s placeholders, left unexpanded here: they
+    /// resolve on the machine that *runs* the profile, which is what lets one
+    /// profile mean the same thing on every machine in the fleet.
+    pub env: BTreeMap<String, String>,
     pub tab_title: TabTitle,
     /// Colour scheme id — the ANSI half of a theme, applied to the grid only.
     pub color_scheme: Option<String>,
@@ -293,6 +314,22 @@ fn fold_meta(
         } else {
             defaults.starting_directory
         },
+        // The one field that merges instead of picking, and deliberately so.
+        // Every other key is a single value where "the profile said something"
+        // must shadow Defaults entirely. `env` is a *set* of variables, and
+        // `profiles.defaults.env` carrying fleet-wide entries while one profile
+        // adds its own is the obvious use -- a field-level pick would throw the
+        // fleet-wide ones away the moment a profile named a single variable.
+        //
+        // Note this is the opposite of what the settings cascade does with
+        // `shell.env`, which replaces wholesale. That difference is the whole
+        // argument for `env` being a profile-only key rather than a reuse of
+        // that one; `a_profiles_env_merges_over_defaults_key_by_key` pins it.
+        env: {
+            let mut env = defaults.env;
+            env.extend(named.env);
+            env
+        },
         tab_title: if pick("tab_title") { named.tab_title } else { defaults.tab_title },
         color_scheme: if pick("color_scheme") { named.color_scheme } else { defaults.color_scheme },
         tab_color: if pick("tab_color") { named.tab_color } else { defaults.tab_color },
@@ -332,6 +369,13 @@ fn meta_with_presence(table: &toml::Table) -> (ProfileMeta, BTreeSet<&'static st
     }
     meta.starting_directory = str_key(table, "starting_directory");
     track("starting_directory", meta.starting_directory.is_some());
+    if let Some(v) = env_key(table, "env") {
+        // Presence is the *table* being there, even empty: `[profiles.x.env]`
+        // with nothing under it is a deliberate "inherit nothing", which the
+        // merge above can express and a missing key cannot.
+        meta.env = v;
+        track("env", true);
+    }
     if let Some(v) = str_key(table, "tab_title") {
         // The two fixed spellings are the segmented control's values; any
         // other string is a custom title, which makes a title literally
@@ -378,6 +422,116 @@ fn meta_with_presence(table: &toml::Table) -> (ProfileMeta, BTreeSet<&'static st
     (meta, set)
 }
 
+/// Where a profile's placeholders resolve to, on the machine running it.
+///
+/// Built by the *host*, never by the client: a launch carries the profile's
+/// name and its unexpanded values, and the daemon that spawns the shell fills
+/// these in. That is what makes one profile mean the same thing on every
+/// machine — `${profile_dir}` on a Mac is a Mac path, and the same profile
+/// launched on a Linux box gets that box's own. Resolving client-side would
+/// hand a Linux daemon `/Users/...` and call it configuration.
+///
+/// The same rule ADR-014 already applies to `starting_directory`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpandContext {
+    /// The profile's name. Empty outside a profile launch, which makes
+    /// `${profile}` and `${profile_dir}` unresolvable rather than wrong.
+    pub profile: String,
+    /// This machine's config directory — the parent of `${profile_dir}`.
+    pub config_dir: Option<std::path::PathBuf>,
+    /// This machine's home directory.
+    pub home: Option<std::path::PathBuf>,
+}
+
+impl ExpandContext {
+    /// The directory `${profile_dir}` names: `<config>/profiles/<name>`.
+    ///
+    /// `None` when there is no profile or no config directory to hang it off.
+    /// Not created here — see [`expand`]: a profiles editor rendering a row
+    /// must not mint directories on disk.
+    #[must_use]
+    pub fn profile_dir(&self) -> Option<std::path::PathBuf> {
+        if self.profile.is_empty() {
+            return None;
+        }
+        // The profile name is a single path segment by construction: the
+        // profiles editor rejects a name with a separator in it, and
+        // `write_profile_value` has always treated it as one segment rather
+        // than a dotted path. Belt and braces here anyway, because this one
+        // builds a *filesystem* path out of it: a name that escaped would
+        // point somewhere else entirely.
+        if self.profile.contains(['/', '\\']) || self.profile.contains("..") {
+            tracing::warn!(
+                profile = %self.profile,
+                "a profile name with a path separator has no directory of its own"
+            );
+            return None;
+        }
+        Some(self.config_dir.as_ref()?.join("profiles").join(&self.profile))
+    }
+}
+
+/// Substitute a profile environment value's placeholders.
+///
+/// A **closed** set, and nothing else is touched:
+///
+/// | Token | Expands to |
+/// |---|---|
+/// | `${profile_dir}` | `<config dir>/profiles/<name>` |
+/// | `${profile}` | the profile's name |
+/// | `${home}` | the host's home directory |
+///
+/// `$FOO` is deliberately **not** expanded, and neither is any other token.
+/// These values go into the child's environment block directly, without a
+/// shell — so implying shell expansion would promise something nothing here
+/// delivers. A closed documented set is the honest shape.
+///
+/// An unresolvable or unknown `${token}` is left **verbatim** and warned about
+/// rather than replaced with an empty string. Silently emptying it would turn
+/// `CLAUDE_CONFIG_DIR = "${profile_dir}/claude"` into `/claude` — an absolute
+/// path at the filesystem root, which a tool would then create or fail on, and
+/// either way the cause would be nowhere near the symptom.
+#[must_use]
+pub fn expand(value: &str, ctx: &ExpandContext) -> String {
+    // Only worth the work when there is a token at all, which is the common
+    // case for an ordinary variable.
+    if !value.contains("${") {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // An unterminated `${` is text, not a token. Nothing after it can
+            // be a placeholder either, so this ends the scan.
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let token = &after[..end];
+        let resolved = match token {
+            "profile" => (!ctx.profile.is_empty()).then(|| ctx.profile.clone()),
+            "profile_dir" => ctx.profile_dir().map(|p| p.display().to_string()),
+            "home" => ctx.home.as_ref().map(|p| p.display().to_string()),
+            _ => None,
+        };
+        match resolved {
+            Some(text) => out.push_str(&text),
+            None => {
+                tracing::warn!(
+                    token,
+                    "no value for this placeholder here; leaving it as written"
+                );
+                out.push_str(&rest[start..start + 2 + end + 1]);
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn str_key(table: &toml::Table, key: &str) -> Option<String> {
     match table.get(key)? {
         // An empty string is the file's spelling of "unset": treating it as
@@ -391,6 +545,35 @@ fn str_key(table: &toml::Table, key: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// A table of string values, skipping any entry that is not one.
+///
+/// Per-entry leniency rather than per-table: a profile with one mistyped
+/// variable still launches with the rest of its environment, which is the
+/// never-crash rule applied at the granularity the user actually edits.
+fn env_key(table: &toml::Table, key: &str) -> Option<BTreeMap<String, String>> {
+    let found = table.get(key)?;
+    let Some(entries) = found.as_table() else {
+        tracing::warn!(key, found = found.type_str(), "wrong type for profile key; ignoring");
+        return None;
+    };
+    let mut out = BTreeMap::new();
+    for (name, value) in entries {
+        match value {
+            toml::Value::String(v) => {
+                out.insert(name.clone(), v.clone());
+            }
+            other => {
+                tracing::warn!(
+                    key = %format!("env.{name}"),
+                    found = other.type_str(),
+                    "an environment value must be a string; ignoring this entry"
+                );
+            }
+        }
+    }
+    Some(out)
 }
 
 fn bool_key(table: &toml::Table, key: &str) -> Option<bool> {
@@ -462,6 +645,23 @@ pub fn fields() -> Vec<UiField> {
                           profile."
                 .to_string(),
             ..text("starting_directory", "Launch", "")
+        },
+        UiField {
+            widget: Widget::KeyValue,
+            description: "Environment for this profile's shell, over the host's own. \
+                          An empty value unsets a variable. Point a tool at its own \
+                          config directory and the profile becomes a separate login: \
+                          `CLAUDE_CONFIG_DIR = \"${profile_dir}/claude\"`, and the same \
+                          shape for GH_CONFIG_DIR, KUBECONFIG or GIT_CONFIG_GLOBAL. \
+                          `${profile_dir}`, `${profile}` and `${home}` are the only \
+                          placeholders, resolved on the machine that runs the profile; \
+                          `$FOO` is not expanded, because there is no shell here to do \
+                          it. Do not set HOME — the zsh hook reads the daemon's, so a \
+                          session would hand itself back the wrong dotfiles. Applies to \
+                          sessions started after the change."
+                .to_string(),
+            default: serde_json::Value::Object(serde_json::Map::new()),
+            ..text("env", "Launch", "")
         },
         UiField {
             widget: Widget::Select,
@@ -666,6 +866,112 @@ mod tests {
             "Defaults' env leaked through a wholesale-replace value: {env:?}"
         );
         assert_eq!(r.provenance_of("shell.env"), ProfileProvenance::OverridesDefaults);
+    }
+
+    #[test]
+    fn a_profiles_env_merges_over_defaults_key_by_key() {
+        // The deliberate opposite of `shell_env_replaces_wholesale_through_defaults`
+        // directly above, and the reason `env` is a profile-only key rather
+        // than a reuse of that settings key. `profiles.defaults.env` is where
+        // fleet-wide variables live; a profile naming one of its own must not
+        // throw them away, which a `fold_meta` field-level pick would.
+        let c = config(
+            "[profiles.defaults.env]\nSHARED = \"1\"\nOVERRIDDEN = \"defaults\"\n\
+             [profiles.work.env]\nOVERRIDDEN = \"work\"\nOWN = \"2\"\n",
+        );
+        let meta = resolve_profile(&c, "work").meta;
+        assert_eq!(meta.env.get("SHARED").map(String::as_str), Some("1"), "Defaults' entry survives");
+        assert_eq!(meta.env.get("OWN").map(String::as_str), Some("2"), "the profile's own is there");
+        assert_eq!(
+            meta.env.get("OVERRIDDEN").map(String::as_str),
+            Some("work"),
+            "the named profile wins the keys it names, and only those"
+        );
+    }
+
+    #[test]
+    fn a_profiles_env_is_not_a_settings_override() {
+        // `env` is stripped from the settings layer like every other
+        // profile-only key. Left in, every profile-tab launch would report it
+        // in `unknown_keys` and the settings UI would warn about a key that is
+        // perfectly legal where it was written.
+        let c = config("[profiles.work.env]\nA = \"1\"\n");
+        let r = resolve_profile(&c, "work");
+        assert!(r.overrides.is_empty(), "env must not reach the settings cascade: {:?}", r.overrides);
+        assert!(r.unknown_keys.is_empty(), "and must not be reported as unknown: {:?}", r.unknown_keys);
+    }
+
+    #[test]
+    fn a_wrong_typed_env_entry_is_dropped_without_taking_its_neighbours() {
+        // Per-entry leniency, not per-table: the never-crash rule at the
+        // granularity someone actually edits. A profile with one bad line
+        // still launches with the rest of its environment.
+        let c = config("[profiles.work.env]\nGOOD = \"1\"\nBAD = 7\n");
+        let meta = resolve_profile(&c, "work").meta;
+        assert_eq!(meta.env.get("GOOD").map(String::as_str), Some("1"));
+        assert!(!meta.env.contains_key("BAD"), "a non-string entry is ignored, not coerced");
+    }
+
+    #[test]
+    fn placeholders_resolve_against_the_machine_that_runs_the_profile() {
+        let ctx = ExpandContext {
+            profile: "work".into(),
+            config_dir: Some(std::path::PathBuf::from("/cfg")),
+            home: Some(std::path::PathBuf::from("/home/a")),
+        };
+        let dir = std::path::Path::new("/cfg").join("profiles").join("work");
+        assert_eq!(expand("${profile_dir}/claude", &ctx), format!("{}/claude", dir.display()));
+        assert_eq!(expand("${profile}", &ctx), "work");
+        assert_eq!(expand("${home}/x", &ctx), "/home/a/x");
+        // More than one in a value, and text on both sides of each.
+        assert_eq!(
+            expand("a${profile}b${profile}c", &ctx),
+            "aworkbworkc",
+            "every occurrence expands, not just the first"
+        );
+        assert_eq!(expand("plain", &ctx), "plain", "a value with no token is untouched");
+    }
+
+    #[test]
+    fn an_unresolvable_placeholder_is_left_as_written_rather_than_emptied() {
+        // The failure mode this prevents is specific and nasty: emptying
+        // `${profile_dir}` turns `"${profile_dir}/claude"` into `/claude` --
+        // an absolute path at the filesystem root that a tool will happily
+        // create or fail on, with the cause nowhere near the symptom.
+        let ctx = ExpandContext::default();
+        assert_eq!(expand("${profile_dir}/claude", &ctx), "${profile_dir}/claude");
+        assert_eq!(expand("${nonsense}", &ctx), "${nonsense}", "an unknown token is text");
+    }
+
+    #[test]
+    fn a_shell_style_variable_is_not_a_placeholder() {
+        // These values reach the child's environment block directly, with no
+        // shell anywhere to expand anything. Treating `$FOO` as a token would
+        // promise a substitution nothing here performs.
+        let ctx = ExpandContext {
+            profile: "work".into(),
+            config_dir: Some(std::path::PathBuf::from("/cfg")),
+            home: Some(std::path::PathBuf::from("/home/a")),
+        };
+        assert_eq!(expand("$HOME/x", &ctx), "$HOME/x");
+        assert_eq!(expand("${unterminated", &ctx), "${unterminated", "an unclosed token is text");
+    }
+
+    #[test]
+    fn a_profile_name_that_could_escape_gets_no_directory() {
+        // This is the one place a profile name becomes a *filesystem* path, so
+        // a name carrying a separator must resolve to nothing rather than to
+        // somewhere else entirely. The editor rejects such names; this is the
+        // second lock, on the door that would matter.
+        for name in ["../elsewhere", "a/b", "a\\b"] {
+            let ctx = ExpandContext {
+                profile: name.into(),
+                config_dir: Some(std::path::PathBuf::from("/cfg")),
+                home: None,
+            };
+            assert_eq!(ctx.profile_dir(), None, "{name} must not name a directory");
+            assert_eq!(expand("${profile_dir}", &ctx), "${profile_dir}", "and must not expand");
+        }
     }
 
     #[test]
