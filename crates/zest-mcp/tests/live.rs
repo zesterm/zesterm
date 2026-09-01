@@ -62,6 +62,23 @@ fn serve_daemon() -> (String, Arc<Registry>) {
     serve_daemon_with(false)
 }
 
+/// A daemon that also serves its configuration, out of a scratch file.
+///
+/// The seam takes a path rather than resolving `paths::config_write_target`
+/// precisely so this is possible: `directories::ProjectDirs` has no override,
+/// so a test without it would read — and *write* — the developer's own config,
+/// and pass while doing it.
+fn serve_daemon_serving_config(tag: &str, seed: &str) -> (String, std::path::PathBuf) {
+    let dir =
+        std::env::temp_dir().join(format!("zest-mcp-config-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, seed).expect("seed");
+    let (addr, _registry) = serve_daemon_cfg(false, Some(path.clone()));
+    (addr, path)
+}
+
 /// The same, with the OSC 133 hook injected into whatever shell is spawned.
 ///
 /// Off for every test but one. The hook writes a shim into the config directory
@@ -69,6 +86,13 @@ fn serve_daemon() -> (String, Arc<Registry>) {
 /// that spawns `/bin/sh` pays a filesystem write for a marker that will never
 /// arrive.
 fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
+    serve_daemon_cfg(shell_integration, None)
+}
+
+fn serve_daemon_cfg(
+    shell_integration: bool,
+    config_path: Option<std::path::PathBuf>,
+) -> (String, Arc<Registry>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
 
@@ -95,7 +119,8 @@ fn serve_daemon_with(shell_integration: bool) -> (String, Arc<Registry>) {
         offer: Some(zest_daemon::offer::OfferSource::new(zest_daemon::offer::facts(
             "mcp-test-shell".into(),
         ))),
-        settings: None,
+        settings: config_path
+            .map(|path| zest_daemon::config::ConfigSeam { path, writes: true }),
     };
     let registry = Arc::new(Registry::new());
 
@@ -1469,4 +1494,197 @@ fn a_dead_session_is_refused_at_once_rather_than_at_the_deadline() {
     );
 
     registry.close(tools.resolver().resolve(&session).expect("resolve").session);
+}
+
+/// The config surface end to end: a real daemon, a real file, real tools.
+///
+/// Every assertion here checks the **file**, not only the reply. A tool that
+/// reported success while writing nothing is the failure mode this whole
+/// message pair exists to prevent, and a test that reads the reply back has no
+/// way to see it.
+#[test]
+fn config_reads_a_machines_settings_and_says_where_each_value_came_from() {
+    let (addr, path) = serve_daemon_serving_config("read", "[typography]\nsize_pt = 20.0\n");
+    let mut t = tools(dial(&addr, "config-read"));
+
+    let out = t.call("config", &serde_json::json!({ "key": "typography" })).expect("read");
+
+    assert_eq!(out["exists"], true, "the seeded file is there: {out}");
+    assert_eq!(out["path"], path.to_string_lossy().as_ref(), "and it is the one we seeded");
+
+    let values = out["values"].as_array().expect("values");
+    let size = values
+        .iter()
+        .find(|v| v["key"] == "typography.size_pt")
+        .expect("the key the file sets");
+    assert_eq!(size["value"], "20.0", "the file's value, not the compiled default");
+    assert_eq!(
+        size["source"], "user",
+        "provenance is the thing a client cannot reconstruct by reading the file, \
+         so it is what this surface is for"
+    );
+    let sibling = values
+        .iter()
+        .find(|v| v["key"] == "typography.line_height")
+        .expect("a sibling the file does not set");
+    assert_eq!(sibling["source"], "default");
+}
+
+#[test]
+fn set_config_changes_the_machines_file_and_says_what_it_costs() {
+    let (addr, path) = serve_daemon_serving_config("write", "[typography]\nsize_pt = 14.0\n");
+    let mut t = tools(dial(&addr, "config-write"));
+
+    let out = t
+        .call("set_config", &serde_json::json!({ "key": "typography.size_pt", "value": "20.0" }))
+        .expect("write");
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("size_pt = 20.0"),
+        "the tool reported success and the file still reads: {text}"
+    );
+    assert_eq!(out["invalidation"], "geometry", "a font size resizes the pty");
+    assert_eq!(out["needs_restart"], false);
+    assert_eq!(out["effective"]["value"], "20.0");
+    assert_eq!(out["effective"]["source"], "user");
+
+    // And the reset takes it back, idempotently.
+    let out = t.call("set_config", &serde_json::json!({ "key": "typography.size_pt" })).expect("reset");
+    assert_eq!(
+        out["effective"]["source"], "default",
+        "omitting `value` is the reset, and what stands afterwards is the default"
+    );
+    let out = t.call("set_config", &serde_json::json!({ "key": "typography.size_pt" })).expect("reset again");
+    assert_eq!(
+        out["effective"]["source"], "default",
+        "resetting a key that is already unset is success: \"make this not set\" is \
+         already true, and a tool that errored would report failure for what it achieved"
+    );
+}
+
+#[test]
+fn a_value_the_schema_rejects_is_an_error_and_leaves_the_file_alone() {
+    // The reason this tool exists rather than leaving an agent on `run` and
+    // `sed`. `cascade::resolve` ends in `try_into().unwrap_or_default()`, so a
+    // string written into a float's slot resets *every* setting the person has
+    // -- silently, in every running client. An agent editing the file blind
+    // trips this; the tool refuses instead.
+    let (addr, path) = serve_daemon_serving_config(
+        "reject",
+        "[typography]\nsize_pt = 14.0\n\n[appearance]\ntheme = \"nord\"\n",
+    );
+    let mut t = tools(dial(&addr, "config-reject"));
+
+    let err = t
+        .call("set_config", &serde_json::json!({ "key": "typography.size_pt", "value": "\"big\"" }))
+        .expect_err("a string in a float's slot must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("wrong type"),
+        "the refusal has to say what is wrong with it: {msg}"
+    );
+
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("size_pt = 14.0") && text.contains("nord"),
+        "the refused write reached the file anyway, which on the next load would \
+         have taken every other setting with it: {text}"
+    );
+}
+
+#[test]
+fn an_unknown_key_is_refused_with_the_key_that_was_probably_meant() {
+    // A key that silently does nothing is indistinguishable from one this
+    // version ignores, so a typo reads as an unimplemented feature and the
+    // agent moves on having changed nothing.
+    let (addr, _path) = serve_daemon_serving_config("typo", "");
+    let mut t = tools(dial(&addr, "config-typo"));
+
+    let err = t
+        .call("set_config", &serde_json::json!({ "key": "typography.size_px", "value": "20.0" }))
+        .expect_err("an unknown key must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("no setting named"), "{msg}");
+    assert!(
+        msg.contains("size_pt"),
+        "a refusal that does not name the thing to try instead costs a round trip \
+         to guess at: {msg}"
+    );
+}
+
+#[test]
+fn edit_profile_creates_renames_and_refuses_a_name_that_is_taken() {
+    let (addr, path) = serve_daemon_serving_config("profiles", "");
+    let mut t = tools(dial(&addr, "config-profiles"));
+
+    t.call("edit_profile", &serde_json::json!({ "action": "create", "name": "work" })).expect("create");
+    t.call("edit_profile", &serde_json::json!({ "action": "create", "name": "play" })).expect("create");
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("[profiles.work]") && text.contains("[profiles.play]"),
+        "both profiles must reach the file: {text}"
+    );
+
+    // A profile's own settings key, and the listing that reads it back.
+    t.call(
+        "set_config",
+        &serde_json::json!({ "key": "command", "value": "\"fish\"", "profile": "work" }),
+    )
+    .expect("set a profile-only key");
+    let out = t.call("config", &serde_json::json!({ "profile": "work", "key": "nothing.at.all" }))
+        .expect("read the profile");
+    assert_eq!(out["profile"]["command"], "fish");
+    let names = out["profiles"].as_array().expect("names");
+    assert!(
+        names.iter().any(|n| n == "work") && names.iter().any(|n| n == "play"),
+        "profile names come back whatever the key filter says: {names:?}"
+    );
+
+    let err = t
+        .call("edit_profile", &serde_json::json!({ "action": "rename", "name": "work", "to": "play" }))
+        .expect_err("renaming onto a live profile must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("already exists"), "{msg}");
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        text.contains("[profiles.work]") && text.contains("[profiles.play]"),
+        "a refused rename must destroy neither: {text}"
+    );
+
+    t.call("edit_profile", &serde_json::json!({ "action": "delete", "name": "play" })).expect("delete");
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(!text.contains("[profiles.play]"), "the delete did not reach the file: {text}");
+
+    let err = t
+        .call("edit_profile", &serde_json::json!({ "action": "sabotage", "name": "work" }))
+        .expect_err("an action that does not exist must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("create, copy, rename or delete"), "name the vocabulary: {msg}");
+}
+
+#[test]
+fn the_field_metadata_and_theme_roster_are_opt_in() {
+    // `ui::fields()` is roughly twenty times the size of the values it
+    // describes, so a read that always carried it would make the cheap common
+    // case pay for the rare one -- ADR-015's whole argument about what a tool
+    // result costs a model.
+    let (addr, _path) = serve_daemon_serving_config("slices", "");
+    let mut t = tools(dial(&addr, "config-slices"));
+
+    let plain = t.call("config", &serde_json::json!({ "key": "appearance.theme" })).expect("read");
+    assert!(plain.get("fields").is_none(), "unasked metadata must not be sent: {plain}");
+    assert!(plain.get("themes").is_none(), "nor an unasked roster: {plain}");
+
+    let full = t
+        .call("config", &serde_json::json!({ "key": "appearance.theme", "fields": true, "themes": true }))
+        .expect("read");
+    let fields = full["fields"].as_array().expect("fields");
+    assert_eq!(fields.len(), 1, "the key filter applies to the metadata too: {fields:?}");
+    assert_eq!(fields[0]["key"], "appearance.theme");
+    let themes = full["themes"].as_array().expect("themes");
+    assert!(
+        themes.iter().any(|t| t["id"] == "obsidian" && t["builtin"] == true),
+        "the roster must carry that machine's built-ins: {themes:?}"
+    );
 }

@@ -42,7 +42,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use zest_core::Modes;
 use zest_mesh::identity::ClientIdentity;
-use zest_proto::{BlockPayload, BlockState, ClientMessage, HostId, SessionAddr};
+use zest_proto::{BlockPayload, BlockState, ClientMessage, HostId, HostMessage, SessionAddr};
 
 use crate::addr::{AddrError, Resolver};
 use crate::conn::{Conn, ConnError};
@@ -82,6 +82,14 @@ pub enum ToolError {
     /// is indistinguishable from one the application chose not to handle (#345).
     #[error("{0}")]
     Key(#[from] KeyError),
+    /// A configuration read or write the host refused, in its own words.
+    ///
+    /// Its own variant rather than folding into `Conn`, because a refusal is
+    /// not a transport failure: the link is healthy and the message names
+    /// something the caller can fix — an unknown key with the near miss beside
+    /// it, a value outside a range, a profile name already taken.
+    #[error("{0}")]
+    Config(String),
     /// A machine this server can name but cannot open a connection to.
     ///
     /// Carries *why* rather than a status, because each way of being
@@ -333,6 +341,18 @@ impl ToolSet {
                 self.create_session(&conn, args)
             }
             "close_session" => self.on_session(args, |t, c, addr| t.close_session(c, addr)),
+            "config" => {
+                let conn = self.conn_for_arg(args)?;
+                Self::config(&conn, args)
+            }
+            "set_config" => {
+                let conn = self.conn_for_arg(args)?;
+                Self::set_config(&conn, args)
+            }
+            "edit_profile" => {
+                let conn = self.conn_for_arg(args)?;
+                Self::edit_profile(&conn, args)
+            }
             other => Err(ToolError::NoSuchTool(other.to_string())),
         }
     }
@@ -1119,6 +1139,172 @@ impl ToolSet {
     fn close_session(&self, conn: &Conn, addr: SessionAddr) -> Result<Value, ToolError> {
         conn.send(ClientMessage::CloseSession { session: addr });
         Ok(json!({ "session": Resolver::format(addr), "closed": true }))
+    }
+
+    /// What a machine is configured to do, and where each value came from.
+    ///
+    /// The `source` on every row is the point. A client scraping `config.toml`
+    /// — which it can, through `ReadFile`, with no path restriction — sees the
+    /// user layer alone, and cannot tell a value it is reading from one a
+    /// profile or a command-line flag is currently overriding. Answering "why
+    /// is my font not the size the file says" needs the cascade, and only the
+    /// machine that runs it has one.
+    fn config(conn: &Conn, args: &Value) -> Result<Value, ToolError> {
+        let key = opt_str(args, "key")?.unwrap_or_default().trim().to_string();
+        let reply = conn.get_config(
+            if key.is_empty() { Vec::new() } else { vec![key] },
+            opt_str(args, "profile")?.unwrap_or_default().trim().to_string(),
+            opt_bool(args, "fields")?.unwrap_or(false),
+            opt_bool(args, "themes")?.unwrap_or(false),
+        )?;
+        let HostMessage::ConfigState {
+            path,
+            exists,
+            values,
+            profiles,
+            profile_detail,
+            fields,
+            themes,
+            unknown_keys,
+            problems,
+            error,
+            ..
+        } = reply
+        else {
+            return Err(ToolError::Config(
+                "the host answered a config read with a different message".into(),
+            ));
+        };
+        if !error.is_empty() {
+            return Err(ToolError::Config(error));
+        }
+
+        let mut out = json!({
+            "path": path,
+            // A machine on pure defaults and a failed read produce the same
+            // `values`, because the cascade answers with the whole default tree
+            // either way. Only this says which happened.
+            "exists": exists,
+            "values": values.iter().map(|v| json!({
+                "key": v.key, "value": v.value, "source": v.source,
+            })).collect::<Vec<_>>(),
+            "profiles": profiles,
+        });
+        let map = out.as_object_mut().expect("built as an object");
+        if let Some(p) = profile_detail {
+            map.insert("profile".into(), serde_json::to_value(&*p).unwrap_or(Value::Null));
+        }
+        if !fields.is_empty() {
+            map.insert("fields".into(), serde_json::to_value(&fields).unwrap_or(Value::Null));
+        }
+        if !themes.is_empty() {
+            map.insert("themes".into(), serde_json::to_value(&themes).unwrap_or(Value::Null));
+        }
+        // Both are things the *person* would want to know and neither is a
+        // failure, so they ride along rather than becoming refusals: a typo in
+        // their config and a config written for a newer zesterm look identical,
+        // and only they can tell which it is.
+        if !unknown_keys.is_empty() {
+            map.insert("unknown_keys".into(), serde_json::to_value(&unknown_keys).unwrap_or(Value::Null));
+        }
+        if !problems.is_empty() {
+            map.insert("problems".into(), serde_json::to_value(&problems).unwrap_or(Value::Null));
+        }
+        Ok(out)
+    }
+
+    /// Change one setting, or reset it.
+    ///
+    /// One tool for both because they are one thought. A `reset: true` flag
+    /// beside `value` would make `{key, value, reset: true}` expressible, and
+    /// then something has to decide which of the two the caller meant.
+    fn set_config(conn: &Conn, args: &Value) -> Result<Value, ToolError> {
+        let key = opt_str(args, "key")?.unwrap_or_default().trim().to_string();
+        if key.is_empty() {
+            return Err(ToolError::Missing { field: "key" });
+        }
+        let profile = opt_str(args, "profile")?.unwrap_or_default().trim().to_string();
+        let value = opt_str(args, "value")?;
+        let op = match &value {
+            Some(_) => zest_proto::ConfigOp::Set,
+            None => zest_proto::ConfigOp::Reset,
+        };
+        let reply =
+            conn.set_config(op, key, profile, value.unwrap_or_default().to_string(), String::new())?;
+        Self::written(reply)
+    }
+
+    /// Create, duplicate, rename or delete a launch profile.
+    fn edit_profile(conn: &Conn, args: &Value) -> Result<Value, ToolError> {
+        let name = opt_str(args, "name")?.unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            return Err(ToolError::Missing { field: "name" });
+        }
+        let to = opt_str(args, "to")?.unwrap_or_default().trim().to_string();
+        let action =
+            opt_str(args, "action")?.ok_or(ToolError::Missing { field: "action" })?
+                .trim()
+                .to_ascii_lowercase();
+        let op = match action.as_str() {
+            "create" => zest_proto::ConfigOp::CreateProfile,
+            "copy" => zest_proto::ConfigOp::CopyProfile,
+            "rename" => zest_proto::ConfigOp::RenameProfile,
+            "delete" => zest_proto::ConfigOp::RemoveProfile,
+            // Named rather than a bare "invalid": a refusal that does not say
+            // what to send instead costs a round trip to guess at (#345).
+            other => {
+                return Err(ToolError::Config(format!(
+                    "`{other}` is not an action; use create, copy, rename or delete"
+                )))
+            }
+        };
+        if matches!(op, zest_proto::ConfigOp::CopyProfile | zest_proto::ConfigOp::RenameProfile)
+            && to.is_empty()
+        {
+            return Err(ToolError::Missing { field: "to" });
+        }
+        let reply = conn.set_config(op, String::new(), name, String::new(), to)?;
+        Self::written(reply)
+    }
+
+    /// Shape a `ConfigWritten` into a tool result, or a refusal into an error.
+    ///
+    /// A refused write is a `ToolError` rather than a successful call carrying
+    /// `wrote: false`, because the two must not require the caller to look:
+    /// `isError` is what says which it was, and a model that reads past a
+    /// field goes on to the next step as though the setting had changed.
+    fn written(reply: HostMessage) -> Result<Value, ToolError> {
+        let HostMessage::ConfigWritten {
+            path, invalidation, needs_restart, effective, conflict, error, ..
+        } = reply
+        else {
+            return Err(ToolError::Config(
+                "the host answered a config write with a different message".into(),
+            ));
+        };
+        if !error.is_empty() {
+            // The conflict bit survives into the message rather than being
+            // dropped: "pick another name" and "that value is illegal" are
+            // different next moves.
+            return Err(ToolError::Config(if conflict {
+                format!("{error} (nothing was changed)")
+            } else {
+                error
+            }));
+        }
+        let mut out = json!({
+            "path": path,
+            "invalidation": invalidation,
+            // The one thing to branch on rather than display.
+            "needs_restart": needs_restart,
+        });
+        if let Some(v) = effective {
+            out.as_object_mut().expect("built as an object").insert(
+                "effective".into(),
+                json!({ "key": v.key, "value": v.value, "source": v.source }),
+            );
+        }
+        Ok(out)
     }
 
     /// Run one command in the shell somebody is already using, and correlate it.

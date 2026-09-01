@@ -109,6 +109,17 @@ pub struct Shared {
     /// listing: two clients creating on one host concurrently would each adopt
     /// the other's shell, and the field exists precisely so nobody has to guess.
     pub created: Option<SessionAddr>,
+    /// The last `ConfigState` this connection was told about, and a counter
+    /// beside it for `sessions_gen`'s reason verbatim: two reads in flight
+    /// would race to clear a flag and the loser would return the answer the
+    /// winner asked for.
+    pub config: Option<HostMessage>,
+    pub config_gen: u64,
+    /// The same, for `ConfigWritten`. Two counters rather than one, because a
+    /// read and a write can be in flight together and a shared counter would
+    /// hand each the other's reply.
+    pub config_written: Option<HostMessage>,
+    pub config_written_gen: u64,
 }
 
 impl Shared {
@@ -384,6 +395,47 @@ impl Conn {
         };
         self.send(ClientMessage::ListSessions);
         self.wait_for(|s| (s.sessions_gen != seen).then(|| s.sessions.clone()))
+    }
+
+    /// Ask this host what it is configured to do, and wait for the answer.
+    ///
+    /// A question rather than a cache read, for [`Self::list_sessions`]'s
+    /// reason: nothing pushes config, so a cache would only ever hold the
+    /// answer to this connection's own last write.
+    pub fn get_config(
+        &self,
+        keys: Vec<String>,
+        profile: String,
+        want_fields: bool,
+        want_themes: bool,
+    ) -> Result<HostMessage, ConnError> {
+        let seen = {
+            let (lock, _) = &*self.state;
+            lock.lock().expect("state").config_gen
+        };
+        self.send(ClientMessage::GetConfig { keys, profile, want_fields, want_themes });
+        self.wait_for(|s| (s.config_gen != seen).then(|| s.config.clone()).flatten())
+    }
+
+    /// Change one thing about this host's configuration, and wait for the
+    /// answer — which is as likely to be a refusal as a success, and carries
+    /// the reason either way.
+    pub fn set_config(
+        &self,
+        op: zest_proto::ConfigOp,
+        key: String,
+        profile: String,
+        value: String,
+        to: String,
+    ) -> Result<HostMessage, ConnError> {
+        let seen = {
+            let (lock, _) = &*self.state;
+            lock.lock().expect("state").config_written_gen
+        };
+        self.send(ClientMessage::SetConfig { op, key, profile, value, to });
+        self.wait_for(|s| {
+            (s.config_written_gen != seen).then(|| s.config_written.clone()).flatten()
+        })
     }
 
     /// Attach, and wait for the keyframe that answers it.
@@ -688,6 +740,17 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
             if offer.is_some() {
                 s.offer = offer;
             }
+        }
+        // Reply-only, so these arrive solely in answer to something this
+        // connection asked. Stored rather than acted on: the waiting call is
+        // what knows which of the two it wanted.
+        msg @ HostMessage::ConfigState { .. } => {
+            s.config = Some(msg);
+            s.config_gen = s.config_gen.wrapping_add(1);
+        }
+        msg @ HostMessage::ConfigWritten { .. } => {
+            s.config_written = Some(msg);
+            s.config_written_gen = s.config_written_gen.wrapping_add(1);
         }
         HostMessage::Keyframe {
             session,
