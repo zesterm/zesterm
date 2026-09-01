@@ -557,14 +557,10 @@ enum AppScreen {
     Terminal,
     Fleet,
     Themes,
-    /// The Profiles tab's pane. Unlike Fleet/Themes this one is tab-shaped:
-    /// `AppTabs` says the tab exists, this says it holds the pane — Esc (or
-    /// activating a session) leaves it open in the strip, inactive.
-    Profiles,
 }
 
 /// Whether a full-pane screen owns the grid area this frame — the fleet
-/// directory, the theme gallery, the profiles pane, or the Settings tab.
+/// directory, the theme gallery, or one of the two app tabs.
 ///
 /// **Nothing of the terminal may be drawn when this is true**, and "covered by
 /// an opaque panel" is not the same thing. A screen's ground is one SDF rect,
@@ -579,8 +575,8 @@ enum AppScreen {
 /// Skipping the grid entirely is also the cheaper answer: the terminal's cell
 /// backgrounds and every glyph on it were being shaped, atlased and uploaded
 /// each frame to be painted over.
-fn pane_is_covered(screen: AppScreen, settings_tab_active: bool) -> bool {
-    screen != AppScreen::Terminal || settings_tab_active
+fn pane_is_covered(screen: AppScreen, app_tab_active: bool) -> bool {
+    screen != AppScreen::Terminal || app_tab_active
 }
 
 /// The rail, the wash and the header span one pane's blocks come out with.
@@ -2074,9 +2070,6 @@ pub struct App {
     /// hangs off it, so the affordance and its menu come from one computation
     /// and cannot drift apart.
     block_menu_anchor: Option<(u32, [f32; 4])>,
-    /// The app tabs this window holds open (Profiles today) — the singleton
-    /// state the launcher's Manage-profiles row and ⌘⇧, both go through.
-    app_tabs: crate::tabs::AppTabs,
     /// Where each non-default setting came from, kept from the last resolve —
     /// the settings tab's "set by profile `k8s`" chips read it.
     provenance: std::collections::BTreeMap<String, zest_config::Source>,
@@ -2403,7 +2396,6 @@ impl App {
             block_menu_anchor: None,
             attention: std::collections::HashMap::new(),
             confirm_close: None,
-            app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
             restart_pending: std::collections::BTreeSet::new(),
@@ -3545,15 +3537,15 @@ impl App {
             Action::NewTab => self.new_tab(),
             Action::CloseTab => {
                 // App tabs first, whichever holds the pane: closing one is
-                // closing a tab (§11's rule), and their chips deliberately
-                // draw no × — ⌘W is the close affordance.
+                // closing a tab (§11's rule), and ⌘W is one of the three
+                // ways to say so — the chip's × and middle-click are the
+                // others, and all three land in `close_tab`.
                 if self.settings_tab_active() {
-                    self.close_settings_tab();
+                    self.close_tab(crate::tabs::settings_addr(), false, el);
                     return;
                 }
-                if self.screen == AppScreen::Profiles {
-                    self.close_profiles_tab();
-                    self.show_screen(AppScreen::Terminal);
+                if self.profiles_tab_active() {
+                    self.close_tab(crate::tabs::profiles_tab_addr(), false, el);
                     return;
                 }
                 // A split tab closes its focused pane first; the tab itself
@@ -3571,7 +3563,7 @@ impl App {
             Action::DetachTab => {
                 // Only a session can be detached. The app tabs' own ⌘W rule
                 // above does not apply: there is no third outcome for a place.
-                if self.settings_tab_active() || self.screen == AppScreen::Profiles {
+                if self.tabs.app_tab_active() {
                     return;
                 }
                 if let Some(tab) = self.tabs.active() {
@@ -4337,9 +4329,6 @@ impl App {
                     import_error: self.theme_import_error.clone(),
                 })
             }
-            // Built in refresh_chrome beside the Settings model — it needs
-            // &mut access to the editor state, which &self here cannot give.
-            AppScreen::Profiles => None,
         }
     }
 
@@ -5138,7 +5127,15 @@ impl App {
     /// `--screen profiles` singleton: at most one exists, and reopening it
     /// shows the one that does.
     fn open_profiles_tab(&mut self) {
-        self.app_tabs.open_profiles();
+        // A tab activation leaves any full-pane screen, like every other
+        // activation path; the modals close because the tab takes the
+        // keyboard they were holding. (`open_settings_tab`'s preamble — the
+        // two app tabs open the same way.)
+        self.leave_screen();
+        self.picker = None;
+        self.palette_ui = None;
+        self.launcher = None;
+        self.block_menu = None;
         if self.profiles_ui.is_none() {
             self.profiles_ui = Some(ProfilesUiState {
                 profile: zest_config::profiles::RESERVED_PROFILE.to_string(),
@@ -5155,7 +5152,8 @@ impl App {
                 error: None,
             });
         }
-        self.show_screen(AppScreen::Profiles);
+        self.tabs.open_profiles();
+        self.mark_chrome_dirty();
     }
 
     /// Close the Profiles tab — its state lives as long as the tab, exactly
@@ -5167,17 +5165,14 @@ impl App {
         // ⌘W that silently declines to close is worse than dropping a value
         // that could never have been written.
         let _ = self.profiles_commit_edit();
-        self.app_tabs.close_profiles();
         self.profiles_ui = None;
-        if self.screen == AppScreen::Profiles {
-            self.screen = AppScreen::Terminal;
-        }
-        self.mark_chrome_dirty();
+        self.tabs.close_profiles();
+        self.after_activation();
     }
 
     /// The Profiles editor holds the keyboard and the grid area.
     fn profiles_tab_active(&self) -> bool {
-        self.screen == AppScreen::Profiles && self.profiles_ui.is_some()
+        self.tabs.profiles_active() && self.profiles_ui.is_some()
     }
 
     /// Toggle the + launcher menu (clicking the `+`, `--screen launcher`).
@@ -6301,15 +6296,13 @@ impl App {
             .collect();
 
         // App tabs after the session tabs, in §1's order: sessions, then
-        // Profiles, then Settings, then the `+`. One list, so the strip,
-        // the sidebar's pinned row and the hit map all agree what exists.
-        // Profiles is horizontal-only for now: the vertical design pins app
-        // tabs above the sidebar footer, which is §11's pinned-rows shape —
-        // a chip grouped under a fake host would be worse than none.
+        // Profiles, then Settings, then the `+`. One list, so the strip, the
+        // sidebar rows and the hit map all agree what exists — including in
+        // the vertical position, which Profiles used to be gated out of
+        // entirely: ⌘⇧, opened a pane the sidebar could neither show nor
+        // close (#494).
         let mut tab_models = tab_models;
-        let profiles_chip = self.app_tabs.profiles_open()
-            && self.config.tabs.position == zest_config::settings::TabsPosition::Top;
-        if profiles_chip {
+        if self.tabs.profiles_open() {
             tab_models.push(TabModel {
                 addr: crate::tabs::profiles_tab_addr(),
                 kind: crate::chrome::model::TabKind::Profiles,
@@ -6412,19 +6405,12 @@ impl App {
                 || (t.running && !t.progress.is_busy())
         });
 
-        // Which chip is lit — exactly one (invariant 9). The Profiles pane
-        // wins while its screen is up (its chip sits right after the
-        // sessions), the Settings tab while it holds the keyboard (its chip
-        // is last), else the active session. Computed here rather than via
-        // display_active(): that helper predates the Profiles chip and
-        // assumes Settings is the only insertion.
-        let active = if profiles_chip && self.screen == AppScreen::Profiles {
-            self.tabs.len()
-        } else if self.tabs.settings_active() {
-            tab_models.len() - 1
-        } else {
-            self.tabs.active_index()
-        };
+        // Which chip is lit — exactly one (invariant 9), and the strip is
+        // what says so. This used to be derived here instead, because
+        // `display_active` knew only about Settings; both now walk the same
+        // drawn order (sessions, Profiles, Settings) so the chrome and the
+        // ⌘⇧] cycle cannot disagree about which tab is which.
+        let active = self.tabs.display_active();
 
         let model = ChromeModel {
             tabs: tab_models,
@@ -6442,6 +6428,7 @@ impl App {
             anim,
             palette_chord: keymap::chord_for(keymap::Action::ToggleFleetPicker),
             settings_chord: keymap::chord_for(keymap::Action::ToggleSettings),
+            profiles_chord: keymap::chord_for(keymap::Action::OpenProfiles),
             picker: picker_model,
             // The picker wins: it opens *over* the settings tab's content.
             palette: palette_model,
@@ -6487,7 +6474,7 @@ impl App {
                 state.scroll_to_selected = false;
             }
         }
-        if self.screen == AppScreen::Profiles {
+        if self.profiles_tab_active() {
             if let Some(state) = self.profiles_ui.as_mut() {
                 state.scroll = laid.profiles_scroll;
                 // One layout consumed the request; the wheel is free again.
@@ -9796,10 +9783,18 @@ impl App {
     /// `already_exited` marks the child as gone (a `TabExited` wakeup), where
     /// there is nothing left to kill. The last tab closing closes the window.
     fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool, el: &ActiveEventLoop) {
-        // The Settings tab has no session to kill or detach; closing it is
-        // dropping its state and returning the keyboard (§11).
+        // An app tab has no session to kill or detach; closing it is
+        // dropping its state and returning the keyboard (§11, and §12 which
+        // takes that rule whole). Both sentinels answer here so that the
+        // chip's ×, middle-click and ⌘W cannot disagree about what a close
+        // means — which is how Profiles ended up closable three different
+        // ways and drawable in only one position (#494).
         if addr == crate::tabs::settings_addr() {
             self.close_settings_tab();
+            return;
+        }
+        if addr == crate::tabs::profiles_tab_addr() {
+            self.close_profiles_tab();
             return;
         }
         // Decided *before* the tab leaves the strip: a confirm that has
@@ -9953,10 +9948,10 @@ impl App {
     /// `Detach` and joins its writer, which is also what closing the window
     /// has always done to every tab.
     fn detach_tab(&mut self, addr: zest_proto::SessionAddr, el: &ActiveEventLoop) {
-        if addr == crate::tabs::settings_addr() {
+        if addr == crate::tabs::settings_addr() || addr == crate::tabs::profiles_tab_addr() {
             // An app tab has no session; closing it is the only thing that
             // means anything, and ⌘W already does that.
-            self.close_settings_tab();
+            self.close_tab(addr, false, el);
             return;
         }
         // An in-process pty has no daemon to leave it with — dropping it
@@ -10316,7 +10311,7 @@ impl App {
     ///
     /// Empty while a screen owns the pane — see [`pane_is_covered`].
     fn build_block_views(&self, pane: usize) -> Vec<crate::chrome::blocks::BlockView> {
-        if pane_is_covered(self.screen, self.tabs.settings_active()) {
+        if pane_is_covered(self.screen, self.tabs.app_tab_active()) {
             return Vec::new();
         }
         let Some(tab) = self.tabs.active() else { return Vec::new() };
@@ -10494,7 +10489,7 @@ impl App {
         use crate::chrome::prompt_chips::{Chip, ChipKind, PromptChipsView};
 
         let widgets = &self.settings.prompt.widgets;
-        if widgets.is_empty() || pane_is_covered(self.screen, self.tabs.settings_active()) {
+        if widgets.is_empty() || pane_is_covered(self.screen, self.tabs.app_tab_active()) {
             return None;
         }
         let tab = self.tabs.active()?;
@@ -10774,7 +10769,7 @@ impl App {
         let fold_maps: Vec<Option<Vec<usize>>> = self
             .tabs
             .active()
-            .filter(|_| !pane_is_covered(self.screen, self.tabs.settings_active()))
+            .filter(|_| !pane_is_covered(self.screen, self.tabs.app_tab_active()))
             .map(|t| {
                 (0..pane_rects.len())
                     .map(|i| {
@@ -11073,7 +11068,7 @@ impl App {
             // `None` while a screen owns the pane: the terminal is then not
             // built at all, rather than built and painted over. The outer
             // `Option` also keeps the terminal lock untaken in that case.
-            let split = (!pane_is_covered(self.screen, self.tabs.settings_active()))
+            let split = (!pane_is_covered(self.screen, self.tabs.app_tab_active()))
                 .then(|| self.tabs.active().filter(|t| t.is_split()).map(Tab::pane_count));
             match split {
                 None => {
@@ -15206,12 +15201,14 @@ mod pane_cover_tests {
         // underneath bleeds through a one-pixel frame however opaque the fill
         // is. #253 was the block cursor doing exactly that at the pane's
         // top-left corner.
-        for screen in [AppScreen::Fleet, AppScreen::Themes, AppScreen::Profiles] {
+        for screen in [AppScreen::Fleet, AppScreen::Themes] {
             assert!(pane_is_covered(screen, false), "{screen:?} owns the whole pane");
         }
         assert!(
             pane_is_covered(AppScreen::Terminal, true),
-            "the Settings tab covers the pane without being an AppScreen of its own"
+            "an app tab covers the pane without being an AppScreen of its own — \
+             which is now true of Profiles too, and was the whole of #494: it \
+             had a variant here, so it could not also be a tab"
         );
         assert!(
             !pane_is_covered(AppScreen::Terminal, false),

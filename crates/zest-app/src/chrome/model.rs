@@ -1056,8 +1056,12 @@ pub struct ChromeModel {
     /// The palette pill's chord, platform-spelled ("⌘K") — composed by the
     /// app because the chrome does not know what a modifier is.
     pub palette_chord: String,
-    /// The settings chord ("⌘,"), for the vertical sidebar's pinned row.
+    /// The Settings chord ("⌘,"), for its sidebar row's right slot.
     pub settings_chord: String,
+    /// The Profiles chord ("⌘⇧,"), for the same slot on its own row. A
+    /// second field rather than a lookup: the chrome does not know what a
+    /// modifier is, which is why the app spells both.
+    pub profiles_chord: String,
     /// The fleet picker, drawn over everything when open.
     /// The "Open file…" prompt, while it is up (#464).
     pub open_file: Option<OpenFileModel>,

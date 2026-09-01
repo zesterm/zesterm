@@ -885,44 +885,19 @@ pub fn profiles_tab_addr() -> SessionAddr {
     SessionAddr::new(HostId::from_bytes([0; 32]), SessionId(u64::MAX - 1))
 }
 
-/// The window's Profiles tab (design §12): a place, not a shell, as a
-/// placeholder pane until its work item lands. Settings has its own strip
-/// machinery (§11, landed with #172); Profiles keeps this thinner shape
-/// until the editor replaces the placeholder.
-///
-/// At most one — the singleton rule (`⌘⇧,` on an already-open Profiles tab
-/// activates it rather than opening a second; the web client's
-/// `openSingleton` pins the same rule). A `bool` makes duplication
-/// unrepresentable rather than merely checked.
-#[derive(Default)]
-pub struct AppTabs {
-    profiles: bool,
-}
-
-impl AppTabs {
-    /// Open the Profiles tab. `false` means it already existed — the reopen
-    /// is then an activation, which the caller performs by showing it.
-    pub fn open_profiles(&mut self) -> bool {
-        !core::mem::replace(&mut self.profiles, true)
-    }
-
-    #[must_use]
-    pub fn profiles_open(&self) -> bool {
-        self.profiles
-    }
-
-    pub fn close_profiles(&mut self) {
-        self.profiles = false;
-    }
-}
-
 /// The window's open tabs, and which one the keyboard belongs to.
 ///
-/// Beside the session tabs the strip can hold one *app tab* — Settings
-/// (design §11) — which is a place rather than a shell: it has no session,
-/// so it lives as two flags instead of a `Tab`. `active` always names a
-/// session tab; while `settings_active` the keyboard belongs to the
-/// Settings tab and the session keeps its slot to return to on close.
+/// Beside the session tabs the strip holds the two *app tabs* — Profiles
+/// (§12) and Settings (§11) — which are places rather than shells: they have
+/// no session, so each lives as two flags instead of a `Tab`. `active`
+/// always names a session tab; while an app tab is active the keyboard
+/// belongs to it and the session keeps its slot to return to on close.
+///
+/// Both are modelled identically on purpose (#494). They were not: Profiles
+/// used to live on its own struct beside an `AppScreen` variant, which is
+/// the same fact stored in two places — and the halves disagreed, so
+/// Profiles was absent from `display_active`, from the ⌘⇧] cycle, and from
+/// the vertical sidebar entirely.
 #[derive(Default)]
 pub struct TabStrip {
     tabs: Vec<Tab>,
@@ -931,6 +906,12 @@ pub struct TabStrip {
     settings_open: bool,
     /// ...and holds the keyboard/display.
     settings_active: bool,
+    /// The Profiles tab exists (at most one, per §12) — the singleton rule
+    /// the web client's `openSingleton` pins too. A `bool` makes duplication
+    /// unrepresentable rather than merely checked.
+    profiles_open: bool,
+    /// ...and holds the keyboard/display.
+    profiles_active: bool,
 }
 
 impl TabStrip {
@@ -944,6 +925,12 @@ impl TabStrip {
         self.tabs.len()
     }
 
+    /// The active *session* index. The chrome asks `display_active()`
+    /// instead — it walks the drawn order, which includes the app tabs — so
+    /// this is left to the tests that assert which session slot an app tab
+    /// hands the keyboard back to. `pub` would not save it from `dead_code`
+    /// in a bin crate; `cfg(test)` says what is true.
+    #[cfg(test)]
     #[must_use]
     pub fn active_index(&self) -> usize {
         self.active
@@ -982,7 +969,10 @@ impl TabStrip {
         if addr == settings_addr() {
             return self.settings_active;
         }
-        !self.settings_active && self.active().is_some_and(|t| t.addr == addr)
+        if addr == profiles_tab_addr() {
+            return self.profiles_active;
+        }
+        !self.app_tab_active() && self.active().is_some_and(|t| t.addr == addr)
     }
 
     /// The Settings tab exists in the strip.
@@ -1011,12 +1001,46 @@ impl TabStrip {
         self.settings_active = false;
     }
 
-    /// Index into the drawn tab list (sessions, then Settings when open) of
-    /// the tab that is lit — the chrome model's `active`.
+    /// The Profiles tab exists in the strip.
+    #[must_use]
+    pub fn profiles_open(&self) -> bool {
+        self.profiles_open
+    }
+
+    /// The Profiles tab holds the keyboard and the grid area.
+    #[must_use]
+    pub fn profiles_active(&self) -> bool {
+        self.profiles_active
+    }
+
+    /// Open the Profiles tab, or activate the one that exists — ⌘⇧, never
+    /// opens a second (§12's singleton rule, §11's wording).
+    pub fn open_profiles(&mut self) {
+        self.profiles_open = true;
+        self.profiles_active = true;
+        self.settings_active = false;
+    }
+
+    /// Close the Profiles tab; the keyboard returns to the session tab that
+    /// held it before.
+    pub fn close_profiles(&mut self) {
+        self.profiles_open = false;
+        self.profiles_active = false;
+    }
+
+    /// Index into the drawn tab list of the tab that is lit — the chrome
+    /// model's `active`.
+    ///
+    /// The drawn order is §1's: sessions, then Profiles, then Settings. One
+    /// function answers it for every surface (the strip, the sidebar, the
+    /// cycle), because three that each derive it is how two of them drift —
+    /// which is exactly what #494 found.
     #[must_use]
     pub fn display_active(&self) -> usize {
-        if self.settings_active {
+        if self.profiles_active {
             self.tabs.len()
+        } else if self.settings_active {
+            self.tabs.len() + usize::from(self.profiles_open)
         } else {
             self.active
         }
@@ -1045,7 +1069,7 @@ impl TabStrip {
     /// addresses are placeholders besides, so both facts exclude them. When
     /// the active tab is itself filtered out the index stays 0, so a restore
     /// leads with a real session rather than an out-of-range index; while
-    /// the Settings tab holds the keyboard `active` still names the session
+    /// an app tab holds the keyboard `active` still names the session
     /// underneath, which is the tab a restore should lead with.
     #[must_use]
     pub(crate) fn persistable(&self) -> (usize, Vec<&Tab>) {
@@ -1095,12 +1119,20 @@ impl TabStrip {
         }
     }
 
+    /// Either app tab holds the keyboard, so the grid area is covered and
+    /// no session tab is lit.
+    #[must_use]
+    pub fn app_tab_active(&self) -> bool {
+        self.settings_active || self.profiles_active
+    }
+
     /// Add a tab and make it active — a new tab is something the user just
-    /// asked for, so it takes the keyboard (from the Settings tab too).
+    /// asked for, so it takes the keyboard (from an app tab too).
     pub fn push(&mut self, tab: Tab) {
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.settings_active = false;
+        self.profiles_active = false;
     }
 
     /// Adopt a worker-built session tab, keeping the address unique: if a
@@ -1147,12 +1179,13 @@ impl TabStrip {
     }
 
     /// Returns true when the active tab changed. Activating a session takes
-    /// the keyboard back from the Settings tab, which stays open in place.
+    /// the keyboard back from an app tab, which stays open in place.
     pub fn activate(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() || (index == self.active && !self.settings_active) {
+        if index >= self.tabs.len() || (index == self.active && !self.app_tab_active()) {
             return false;
         }
         self.settings_active = false;
+        self.profiles_active = false;
         self.active = index;
         true
     }
@@ -1163,6 +1196,15 @@ impl TabStrip {
                 return false;
             }
             self.settings_active = true;
+            self.profiles_active = false;
+            return true;
+        }
+        if addr == profiles_tab_addr() {
+            if !self.profiles_open || self.profiles_active {
+                return false;
+            }
+            self.profiles_active = true;
+            self.settings_active = false;
             return true;
         }
         match self.tabs.iter().position(|t| t.addr == addr) {
@@ -1171,9 +1213,9 @@ impl TabStrip {
         }
     }
 
-    /// Next/prev walk the drawn order — sessions, then Settings when open —
-    /// so the app tab takes its turn in the cycle like the ordinary tab §11
-    /// says it is.
+    /// Next/prev walk the drawn order — sessions, then Profiles, then
+    /// Settings, each when open — so the app tabs take their turn in the
+    /// cycle like the ordinary tabs §11 and §12 say they are.
     pub fn activate_next(&mut self) -> bool {
         // A window can be alive with zero tabs (a failed first spawn warns
         // and returns), and `% 0` panics — cycling nothing is a no-op.
@@ -1193,16 +1235,22 @@ impl TabStrip {
     }
 
     fn display_len(&self) -> usize {
-        self.tabs.len() + usize::from(self.settings_open)
+        self.tabs.len() + usize::from(self.profiles_open) + usize::from(self.settings_open)
     }
 
     fn activate_display(&mut self, index: usize) -> bool {
         if index == self.display_active() {
             return false;
         }
-        if index == self.tabs.len() && self.settings_open {
-            self.settings_active = true;
-            return true;
+        if index >= self.tabs.len() {
+            let slot = index - self.tabs.len();
+            if self.profiles_open && slot == 0 {
+                return self.activate_addr(profiles_tab_addr());
+            }
+            if self.settings_open {
+                return self.activate_addr(settings_addr());
+            }
+            return false;
         }
         self.activate(index)
     }
@@ -1225,6 +1273,8 @@ impl TabStrip {
         self.active = 0;
         self.settings_open = false;
         self.settings_active = false;
+        self.profiles_open = false;
+        self.profiles_active = false;
     }
 }
 
@@ -1657,18 +1707,21 @@ mod tests {
         // on an already-open Profiles tab must activate it, never grow a
         // second chip — the state itself makes a duplicate unrepresentable,
         // and this pins the open/reopen answers the caller branches on.
-        let mut tabs = AppTabs::default();
-        assert!(!tabs.profiles_open(), "nothing is open until asked");
-        assert!(tabs.open_profiles(), "the first open reports newly created");
-        assert!(tabs.profiles_open());
+        let mut strip = TabStrip::default();
+        assert!(!strip.profiles_open(), "nothing is open until asked");
+        strip.open_profiles();
+        assert!(strip.profiles_open() && strip.profiles_active());
+        strip.open_profiles();
         assert!(
-            !tabs.open_profiles(),
-            "the second open reports already-there: an activation, not a duplicate"
+            strip.profiles_open() && strip.profiles_active(),
+            "the second open is an activation, not a duplicate — one bool, so \
+             a duplicate is unrepresentable rather than merely checked"
         );
-        assert!(tabs.profiles_open(), "…and it is still open, exactly once");
-        tabs.close_profiles();
-        assert!(!tabs.profiles_open(), "closing it is closing a tab");
-        assert!(tabs.open_profiles(), "and it can come back");
+        strip.close_profiles();
+        assert!(!strip.profiles_open(), "closing it is closing a tab");
+        assert!(!strip.profiles_active(), "and it gives the keyboard back");
+        strip.open_profiles();
+        assert!(strip.profiles_open(), "and it can come back");
     }
 
     #[test]
@@ -1724,6 +1777,78 @@ mod tests {
         for tab in [placeholder_addr(1), placeholder_addr(2)] {
             strip.close(tab).expect("tab exists").kill();
         }
+    }
+
+    #[test]
+    fn tab_cycling_takes_both_app_tabs_in_their_turn() {
+        // §1's drawn order — sessions, then Profiles, then Settings — is the
+        // cycle's order too. Profiles was missing from it entirely (#494):
+        // it lived on its own struct, so `display_len` could not count it and
+        // ⌘⇧] stepped straight over the tab the user had just opened.
+        let mut strip = TabStrip::default();
+        for n in 1..=2 {
+            strip.push(fake(n));
+        }
+        strip.open_profiles();
+        strip.open_settings();
+        strip.activate(0);
+        assert!(!strip.app_tab_active(), "activating a session takes the keyboard back");
+
+        strip.activate_next();
+        assert_eq!(strip.display_active(), 1);
+        strip.activate_next();
+        assert!(strip.profiles_active(), "profiles takes its turn after the last session");
+        assert!(!strip.settings_active(), "and exactly one app tab holds the keyboard");
+        strip.activate_next();
+        assert!(strip.settings_active(), "settings follows profiles");
+        assert!(!strip.profiles_active());
+        strip.activate_next();
+        assert_eq!(strip.display_active(), 0, "and the cycle wraps past both");
+
+        strip.activate_prev();
+        assert!(strip.settings_active(), "prev wraps back onto the last app tab");
+        strip.activate_prev();
+        assert!(strip.profiles_active(), "…then the one before it");
+
+        // With Profiles closed the cycle closes over it — the slot must not
+        // survive as a step onto nothing.
+        strip.close_profiles();
+        strip.activate(0);
+        strip.activate_next();
+        strip.activate_next();
+        assert!(
+            strip.settings_active(),
+            "a closed app tab leaves no empty slot in the cycle"
+        );
+        for tab in [placeholder_addr(1), placeholder_addr(2)] {
+            strip.close(tab).expect("tab exists").kill();
+        }
+    }
+
+    #[test]
+    fn the_two_app_tabs_hand_the_keyboard_to_each_other_and_back() {
+        // Invariant 9 (exactly one tab is lit) across the pair, which only
+        // became possible to break when Profiles joined the strip. Closing
+        // either must land on the session underneath, not on the other one.
+        let mut strip = TabStrip::default();
+        strip.push(fake(1));
+
+        strip.open_settings();
+        strip.open_profiles();
+        assert!(strip.profiles_active() && !strip.settings_active());
+        assert_eq!(strip.display_active(), 1, "profiles sits right after the sessions");
+
+        assert!(strip.activate_addr(settings_addr()), "clicking the other app tab moves the keyboard");
+        assert!(strip.settings_active() && !strip.profiles_active());
+        assert_eq!(strip.display_active(), 2, "settings sits after profiles");
+
+        strip.close_settings();
+        assert!(
+            strip.is_active(placeholder_addr(1)),
+            "closing an app tab returns the keyboard to the session, not to its neighbour"
+        );
+        assert!(strip.profiles_open(), "…and leaves the other one open where it was");
+        strip.close(placeholder_addr(1)).expect("tab exists").kill();
     }
 
     #[test]
