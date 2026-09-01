@@ -242,6 +242,77 @@ pub fn write_profile_value(
 }
 
 #[cfg(feature = "fs")]
+/// Replace `path` with `text`, rather than truncating it and refilling it.
+///
+/// `std::fs::write` truncates first, so a crash, a full disk or a signal between
+/// the two calls leaves the file empty — and for this file that is every setting
+/// a person has, not the one key being changed. Writing a sibling and renaming
+/// over the target makes the swap atomic: a reader sees the old file or the new
+/// one, never neither.
+///
+/// Three details are load-bearing rather than tidy:
+///
+/// - The scratch file is a **sibling**, not something under `temp_dir()`. A
+///   rename is only atomic within one filesystem, and the temp directory is
+///   routinely on another — where `rename` degrades to copy-then-delete, which
+///   is the hazard again with more steps.
+/// - It is **synced before the rename**. Ordering the rename after the data
+///   reaches disk is what stops a crash from committing a name that points at
+///   nothing; without it some filesystems hand back an empty file, which is
+///   precisely what this function exists to prevent.
+/// - The mode is **carried over from the file being replaced**, because the
+///   replacement is a *new* file and would otherwise be born at whatever the
+///   umask says. Somebody who chmodded their config 0600 keeps it.
+///
+/// [`watch::Watcher`](crate::watch::Watcher) already watches the parent
+/// directory rather than the file, for this exact shape — "editors do not write
+/// files, they replace them" — so a save reaches it unchanged.
+fn save(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let Some(parent) = path.parent() else {
+        // No parent to put a sibling in; nothing sensible to do but the direct
+        // write, which is still better than refusing to save at all.
+        return std::fs::write(path, text);
+    };
+    std::fs::create_dir_all(parent)?;
+
+    // Unique per process *and* call: zest-app and the daemon both write this
+    // file, and two savers sharing a scratch name would each truncate the
+    // other's — the original bug, one directory entry to the left.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stem = path.file_name().map_or_else(|| "config".into(), |n| n.to_string_lossy());
+    let tmp = parent.join(format!(
+        ".{stem}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Only when there is something to copy from: a first save has no mode to
+    // inherit and takes the umask's, like any other new file.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "fs")]
 fn write_at(path: &Path, parts: &[&str], value: toml_edit::Value) -> std::io::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = existing
@@ -266,10 +337,7 @@ fn write_at(path: &Path, parts: &[&str], value: toml_edit::Value) -> std::io::Re
     }
     node[*last] = toml_edit::Item::Value(value);
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, doc.to_string())
+    save(path, &doc.to_string())
 }
 
 #[cfg(feature = "fs")]
@@ -325,10 +393,7 @@ pub fn create_profile(path: &Path, name: &str) -> std::io::Result<()> {
     // Explicit, unlike the parents above: the header IS the profile.
     doc["profiles"][name] = toml_edit::Item::Table(toml_edit::Table::new());
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, doc.to_string())
+    save(path, &doc.to_string())
 }
 
 #[cfg(feature = "fs")]
@@ -354,7 +419,7 @@ pub fn copy_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> {
             )
         })?;
     doc["profiles"][to] = source;
-    std::fs::write(path, doc.to_string())
+    save(path, &doc.to_string())
 }
 
 #[cfg(feature = "fs")]
@@ -416,7 +481,7 @@ pub fn rename_profile(path: &Path, from: &str, to: &str) -> std::io::Result<()> 
         *key.dotted_decor_mut() = old.dotted_decor().clone();
     }
     profiles.entry_format(&key).or_insert(source);
-    std::fs::write(path, doc.to_string())
+    save(path, &doc.to_string())
 }
 
 #[cfg(feature = "fs")]
@@ -429,7 +494,7 @@ fn remove_at(path: &Path, parts: &[&str]) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
 
     if remove_in(doc.as_table_mut(), parts) {
-        std::fs::write(path, doc.to_string())?;
+        save(path, &doc.to_string())?;
     }
     Ok(())
 }
@@ -470,6 +535,59 @@ mod tests {
         let p = std::env::temp_dir().join(format!("zesterm-config-test-{name}.toml"));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// A crash between the truncate and the write must not be able to cost
+    /// somebody their whole config.
+    ///
+    /// Asserts the *mechanism*, not the content: a file whose bytes are correct
+    /// afterwards is what both the safe and the unsafe writer produce, so a
+    /// content check passes on the very code this exists to rule out. A rename
+    /// swaps in a different file, so the inode moves; an in-place
+    /// `fs::write` truncates the one that is already there and keeps it.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_replaces_the_file_rather_than_truncating_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let path = temp("atomic");
+        std::fs::write(&path, "[typography]\nsize_pt = 14.0\n").expect("write");
+        let before = std::fs::metadata(&path).expect("stat").ino();
+
+        write_value(&path, "typography.size_pt", toml_edit::value(20.0).into_value().unwrap())
+            .expect("edit");
+
+        let after = std::fs::metadata(&path).expect("stat").ino();
+        assert_ne!(
+            before, after,
+            "the config was edited in place: a crash mid-write would have left it \
+             truncated, taking every other setting with the one being changed"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("size_pt = 20.0"), "did not apply: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The replacement must not leave its scratch file behind: the config
+    /// directory is one a person opens, and `themes/` sits beside it.
+    #[test]
+    fn a_write_leaves_no_scratch_file_behind() {
+        let dir = std::env::temp_dir().join("zesterm-config-test-scratch-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[typography]\nsize_pt = 14.0\n").expect("write");
+
+        write_value(&path, "typography.size_pt", toml_edit::value(20.0).into_value().unwrap())
+            .expect("edit");
+
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("readdir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec!["config.toml".to_string()], "left a scratch file: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

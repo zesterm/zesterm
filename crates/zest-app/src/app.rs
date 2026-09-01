@@ -7698,10 +7698,13 @@ impl App {
     }
 
     /// Where an edit lands: the user's config file, existing or about to.
+    ///
+    /// One line, and it stays a wrapper rather than being inlined at its call
+    /// sites: the portable-mode ordering inside it is the part that is easy to
+    /// get wrong, and it now lives once, in `zest-config`, where the daemon
+    /// reads it too.
     fn config_target() -> Option<std::path::PathBuf> {
-        zest_config::paths::config_file().or_else(|| {
-            zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE))
-        })
+        zest_config::paths::config_write_target()
     }
 
     /// The field index a settings row stands for, when it is a real field.

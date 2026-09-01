@@ -200,6 +200,7 @@ fn is_group(path: &str) -> bool {
             | "scrolling"
             | "cursor"
             | "motion"
+            | "prompt"
     )
 }
 
@@ -245,6 +246,46 @@ mod tests {
         b.appearance.theme = "nord".into();
         assert_eq!(changed_keys(&a, &b), vec!["appearance.theme"]);
         assert_eq!(diff(&a, &b), Invalidation::Free);
+    }
+
+    #[test]
+    fn changing_which_chips_show_does_not_ask_for_a_relaunch() {
+        // `prompt` was missing from `is_group`, so `changed_keys` stopped at
+        // the group and reported a bare "prompt" — which is in no KEYS row, so
+        // `class_of`'s fallback called it Restart. Telling somebody to restart
+        // their terminal to reorder a chip is a lie the UI has no way to check.
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.prompt.widgets = vec!["git".into(), "cwd".into()];
+        assert_eq!(
+            changed_keys(&a, &b),
+            vec!["prompt.widgets"],
+            "the group was not walked into, so the key never named itself"
+        );
+        assert_eq!(diff(&a, &b), Invalidation::Free);
+    }
+
+    #[test]
+    fn every_settings_group_is_walked_into() {
+        // The twin of `cascade::every_settings_group_merges_key_by_key`, and
+        // written for the same reason: three copies of the group list exist
+        // (`KEYS`, `cascade::is_mergeable`, `is_group`) and the one that is
+        // never derived is the one that goes stale. A group missing here has
+        // every key under it reported by its bare group name, which matches no
+        // KEYS row and therefore costs a Restart it does not need.
+        let mut groups: Vec<&str> = KEYS
+            .iter()
+            .filter_map(|(k, _)| k.split_once('.').map(|(g, _)| g))
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        for g in groups {
+            assert!(
+                is_group(g),
+                "settings group `{g}` must be walked into, or its keys report as \
+                 `{g}` and fall through to Restart"
+            );
+        }
     }
 
     #[test]
