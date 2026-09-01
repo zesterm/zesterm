@@ -266,6 +266,18 @@ fn app_tab_glyph(kind: TabKind) -> &'static str {
 }
 const UI_STATUS: f32 = 10.5;
 
+/// The find bar's own metrics (#519), logical pixels.
+const FIND_W: f32 = 200.0;
+const FIND_PAD: f32 = 7.0;
+const FIND_RADIUS: f32 = 10.0;
+const FIND_INSET: f32 = 8.0;
+const FIND_BUTTON: f32 = 22.0;
+const FIND_GLYPH: &str = "⌕";
+/// Said rather than left to be inferred: a remote pane's grid holds only what
+/// crossed the wire, so the count describes this window's copy and not the
+/// session. Nothing asks the host for its scrollback yet.
+const FIND_LOCAL_NOTE: &str = "local only";
+
 /// Baseline that vertically centres a run of `px`-sized text in a band.
 /// 0.72·px approximates the ascent above baseline for the faces we ship;
 /// exact per-face metrics would need the font here, and being one pixel
@@ -521,6 +533,11 @@ pub fn layout(
                 &mut out,
             );
         }
+    }
+    // Before every modal: the find bar is not exclusive with them, and a
+    // palette opened over it must cover it rather than sit under it.
+    if let Some(find) = &model.find {
+        find_bar_overlay(find, model.grid_area, colors, m, measure, &mut out);
     }
     if let Some(picker) = &model.picker {
         // Appended last on purpose: last drawn is topmost, and last pushed
@@ -1635,6 +1652,176 @@ fn picker_overlay(
 /// The `where` line is not decoration. A path prompt in a fleet terminal is
 /// ambiguous in two directions at once — which directory, and which *machine*
 /// — and neither is recoverable from what the person typed.
+/// The find bar (#519): a floating panel in the top-right of the grid area.
+///
+/// Top-right and floating rather than docked, for two reasons that are not
+/// aesthetic. Docking it above the grid would shrink the pane, and a pane that
+/// resizes resizes the pty — ADR-013's most expensive operation, which would
+/// reflow the very text being searched. Docking it below would put it where the
+/// prompt chips and the live prompt are, and `prompt_chips`'s never-overlay rule
+/// protects typed text and the caret above everything. The top-right corner is
+/// the one neither ever occupies.
+fn find_bar_overlay(
+    model: &super::model::FindBarModel,
+    area: [f32; 4],
+    colors: &ChromeColors,
+    m: &ChromeMetrics,
+    measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    out: &mut ChromeLayout,
+) {
+    let s = m.scale;
+    let pad = FIND_PAD * s;
+    let h = m.line_height + 2.0 * pad;
+    let count_w = if model.count.is_empty() {
+        0.0
+    } else {
+        measure(&model.count, UI_STATUS * s, false, 0.0) + pad
+    };
+    let note_w = if model.local_only {
+        measure(FIND_LOCAL_NOTE, UI_STATUS * s, false, 0.0) + pad
+    } else {
+        0.0
+    };
+    let btn = FIND_BUTTON * s;
+    // Wide enough for the query plus everything right of it, but never wider
+    // than the pane it floats in.
+    let w = (FIND_W * s + count_w + note_w).min((area[2] - 2.0 * FIND_INSET * s).max(0.0));
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let x = area[0] + area[2] - w - FIND_INSET * s;
+    let y = area[1] + FIND_INSET * s;
+    let panel = [x, y, w, h];
+
+    let mut panel_rect = RectInstance::rounded(panel, FIND_RADIUS * s, colors.panel_bg, area);
+    panel_rect.border = colors.line;
+    panel_rect.border_width = HAIRLINE * s;
+    panel_rect.shadow_blur = 20.0 * s;
+    panel_rect.shadow_alpha = colors.shadow_alpha;
+    out.rects.push(panel_rect);
+    // Swallows a near-miss so a click beside the entry does not fall through to
+    // the grid and move the selection out from under the search.
+    out.hit.push(panel, HitRegion::FindPanel);
+
+    let glyph_w = measure(FIND_GLYPH, m.font_px, false, 0.0) + pad;
+    let text_x = x + pad + glyph_w;
+    out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
+        tracking: 0.0,
+        text: FIND_GLYPH.to_string(),
+        pos: [x + pad, text_baseline(m, y, h)],
+        max_width: glyph_w,
+        color: colors.text_faint,
+        clip: panel,
+    });
+
+    let buttons_w = btn * 3.0;
+    let field_w = (w - (text_x - x) - count_w - note_w - buttons_w - pad).max(0.0);
+    let (text, color) = if model.query.is_empty() {
+        ("Find".to_string(), colors.text_faint)
+    } else {
+        (model.query.clone(), colors.text_active)
+    };
+    if let Some((lo, hi)) = model.caret.selection {
+        let (a, b) = (
+            measure(&model.query[..lo], m.font_px, false, 0.0),
+            measure(&model.query[..hi], m.font_px, false, 0.0),
+        );
+        out.rects.push(RectInstance::rounded(
+            [text_x + a, y + pad, b - a, m.line_height],
+            2.0 * s,
+            colors.accent_soft,
+            panel,
+        ));
+    }
+    out.texts.push(TextRun {
+        px: m.font_px,
+        bold: false,
+        tracking: 0.0,
+        text,
+        pos: [text_x, text_baseline(m, y, h)],
+        max_width: field_w,
+        color,
+        clip: panel,
+    });
+    if !model.query.is_empty() {
+        let at = measure(&model.query[..model.caret.at], m.font_px, false, 0.0);
+        out.rects.push(RectInstance::filled(
+            [text_x + at, y + pad, (1.5 * s).max(1.0), m.line_height],
+            colors.text_active,
+            panel,
+        ));
+    }
+
+    let mut right = x + w - pad;
+    for (region, glyph) in [
+        (HitRegion::FindClose, "✕"),
+        (HitRegion::FindNext, "›"),
+        (HitRegion::FindPrev, "‹"),
+    ] {
+        right -= btn;
+        let rect = [right, y + pad, btn, m.line_height];
+        out.hit.push(rect, region);
+        out.texts.push(TextRun {
+            px: m.font_px,
+            bold: false,
+            tracking: 0.0,
+            text: glyph.to_string(),
+            pos: [right + btn / 4.0, text_baseline(m, y, h)],
+            max_width: btn,
+            color: colors.text_inactive,
+            clip: panel,
+        });
+    }
+
+    // `Aa`, lit when the query's own capitals made the search literal.
+    right -= btn;
+    let case_rect = [right, y + pad, btn, m.line_height];
+    out.hit.push(case_rect, HitRegion::FindCase);
+    out.texts.push(TextRun {
+        px: UI_STATUS * s,
+        bold: model.case_sensitive,
+        tracking: 0.0,
+        text: "Aa".to_string(),
+        pos: [right, text_baseline(m, y, h)],
+        max_width: btn,
+        color: if model.case_sensitive { colors.accent } else { colors.text_faint },
+        clip: panel,
+    });
+
+    if model.local_only {
+        right -= note_w;
+        out.texts.push(TextRun {
+            px: UI_STATUS * s,
+            bold: false,
+            tracking: 0.0,
+            text: FIND_LOCAL_NOTE.to_string(),
+            pos: [right, text_baseline(m, y, h)],
+            max_width: note_w,
+            color: colors.text_faint,
+            clip: panel,
+        });
+    }
+
+    if !model.count.is_empty() {
+        right -= count_w;
+        out.texts.push(TextRun {
+            px: UI_STATUS * s,
+            bold: false,
+            tracking: 0.0,
+            text: model.count.clone(),
+            // `No results` is a fact, not a warning about the terminal -- but
+            // it is the one state where the counter has to be read rather than
+            // glanced at, so it takes the colour that gets looked at.
+            pos: [right, text_baseline(m, y, h)],
+            max_width: count_w,
+            color: if model.empty { colors.danger } else { colors.text_faint },
+            clip: panel,
+        });
+    }
+}
+
 fn open_file_overlay(
     model: &super::model::OpenFileModel,
     colors: &ChromeColors,
@@ -3585,6 +3772,7 @@ mod tests {
             palette: None,
             dir_picker: None,
             open_file: None,
+            find: None,
             settings: None,
             launcher: None,
             block_menu: None,
@@ -6203,4 +6391,98 @@ mod tests {
         assert!(!l.hit.is_empty());
         assert!(!l.rects.is_empty());
     }
+
+    fn find_model(count: &str, empty: bool) -> super::super::model::FindBarModel {
+        super::super::model::FindBarModel {
+            query: "needle".into(),
+            caret: super::super::model::Caret { at: 6, selection: None },
+            count: count.into(),
+            empty,
+            case_sensitive: false,
+            local_only: false,
+        }
+    }
+
+    #[test]
+    fn the_find_bar_hugs_the_top_right_of_the_grid_area() {
+        // Not docked above the grid, which would resize the pty and reflow the
+        // text being searched, and not at the bottom, where the prompt chips and
+        // the live prompt are. Top-right is the corner neither ever occupies.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model =
+            model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        model.find = Some(find_model("1 of 3", false));
+        let l = layout(&model, &colors(), &m, &mut measure);
+
+        let panel = l.hit.rect_of(HitRegion::FindPanel).expect("the find bar is laid out");
+        let area = model.grid_area;
+        assert!(
+            (panel[0] + panel[2] - (area[0] + area[2] - FIND_INSET)).abs() < 0.51,
+            "its right edge is inset from the grid area's, not centred: {panel:?}"
+        );
+        assert!(
+            (panel[1] - (area[1] + FIND_INSET)).abs() < 0.51,
+            "and it sits at the top, clear of the prompt row: {panel:?}"
+        );
+        assert!(
+            panel[1] + panel[3] < area[1] + area[3] / 2.0,
+            "well clear of the bottom half, where the live prompt lives"
+        );
+    }
+
+    #[test]
+    fn the_find_bars_drawn_buttons_are_its_hit_rects() {
+        // The chrome discipline: what was drawn and what a click finds are one
+        // pass, so they cannot drift. There is no chord for next/previous --
+        // ⌘G is spent and ⌘⇧F folds onto ⌘F -- so these buttons and ⏎/⇧⏎ are
+        // the whole affordance, and a dead button would leave no way to step.
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model =
+            model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        model.find = Some(find_model("1 of 3", false));
+        let l = layout(&model, &colors(), &m, &mut measure);
+
+        for region in [HitRegion::FindPrev, HitRegion::FindNext, HitRegion::FindClose] {
+            let rect = l
+                .hit
+                .rect_of(region)
+                .unwrap_or_else(|| panic!("{region:?} was not laid out"));
+            let (cx, cy) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+            assert_eq!(l.hit.hit(cx, cy), Some(region), "clicking {region:?} finds it");
+        }
+    }
+
+    #[test]
+    fn a_find_bar_with_no_results_says_so_in_the_colour_that_gets_read() {
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model =
+            model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        model.find = Some(find_model("No results", true));
+        let l = layout(&model, &colors(), &m, &mut measure);
+        let run = l
+            .texts
+            .iter()
+            .find(|t| t.text == "No results")
+            .expect("the count is drawn");
+        assert_eq!(run.color, colors().danger, "the one state that has to be read, not glanced at");
+    }
+
+    #[test]
+    fn a_remote_session_says_the_search_was_local() {
+        // A remote pane's grid holds only what crossed the wire, so the count
+        // describes this window's copy rather than the session. Saying nothing
+        // would let a small number read as "this command was never run here".
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut model =
+            model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        let mut find = find_model("1 of 3", false);
+        find.local_only = true;
+        model.find = Some(find);
+        let l = layout(&model, &colors(), &m, &mut measure);
+        assert!(
+            l.texts.iter().any(|t| t.text == FIND_LOCAL_NOTE),
+            "the bar admits the count is only what this window received"
+        );
+    }
+
 }

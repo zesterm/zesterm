@@ -45,7 +45,7 @@ pub use instance::{
     LinearRgba, RectInstance, RectShape,
 };
 pub use scene::{
-    BlockBand, Chrome, Predicted, PredictedCell, Preedit, Scene, Viewport, RAIL_PX,
+    BlockBand, Chrome, FindHighlights, Predicted, PredictedCell, Preedit, Scene, Viewport, RAIL_PX,
 };
 pub use ui_text::{emit_ui_run, measure_ui_run};
 

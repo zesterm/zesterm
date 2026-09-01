@@ -332,12 +332,14 @@ cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --screen themes --screenshot out.png
                                                # open on a design screen: fleet|themes|settings|
                                                #   settings-menu|palette|dir-picker|launcher|
-                                               #   profiles|profiles-rename
+                                               #   profiles|profiles-rename|open-file|editor|find
                                                # ('palette' = the ⌘K search; 'settings-menu' is Settings
-                                               #   with the theme dropdown open and 'profiles-rename' is
-                                               #   Profiles with the name entry open — the states a
+                                               #   with the theme dropdown open, 'profiles-rename' is
+                                               #   Profiles with the name entry open, and 'find' is the
+                                               #   ⌘F bar with a query typed — the states a
                                                #   screenshot cannot otherwise reach, because opening
-                                               #   them takes a click); works without --screenshot too
+                                               #   them takes a click or a keystroke); works without
+                                               #   --screenshot too
                                                # fleet is the exception: its content comes from the
                                                #   daemon, which screenshot mode never attaches to, so
                                                #   --screen fleet --screenshot is refused rather than

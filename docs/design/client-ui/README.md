@@ -247,6 +247,9 @@ wallpaper and the block headers did not. Removing the fill removes the exception
 rather than tuning it, and the suppression has to name exactly the lines the
 header covers or the two texts print in one place.
 
+A find bar (§14) floats in this pane's top-right while it is open; its hits
+share the selection's own highlight, and the current one takes `ui.accent`.
+
 **The state rail runs the block's full height** — header *and* output, not the
 header alone — so a block is one object you can see the edges of. It lives in the
 window padding, 2px wide with a 4px gap before the first column, its ends
@@ -700,6 +703,64 @@ whose base hash is stale would be worse than not restoring it.
 `crates/zest-app/src/chrome/editor.rs` (this geometry), and
 `crates/zest-daemon/src/files.rs` (the cap, the binary sniff, the hash).
 
+### 14. Find — a bar over the pane
+
+`⌘F` (Ctrl+Shift+F) opens a floating bar in the **top-right of the focused
+pane's body**, searching that pane's grid and scrollback (#519).
+
+**Why floating, and why that corner.** Docking it above the grid would shrink
+the pane, and a pane that resizes resizes the pty — ADR-013's most expensive
+operation, which would reflow the very text being searched. Docking it below
+puts it where the prompt chips and the live prompt are, which §3's
+never-overlay rule protects. The top-right is the one corner neither the chips
+nor the caret ever occupy. No scrim: the terminal stays visible and clickable,
+so only the bar's own rect enters the hit map, and a click just outside the
+entry is swallowed rather than moving the selection out from under the search.
+
+**Contents**, left to right: `⌕` in `ui.faint`; the query in 12.5px mono with
+caret and selection rect; then right-aligned — the count in 10.5px, an `Aa`
+chip, and `‹` `›` `✕` at 22px each. Panel is 30px tall, radius 10, `ui.panel`
+on a 1px `ui.line`, 20px shadow, 8px inset from the pane body.
+
+**The count is never `0 of 0`.** Two zeroes read as a broken counter rather
+than an answer, so no hits reads `No results` in `danger`; a scan that stopped
+at its cap reads `3 of 5000+`, because a count that stops at a round number
+without admitting it reads as the whole truth. An empty query shows nothing.
+
+**Hits take colours the theme already has** — the pane's selection wash for
+every hit, `ui.accent` for the one the keyboard is on. A dedicated token would
+move the JSON schema, all five built-ins and `check-export-web` for a colour
+the selection already carries.
+
+**There is no chord for find-next.** A Desktop letter folds onto its shifted
+twin's Ctrl+Shift form, so `⌘⇧F` *is* Ctrl+Shift+F — `⌘F`'s own Windows
+spelling — and `⌘G`, the Mac's find-next since 1984, is spent by Open file…
+(itself displaced from `⌘O` the same way). **⏎ / ⇧⏎ inside the bar** step
+forwards and backwards, wrapping at both ends, and the `‹ ›` buttons do the
+same. This also rules `⌘⇧F` out as a future "search the fleet" chord.
+
+**Rules the bar keeps:**
+
+- Opening seeds from a **single-line** selection and selects it all, so the
+  next keystroke replaces. A multi-line selection is not a search term.
+- `⌘F` on an open bar re-selects the query; it does not close.
+- Opening while scrolled back lands on the hit **nearest the viewport**, not
+  the first — the reader navigated there on purpose.
+- The grid cursor draws hollow while the bar is up, because the bar has the
+  keyboard.
+- `scroll_on_output` is suspended while a hit is current: a build printing
+  lines must not yank the view off the match somebody just stepped to.
+- `Esc` closes and leaves the grid's own selection alone. §3 forbids two things
+  lit at once, and escaping a search must not also undo a drag.
+- On a **remote** pane the bar says `local only`: nothing asks the host for
+  scrollback yet, so the grid holds what crossed the wire and the count
+  describes this window's copy rather than the session.
+
+Implemented by `crates/zest-app/src/find.rs` (the pure state),
+`crates/zest-app/src/chrome/layout.rs` (`find_bar_overlay`, this geometry),
+`crates/zest-core/src/search.rs` (the match primitive) and
+`zest-render-wgpu`'s `emit_find`. `--screen find` photographs it.
+
 ---
 
 ## Interactions & behaviour
@@ -710,6 +771,7 @@ whose base hash is stale would be worse than not restoring it.
 | `⌘K` / `Ctrl+K` | Toggle the command palette; `Esc` or scrim click dismisses |
 | `⌘⇧E` | Toggle horizontal ⇄ vertical tabs |
 | `⌘D` | Split right (palette action row does the same, targeting a chosen host) |
+| `⌘F` | Toggle the find bar over the focused pane (§14). ⏎/⇧⏎ step, `Esc` closes |
 | Click a block's chevron | Fold/unfold that block's output; header keeps a `N lines` count while folded |
 | `⌘⇧O` | Copy the output of the most recent block **with output** |
 | `⌘⇧R` | Re-run that same block |

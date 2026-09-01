@@ -49,6 +49,15 @@ pub enum Action {
     RerunLastCommand,
     ScrollPageUp,
     ScrollPageDown,
+    /// Open or focus the find bar over the focused pane (⌘F).
+    ///
+    /// There is deliberately **no chord for find-next**. A Desktop letter folds
+    /// onto its own shifted twin's Ctrl+Shift form on Windows, so `⌘⇧F` is
+    /// Ctrl+Shift+F — which is ⌘F's own Windows spelling — and `⌘G`, the
+    /// find-next every Mac has had since 1984, is already spent by
+    /// [`Action::OpenFile`]. Next and previous are ⏎ and ⇧⏎ inside the bar,
+    /// which is where this module's header says a modal overlay's keys belong.
+    ToggleFind,
     /// The command palette itself — rendered from this table, so it can
     /// never list a chord that does not exist, and every row it lists runs
     /// through the same dispatch the chord does.
@@ -370,6 +379,10 @@ pub static BINDINGS: &[Binding] = &[
     // twin's Ctrl+Shift form on Windows (see ⌘B above), so the "on a host"
     // spelling needs a letter of its own.
     b(Mods::Desktop, ChordKey::Char("h"), Action::SplitRightOnHost, "H", "Split right on a host…", Category::Fleet),
+    // Find-next gets no chord: `⌘⇧F` folds onto Ctrl+Shift+F, which is this
+    // row's own Windows spelling, and `⌘G` is spent by Open file… above. ⏎/⇧⏎
+    // inside the bar do it instead.
+    b(Mods::Desktop, ChordKey::Char("f"), Action::ToggleFind, "F", "Find…", Category::Scrollback),
     b(Mods::Desktop, ChordKey::Char("j"), Action::FocusPaneRight, "J", "Next pane", Category::Tabs),
     b(Mods::Desktop, ChordKey::Char("u"), Action::FocusPaneLeft, "U", "Previous pane", Category::Tabs),
 ];
@@ -768,6 +781,40 @@ mod tests {
                 "{code:?} + ⌘ must resolve to {want:?} whatever that key types"
             );
         }
+    }
+
+    #[test]
+    fn find_is_reachable_on_both_platforms() {
+        assert_eq!(action_for(&char_key("f"), SUPER), Some(Action::ToggleFind), "⌘F");
+        assert_eq!(action_for(&char_key("F"), CTRL_SHIFT), Some(Action::ToggleFind), "Ctrl+Shift+F");
+    }
+
+    #[test]
+    fn find_next_has_no_letter_chord_because_g_is_taken() {
+        // ⌘G is find-next on every Mac since 1984, and it is spent here on Open
+        // file… -- itself chosen because ⌘O was already gone the same way. A
+        // Desktop letter folds onto its shifted twin's Ctrl+Shift form, so a
+        // letter carries one binding across both, and there is no second
+        // spelling to reach for.
+        assert_eq!(
+            action_for(&char_key("g"), SUPER),
+            Some(Action::OpenFile),
+            "⌘G belongs to Open file…, so find-next cannot have it"
+        );
+        assert_eq!(
+            action_for(&char_key("G"), CTRL_SHIFT),
+            Some(Action::OpenFile),
+            "and its Windows form is the same binding, so ⌘⇧G is gone too"
+        );
+        // ⌘⇧F folds onto Ctrl+Shift+F -- which is ⌘F's *own* Windows spelling,
+        // so a find-previous chord there would shadow find itself. Next and
+        // previous are ⏎ and ⇧⏎ inside the bar for this reason, and a future
+        // "search the fleet" chord cannot be ⌘⇧F either.
+        assert_eq!(
+            action_for(&char_key("F"), CTRL_SHIFT),
+            Some(Action::ToggleFind),
+            "Ctrl+Shift+F is ⌘F, not a second chord"
+        );
     }
 
     #[test]

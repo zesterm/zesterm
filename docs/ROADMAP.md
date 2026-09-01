@@ -129,6 +129,21 @@ the history behind them is in closed issues and PRs.
 
 ### Input
 
+- [x] **Find in the terminal** (#519). `⌘F` over the focused pane, searching
+      scrollback and the viewport. The match primitive is in `zest-core`
+      (`search.rs`) and a hit *is* a `Selection`, so `span_on` decides what a
+      highlight covers for a find and a drag alike rather than twice. Logical
+      lines, not rows — a wrapped command is one line to whoever is reading it,
+      which is also why `Row::text()` is not called per row (it trims, and a
+      wrapped row's trailing blank is a cell the next row continues after).
+      Case folds per character, because `ß` folds to `ss` and a fold that
+      inserts a character slides every later column off the cell it names.
+      **No chord for find-next**: a Desktop letter folds onto its shifted
+      twin's Ctrl+Shift form, so `⌘⇧F` is `⌘F`'s own Windows spelling and `⌘G`
+      is spent by Open file… — ⏎/⇧⏎ inside the bar step instead, and `⌘⇧F` is
+      unavailable to a future fleet search too. Design §14.
+      Remote panes say `local only`: nothing asks a host for scrollback yet, so
+      the count describes what crossed the wire rather than the session.
 - [ ] Kitty flags 4 (alternate keys) and 16 (associated text). 4 needs the
       base-layout key, which winit exposes through a trait that does not cover
       Wayland — a platform-capability question, not a table to fill in. 16 is
