@@ -19,7 +19,8 @@ path = "src/main.rs"
 unicode-width.workspace = true
 zest-core.workspace = true
 zest-pty.workspace = true
-zest-theme.workspace = true
+# `fs`: the window reads the user's imported themes off disk.
+zest-theme = { workspace = true, features = ["fs"] }
 zest-font.workspace = true
 zest-render-wgpu.workspace = true
 zest-config.workspace = true

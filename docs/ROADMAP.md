@@ -18,7 +18,7 @@ is reported rather than gated.
 | `zest-pty` | ✅ ConPTY *and* unix (`openpt`), resize, shutdown, explicit `hangup`, `.vtrec` recorder |
 | `zest-core` | ✅ grid, scrollback, VT, modes, OSC, palette, `ChangeSource`, `RemoteWriter`, command blocks from OSC 133/7/633 |
 | `zest-font` | ✅ metrics, shaping, fallback, colour glyphs, Nerd Font PUA — the grid shapes runs when `typography.features`/`ligatures` ask for it, per-character otherwise |
-| `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers |
+| `zest-theme` | ✅ tokens, OKLCH derivation, 5 built-ins, 4 importers; reading and writing a machine's imported themes behind the off-by-default `fs` feature, so the daemon can answer what a machine has without linking the app |
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty); every mutator replaces the file rather than truncating it, so a crash mid-save cannot cost somebody every setting they have |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
