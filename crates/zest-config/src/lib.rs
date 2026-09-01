@@ -572,7 +572,13 @@ mod tests {
     /// directory is one a person opens, and `themes/` sits beside it.
     #[test]
     fn a_write_leaves_no_scratch_file_behind() {
-        let dir = std::env::temp_dir().join("zesterm-config-test-scratch-dir");
+        // Process-scoped, like `zest-app`'s `themes::tests::scratch`: this one
+        // creates and `remove_dir_all`s a whole directory, so two test binaries
+        // running at once would delete each other's tree mid-read. The sibling
+        // `temp()` helper gets away without a pid because its files are
+        // per-test and idempotent; a directory removal is neither.
+        let dir = std::env::temp_dir()
+            .join(format!("zesterm-config-test-scratch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("config.toml");
