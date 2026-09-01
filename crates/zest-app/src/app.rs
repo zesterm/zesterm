@@ -11320,6 +11320,7 @@ impl App {
                                 scale,
                                 selection: term.selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
+                                find: None,
                                 preedit: if focused { preedit } else { None },
                                 predicted: if focused {
                                     predicted.as_ref().map(|p| zest_render_wgpu::Predicted {
@@ -11409,6 +11410,7 @@ impl App {
                             scale,
                             selection: term.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, identity),
+                            find: None,
                             preedit: self.ime.preedit().map(|p| {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
