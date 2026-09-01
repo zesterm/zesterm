@@ -23,6 +23,7 @@ mod launcher;
 mod motion;
 mod pipeline_cache;
 mod platform;
+mod process;
 mod profiles_ui;
 mod remote;
 mod route;
@@ -35,10 +36,11 @@ mod tabs_state;
 mod text_field;
 mod themes;
 mod window_chrome;
+mod windows_state;
 
 use winit::event_loop::EventLoop;
 
-use app::App;
+use process::{FirstOnly, Process, WindowTemplate};
 use session::Wakeup;
 
 /// Rebuild a command line from separate arguments.
@@ -669,53 +671,42 @@ fn main() -> std::process::ExitCode {
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
 
-    let mut app = App::new(load.resolved, cli_table, profile_name, proxy);
-    if startup_probe {
-        app = app.with_startup_probe();
+    // Contradiction, not precedence: one flag says "no daemon anywhere", the
+    // other names one to attach to. Guessing which the user meant produces a
+    // window whose shell is on the wrong machine.
+    if attach_addr.is_some() && no_daemon {
+        eprintln!("--attach and --no-daemon contradict each other");
+        return std::process::ExitCode::from(2);
     }
-    if no_daemon {
-        app = app.with_no_daemon();
-    }
-    if attach_probe {
-        app = app.with_attach_probe();
-    }
-    if new_session {
-        app = app.with_new_session();
-    }
-    if let Some(shot) = shot {
-        // In-process by default, and not as a shortcut: on macOS the daemon
-        // blocks on a Keychain prompt after every rebuild and the app falls
-        // back silently after 2s (see "Traps already paid for"). A screenshot
-        // that sometimes waits two seconds and sometimes photographs a
-        // half-attached session is not a measurement of anything. `--attach`
-        // still wins, for the case where the remote session *is* the subject.
-        if attach_addr.is_none() {
-            app = app.with_no_daemon();
-        }
-        app = app.with_screenshot(shot);
-    }
-    if let Some(addr) = attach_addr {
-        // Contradiction, not precedence: one flag says "no daemon anywhere",
-        // the other names one to attach to. Guessing which the user meant
-        // produces a window whose shell is on the wrong machine.
-        if no_daemon {
-            eprintln!("--attach and --no-daemon contradict each other");
-            return std::process::ExitCode::from(2);
-        }
-        app = app.with_attach_addr(addr);
-    }
-    if let Some(screen) = screen {
-        app = app.with_start_screen(screen);
-    }
-    event_loop.run_app(&mut app).expect("run");
+    // A screenshot is in-process by default, and not as a shortcut: on macOS
+    // the daemon blocks on a Keychain prompt after every rebuild and the app
+    // falls back silently after 2s (see "Traps already paid for"). A
+    // screenshot that sometimes waits two seconds and sometimes photographs a
+    // half-attached session is not a measurement of anything. `--attach`
+    // still wins, for the case where the remote session *is* the subject.
+    let no_daemon = no_daemon || (shot.is_some() && attach_addr.is_none());
+
+    // The template every window is built from, and the flags only the first
+    // one gets: a probe or a screenshot measures *a* window (ADR-018).
+    let template = WindowTemplate {
+        resolved: load.resolved,
+        cli_layer: cli_table,
+        profile: profile_name,
+        no_daemon,
+        attach_addr,
+        new_session,
+    };
+    let first = FirstOnly { startup_probe, attach_probe, screenshot: shot, start_screen: screen };
+    let mut process = Process::new(template, first, proxy);
+    event_loop.run_app(&mut process).expect("run");
 
     // The screenshot's exit code, carried out of the event loop rather than
     // taken by `process::exit` from inside it: the pty, the clipboard and the
     // saved tab state all want their `Drop`, and `main` returning is the only
     // way they get it. A screenshot that silently did not happen is exactly
     // the failure a caller needs to see, so it must survive the trip.
-    let code = app.exit_code();
-    drop(app);
+    let code = process.exit_code();
+    drop(process);
     std::process::ExitCode::from(code)
 }
 

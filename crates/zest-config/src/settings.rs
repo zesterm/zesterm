@@ -408,10 +408,12 @@ pub struct Window {
         "x_zest_restart" = true
     ))]
     pub custom_chrome: CustomChrome,
-    /// Initial size in cells.
+    /// Initial size in cells, for a window that remembers no size of its
+    /// own: a restored window comes back the size it was closed at.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "number"))]
     pub columns: u16,
-    /// Initial size in cells.
+    /// Initial size in cells, for a window that remembers no size of its
+    /// own: a restored window comes back the size it was closed at.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "number"))]
     pub rows: u16,
 }

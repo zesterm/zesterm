@@ -2,11 +2,13 @@
 
 use std::sync::Arc;
 
-use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
+
+use crate::process::{FirstTab, Shared, WindowRequests, WindowSpec};
+use crate::windows_state::{Geometry, SavedWindow};
 
 use zest_font::{Fonts, Typography};
 use zest_pty::{CommandSpec, PtySize};
@@ -1771,10 +1773,10 @@ fn arm_pairing_prompt(
 /// rather than overwrite it — an overwritten request could never be
 /// answered from the modal at all. Arrival order; [`visible_approval`] says
 /// which entry the modal shows.
-type ApprovalCell = Arc<parking_lot::Mutex<Vec<ApprovalRequest>>>;
+pub(crate) type ApprovalCell = Arc<parking_lot::Mutex<Vec<ApprovalRequest>>>;
 
 /// One inbound request: who is asking, as the daemon pushed it.
-struct ApprovalRequest {
+pub(crate) struct ApprovalRequest {
     client: zest_proto::ClientId,
     label: String,
     remote: String,
@@ -1939,9 +1941,19 @@ struct Gpu {
 pub struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
+    /// What is one per process (ADR-018): the fleet model, the clipboard,
+    /// the placeholder counter. Everything else on this struct is the
+    /// window's own.
+    shared: std::rc::Rc<Shared>,
+    /// What this window wants the process to do — close it, open another —
+    /// drained by the process after every dispatch. A window never exits
+    /// the loop itself: with several, that would be quitting.
+    requests: WindowRequests,
 
-    window: Option<Arc<Window>>,
+    /// Above `window` on purpose: the surface holds an `Arc<Window>`, and
+    /// fields drop in declaration order, so this way the surface goes first.
     gpu: Option<Gpu>,
+    window: Option<Arc<Window>>,
     /// The sessions this window holds open, wherever their shells run.
     ///
     /// Each tab's terminal is behind [`SessionSource`], because a window on
@@ -1998,11 +2010,6 @@ pub struct App {
     /// A click resolves its value against exactly what was drawn — the same
     /// one-computation rule the block chrome follows.
     prompt_chips_view: Option<crate::chrome::prompt_chips::PromptChipsView>,
-    /// The context engine for in-process sessions (#434), built on first
-    /// need: a window that never runs one pays nothing, which is most
-    /// windows — their sessions live in the daemon, whose engine this is
-    /// the same type as.
-    local_context: std::sync::OnceLock<zest_daemon::context::ContextEngine>,
     chip_hits: crate::chrome::hit::ChromeHitMap,
     /// Folded blocks, per session — a view preference, never on the wire:
     /// two clients watching one session may disagree.
@@ -2028,15 +2035,11 @@ pub struct App {
     /// The identity every daemon tab proves. One per window, minted or loaded
     /// once — N tabs are one client holding N sessions, not N clients.
     client_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
-    /// Distinct placeholder addresses for sessions with no real one.
-    next_placeholder: u64,
     /// Answers to a *local* file read (#464), each carrying the pane it was
     /// for. A remote answer parks on its own session instead; these come from
     /// a worker thread, so they need somewhere of their own to land.
     local_file_replies:
         Arc<parking_lot::Mutex<Vec<(zest_proto::SessionAddr, crate::editor::FileReply)>>>,
-    /// Hosts, presence, and session lists — the picker's data source.
-    fleet: Option<crate::fleet::FleetModel>,
     /// The fleet picker's transient state, while open.
     picker: Option<PickerState>,
     palette_ui: Option<PaletteState>,
@@ -2083,9 +2086,6 @@ pub struct App {
     /// Keys the cascade kept that the schema does not know — the settings
     /// tab's ninth category. Kept from the last resolve, like provenance.
     unknown_keys: Vec<String>,
-    /// Restart-class keys edited this run. On `App` rather than the overlay
-    /// state: closing and reopening the overlay does not un-owe the restart.
-    restart_pending: std::collections::BTreeSet<String>,
     /// The last settings write that failed, shown as a banner in the overlay.
     settings_error: Option<String>,
     /// A slider drag in progress, by settings row index. The pointer keeps
@@ -2104,12 +2104,9 @@ pub struct App {
     /// (#190). Written from worker threads, drawn as the chrome's notice.
     pairing: PairingCell,
     /// A device is waiting for THIS machine's approval — the modal's state,
-    /// written by the fleet watcher (`Hello.watch_pairings` pushes).
+    /// written by the fleet watcher (`Hello.watch_pairings` pushes). The
+    /// process's cell, shared: any window shows it and any may answer.
     approval: ApprovalCell,
-    /// The persisted identity used for hosts that are not this machine,
-    /// loaded lazily on first need so the keychain stays off the startup
-    /// path (and off it entirely for people who never leave loopback).
-    remote_identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
     /// Whether this window is signed in to an account. `Unknown` until the
     /// Fleet screen is first shown — reading the token touches the keychain.
     account: AccountState,
@@ -2206,7 +2203,6 @@ pub struct App {
     mouse: MouseState,
     /// Pointer position in cells, updated on every move.
     pointer_cell: (usize, usize),
-    clipboard: Option<arboard::Clipboard>,
     /// Why the theme gallery's last clipboard import was refused, shown on
     /// the import card until a retry succeeds or the screen is reopened.
     theme_import_error: Option<String>,
@@ -2229,8 +2225,6 @@ pub struct App {
     /// Flags, replayed on every reload so a `--size` is not lost to a file save.
     cli_layer: toml::Table,
     profile: Option<String>,
-    /// Dropping this stops watching the config file.
-    config_watcher: Option<zest_config::Watcher>,
     /// Report time-to-first-paint and exit, instead of running a terminal.
     startup_probe: bool,
     /// Own the pty in-process instead of attaching to a daemon.
@@ -2339,6 +2333,7 @@ impl App {
         cli_layer: toml::Table,
         profile: Option<String>,
         proxy: EventLoopProxy<Wakeup>,
+        shared: std::rc::Rc<Shared>,
     ) -> Self {
         // Taken whole rather than as bare settings: provenance is the part
         // of a resolve that is easy to drop and expensive to add back — the
@@ -2368,6 +2363,9 @@ impl App {
             config,
             text_tuning,
             proxy,
+            approval: Arc::clone(&shared.approval),
+            shared,
+            requests: WindowRequests::default(),
             window: None,
             gpu: None,
             tabs: TabStrip::default(),
@@ -2382,16 +2380,13 @@ impl App {
             link_down: false,
             block_hits: crate::chrome::hit::ChromeHitMap::default(),
             prompt_chips_view: None,
-            local_context: std::sync::OnceLock::new(),
             chip_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             selected_block: std::collections::HashMap::new(),
             activity: ActivityMap::default(),
             route: None,
             client_identity: None,
-            next_placeholder: 0,
             local_file_replies: Arc::default(),
-            fleet: None,
             picker: None,
             palette_ui: None,
             dir_picker: None,
@@ -2406,14 +2401,11 @@ impl App {
             app_tabs: crate::tabs::AppTabs::default(),
             provenance,
             unknown_keys,
-            restart_pending: std::collections::BTreeSet::new(),
             settings_error: None,
             slider_drag: None,
             pending_tabs: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_launches: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pairing: Arc::new(parking_lot::Mutex::new(None)),
-            approval: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            remote_identity: None,
             account: AccountState::Unknown,
             account_update: Arc::new(parking_lot::Mutex::new(None)),
             link_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2446,11 +2438,6 @@ impl App {
             system_light: false,
             mouse: MouseState::default(),
             pointer_cell: (0, 0),
-            // Created once: constructing a Clipboard opens an OS connection, and
-            // doing that per copy is both slow and flaky under contention.
-            clipboard: arboard::Clipboard::new()
-                .map_err(|e| tracing::warn!(error = %e, "clipboard unavailable"))
-                .ok(),
             theme_import_error: None,
             themes_view: Vec::new(),
             ime: zest_input::Ime::new(),
@@ -2459,7 +2446,6 @@ impl App {
             settings,
             cli_layer,
             profile,
-            config_watcher: None,
             startup_probe: false,
             no_daemon: false,
             attach_probe: false,
@@ -2509,14 +2495,76 @@ impl App {
         self
     }
 
-    /// What the process should exit with, once the event loop has returned.
+    /// What this window's process should exit with, if it has decided.
     ///
-    /// Zero for every ordinary run; non-zero only when `--screenshot` could not
-    /// write its file. Read by `main` rather than acted on here, so the exit
-    /// runs every destructor on the way out.
+    /// `Some` only when `--screenshot` has written its file, or failed to.
+    /// Read by the process rather than acted on here, so the exit runs every
+    /// destructor on the way out.
     #[must_use]
-    pub fn exit_code(&self) -> u8 {
-        self.exit_code.unwrap_or(0)
+    pub(crate) fn exit_code_raw(&self) -> Option<u8> {
+        self.exit_code
+    }
+
+    pub(crate) fn window_id(&self) -> Option<WindowId> {
+        self.window.as_ref().map(|w| w.id())
+    }
+
+    /// Whether this window's strip holds `addr`, as a tab or a pane — the
+    /// process's routing question for a wakeup that names a session.
+    pub(crate) fn owns(&self, addr: zest_proto::SessionAddr) -> bool {
+        self.tabs.owns(addr)
+    }
+
+    pub(crate) fn take_requests(&mut self) -> WindowRequests {
+        std::mem::take(&mut self.requests)
+    }
+
+    pub(crate) fn route(&self) -> Option<&HostRoute> {
+        self.route.as_ref()
+    }
+
+    pub(crate) fn client_identity(&self) -> Option<Arc<zest_mesh::identity::ClientIdentity>> {
+        self.client_identity.clone()
+    }
+
+    pub(crate) fn restore_enabled(&self) -> bool {
+        self.config.tabs.restore
+    }
+
+    /// Where the window stands now, as the OS reports it; the default when
+    /// there is no window yet.
+    pub(crate) fn current_geometry(&self) -> Geometry {
+        let Some(w) = self.window.as_ref() else { return Geometry::default() };
+        let size = w.inner_size();
+        Geometry {
+            inner_size: Some([size.width, size.height]),
+            position: w.outer_position().ok().map(|p| [p.x, p.y]),
+            maximized: w.is_maximized(),
+        }
+    }
+
+    /// This window's own daemon, for the fleet listing: its host id and
+    /// label from the signed Welcome of the tab it attached. `None` for an
+    /// in-process window, which has no daemon to list.
+    pub(crate) fn local_host_label(&self) -> Option<(zest_proto::HostId, String)> {
+        let tab = self.tabs.active()?;
+        if crate::tabs::is_placeholder(tab.addr) {
+            return None;
+        }
+        let label = match tab.source().origin() {
+            Origin::Daemon { host, .. } => host,
+            Origin::InProcess => return None,
+        };
+        Some((tab.addr.host, label))
+    }
+
+    /// `--screen fleet` showed the screen before the fleet model existed, so
+    /// its account watch found nothing to start; the process calls this once
+    /// the model is up.
+    pub(crate) fn after_fleet_started(&mut self) {
+        if self.screen == AppScreen::Fleet {
+            self.start_account_watch();
+        }
     }
 
     /// Always start a new session, never adopt an idle one.
@@ -2619,9 +2667,8 @@ impl App {
         };
 
         let started = std::time::Instant::now();
-        self.next_placeholder += 1;
         let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
-            self.next_placeholder,
+            self.shared.mint_placeholder(),
         )));
         let wake = wake_for(proxy, Arc::clone(&addr_cell), Arc::clone(&self.activity));
         // The first connection is already open — it was made above so that its
@@ -2801,9 +2848,8 @@ impl App {
             Ok((Box::new(read), Box::new(stream)))
         });
 
-        self.next_placeholder += 1;
         let addr_cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
-            self.next_placeholder,
+            self.shared.mint_placeholder(),
         )));
         let wake = wake_for(proxy, Arc::clone(&addr_cell), Arc::clone(&self.activity));
         let session = crate::remote::RemoteSession::attach(
@@ -2864,33 +2910,6 @@ impl App {
         }
     }
 
-    /// Start watching the config file.
-    ///
-    /// Deliberately not fatal if it fails: the terminal works fine without hot
-    /// reload, and a filesystem that will not support a watch — a network share,
-    /// a container mount — is not a reason to refuse to run.
-    fn watch_config(&mut self) {
-        // `config_file()` first: in portable mode the file is `zesterm.toml`
-        // beside the binary, and watching `config.toml` there would watch a
-        // file nobody writes. The fallback names the file that will exist
-        // once the first save creates it.
-        let Some(path) = zest_config::paths::config_file()
-            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
-        else {
-            return;
-        };
-        let proxy = self.proxy.clone();
-        match zest_config::Watcher::new(&path, move || {
-            let _ = proxy.send_event(Wakeup::ConfigChanged);
-        }) {
-            Ok(w) => {
-                tracing::debug!(path = %path.display(), "watching config");
-                self.config_watcher = Some(w);
-            }
-            Err(e) => tracing::warn!(error = %e, "config hot reload unavailable"),
-        }
-    }
-
     /// Write the selection to the X11/Wayland PRIMARY selection.
     ///
     /// PRIMARY *is* the selection, by definition, which is why writing it on
@@ -2906,7 +2925,8 @@ impl App {
     #[cfg(all(unix, not(target_os = "macos")))]
     fn set_primary(&mut self, text: String) {
         use arboard::{LinuxClipboardKind, SetExtLinux};
-        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        let mut clipboard = self.shared.clipboard.borrow_mut();
+        let Some(clipboard) = clipboard.as_mut() else { return };
         if let Err(e) = clipboard.set().clipboard(LinuxClipboardKind::Primary).text(text) {
             tracing::debug!(error = %e, "no PRIMARY selection on this session");
         }
@@ -2920,7 +2940,8 @@ impl App {
     #[cfg(all(unix, not(target_os = "macos")))]
     fn primary_text(&mut self) -> Option<String> {
         use arboard::{GetExtLinux, LinuxClipboardKind};
-        let clipboard = self.clipboard.as_mut()?;
+        let mut clipboard = self.shared.clipboard.borrow_mut();
+        let clipboard = clipboard.as_mut()?;
         match clipboard.get().clipboard(LinuxClipboardKind::Primary).text() {
             Ok(t) if !t.is_empty() => Some(t),
             _ => clipboard.get_text().ok().filter(|t| !t.is_empty()),
@@ -2930,11 +2951,12 @@ impl App {
     /// Windows and macOS have no PRIMARY; middle-click reads the clipboard.
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     fn primary_text(&mut self) -> Option<String> {
-        self.clipboard.as_mut()?.get_text().ok().filter(|t| !t.is_empty())
+        self.shared.clipboard.borrow_mut().as_mut()?.get_text().ok().filter(|t| !t.is_empty())
     }
 
     fn set_clipboard(&mut self, text: String) {
-        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        let mut clipboard = self.shared.clipboard.borrow_mut();
+        let Some(clipboard) = clipboard.as_mut() else { return };
         if let Err(e) = clipboard.set_text(text) {
             tracing::warn!(error = %e, "copy failed");
         }
@@ -2946,7 +2968,7 @@ impl App {
     /// clipboard on every keystroke is a syscall per character.
     fn paste_text(&mut self, cmd: &TextCommand) -> Option<String> {
         matches!(cmd, TextCommand::Paste)
-            .then(|| self.clipboard.as_mut()?.get_text().ok())
+            .then(|| self.shared.clipboard.borrow_mut().as_mut()?.get_text().ok())
             .flatten()
     }
 
@@ -3141,12 +3163,6 @@ impl App {
         })
     }
 
-    /// A fresh placeholder address.
-    fn next_placeholder(&mut self) -> u64 {
-        self.next_placeholder += 1;
-        self.next_placeholder
-    }
-
     /// A closure a worker thread can post a wakeup through.
     fn wakeup_sender(&self) -> impl Fn(Wakeup) + Send + 'static {
         let proxy = self.proxy.clone();
@@ -3193,7 +3209,7 @@ impl App {
             (addr, cwd)
         };
 
-        let addr = crate::tabs::placeholder_addr(self.next_placeholder());
+        let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
         let editor = crate::editor::EditorPane::loading(addr, origin_addr, path, &cwd);
         self.adopt_pane(crate::tabs::SplitPane::editor(editor));
         self.request_file_for(addr);
@@ -3520,7 +3536,8 @@ impl App {
 
     fn paste(&mut self) {
         let Some(session) = self.tabs.active_source() else { return };
-        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        let mut clipboard = self.shared.clipboard.borrow_mut();
+        let Some(clipboard) = clipboard.as_mut() else { return };
         match clipboard.get_text() {
             Ok(text) if !text.is_empty() => {
                 // The terminal owns the encoding: it knows whether the program
@@ -3539,10 +3556,11 @@ impl App {
     /// Exhaustive on purpose — no `_` arm: a new [`keymap::Action`] that can
     /// be reached from the table without being handled here is a compile
     /// error, not a dead shortcut.
-    fn perform(&mut self, action: keymap::Action, el: &ActiveEventLoop) {
+    fn perform(&mut self, action: keymap::Action) {
         use keymap::Action;
         match action {
             Action::NewTab => self.new_tab(),
+            Action::NewWindow => self.requests.new_window = true,
             Action::CloseTab => {
                 // App tabs first, whichever holds the pane: closing one is
                 // closing a tab (§11's rule), and their chips deliberately
@@ -3565,7 +3583,7 @@ impl App {
                 }
                 if let Some(tab) = self.tabs.active() {
                     let addr = tab.addr;
-                    self.close_tab(addr, false, el);
+                    self.close_tab(addr, false);
                 }
             }
             Action::DetachTab => {
@@ -3576,7 +3594,7 @@ impl App {
                 }
                 if let Some(tab) = self.tabs.active() {
                     let addr = tab.addr;
-                    self.detach_tab(addr, el);
+                    self.detach_tab(addr);
                 }
             }
             Action::ToggleFleetPicker => self.toggle_picker(),
@@ -3661,9 +3679,8 @@ impl App {
 
         let pane = match (&self.route, &self.client_identity) {
             (Some(route), Some(identity)) => {
-                self.next_placeholder += 1;
                 let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
-                    self.next_placeholder,
+                    self.shared.mint_placeholder(),
                 )));
                 let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
                 let command = match route {
@@ -3704,8 +3721,7 @@ impl App {
                 }
             }
             _ => {
-                self.next_placeholder += 1;
-                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
+                let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
                 match Session::spawn(
                     &self.build_spec(None),
@@ -3796,8 +3812,7 @@ impl App {
             &provenance,
             &host_label,
         );
-        self.next_placeholder += 1;
-        let placeholder = crate::tabs::placeholder_addr(self.next_placeholder);
+        let placeholder = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
         self.adopt_pane(crate::tabs::SplitPane::connecting(placeholder, pending, (cols, rows)));
 
         let cell = Arc::new(parking_lot::Mutex::new(placeholder));
@@ -4277,7 +4292,7 @@ impl App {
                     crate::chrome::model::FleetDevicesModel {
                         rows: fleet_device_rows(
                             &self.devices_view,
-                            self.remote_identity.as_ref().map(|i| i.client_id()),
+                            self.shared.remote_identity.borrow().as_ref().map(|i| i.client_id()),
                         ),
                         error: self.devices_error.clone(),
                     }
@@ -4691,7 +4706,7 @@ impl App {
         }
         // `--screen fleet` dispatches before the fleet model exists; the
         // resumed path calls back in once it does.
-        let Some(fleet) = self.fleet.as_ref() else { return };
+        let Some(fleet) = self.shared.fleet.get() else { return };
         let update = Arc::clone(&self.account_update);
         let proxy = self.proxy.clone();
         let poke = fleet.watch_account(move || {
@@ -5117,9 +5132,7 @@ impl App {
     /// one exists, else the environment's — the daemon's `machine_label`
     /// order, minus the uname arm this crate has no reason to grow.
     fn local_machine_label(&self) -> String {
-        if let Some(label) = self
-            .fleet
-            .as_ref()
+        if let Some(label) = self.shared.fleet.get()
             .and_then(|f| f.snapshot().into_iter().find(|h| h.local).map(|h| h.label))
         {
             return label;
@@ -5576,7 +5589,7 @@ impl App {
             || self.tabs.len() > 1
     }
 
-    fn mark_chrome_dirty(&mut self) {
+    pub(crate) fn mark_chrome_dirty(&mut self) {
         self.chrome_dirty = true;
         self.chrome_layout = None;
         if let Some(w) = self.window.as_ref() {
@@ -5620,7 +5633,7 @@ impl App {
         }
         // Built before the font borrow below: row construction reads the
         // fleet and the tabs, never the fonts.
-        let hosts_searched = self.fleet.as_ref().map_or(0, |f| f.snapshot().len());
+        let hosts_searched = self.shared.fleet.get().map_or(0, |f| f.snapshot().len());
         let anim = self.anim_phase();
         let caret_on = anim.caret_on;
         let early_geometry = self.window.as_ref().map(|w| {
@@ -5800,7 +5813,7 @@ impl App {
             (
                 serde_json::to_value(&self.settings).unwrap_or(serde_json::Value::Null),
                 self.provenance.clone(),
-                self.restart_pending.clone(),
+                self.shared.restart_pending.borrow().clone(),
                 self.settings_error.clone(),
                 self.unknown_keys.clone(),
                 // The rail's visible categories — computed outside the &mut
@@ -5967,9 +5980,7 @@ impl App {
         // holds the grid area — the Settings tab's exact discipline: inputs
         // gathered before the &mut borrow of the tab state.
         let profiles_inputs = self.profiles_tab_active().then(|| {
-            let hosts: Vec<(String, bool, bool)> = self
-                .fleet
-                .as_ref()
+            let hosts: Vec<(String, bool, bool)> = self.shared.fleet.get()
                 .map(|f| {
                     f.snapshot()
                         .into_iter()
@@ -6131,12 +6142,12 @@ impl App {
 
         // Built before the font borrow below: these read tabs, fleet and the
         // filesystem, never the fonts.
-        let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let fleet_hosts = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
         // Retained beside the model it feeds: the fleet screen's hit map
         // carries card indices, and they must resolve against the snapshot
         // the cards were built from, not a fresher one.
         self.fleet_view = fleet_hosts.clone();
-        self.devices_view = self.fleet.as_ref().map(|f| f.devices()).unwrap_or_default();
+        self.devices_view = self.shared.fleet.get().map(|f| f.devices()).unwrap_or_default();
         // Same retention rule for the theme gallery: card index i must mean
         // the same theme at click time that it meant at draw time.
         self.themes_view = crate::themes::ids();
@@ -6516,7 +6527,6 @@ impl App {
         region: HitRegion,
         button: MouseButton,
         state: ElementState,
-        el: &ActiveEventLoop,
     ) {
         if state != ElementState::Pressed {
             return;
@@ -6570,13 +6580,13 @@ impl App {
             (HitRegion::ApprovalApprove, MouseButton::Left) => self.decide_approval(true),
             (HitRegion::ApprovalDeny, MouseButton::Left) => self.decide_approval(false),
             (HitRegion::ConfirmClose, MouseButton::Left) => {
-                self.answer_confirm_close(Some(true), el);
+                self.answer_confirm_close(Some(true));
             }
             (HitRegion::ConfirmDetach, MouseButton::Left) => {
-                self.answer_confirm_close(Some(false), el);
+                self.answer_confirm_close(Some(false));
             }
             (HitRegion::ConfirmCancel, MouseButton::Left) => {
-                self.answer_confirm_close(None, el);
+                self.answer_confirm_close(None);
             }
             // The panel and its scrim swallow, and deliberately do not
             // dismiss: one of the three answers destroys a running command,
@@ -6610,7 +6620,7 @@ impl App {
                     self.close_profiles_tab();
                     return;
                 }
-                self.close_tab(addr, false, el);
+                self.close_tab(addr, false);
             }
             (HitRegion::NewTab, MouseButton::Left) => {
                 // The + opens the launcher menu (design §1) — there is no
@@ -6638,7 +6648,7 @@ impl App {
             }
             (HitRegion::PalettePill, MouseButton::Left)
             | (HitRegion::SidebarSearch, MouseButton::Left) => {
-                self.perform(keymap::Action::ToggleFleetPicker, el);
+                self.perform(keymap::Action::ToggleFleetPicker);
             }
             (HitRegion::FleetFooter, MouseButton::Left) => {
                 // A toggle: the button that opened the fleet view is the most
@@ -6674,7 +6684,7 @@ impl App {
                 // holds becomes a theme. Parse failures land on the card
                 // itself — a click with feedback nowhere reads as dead UI,
                 // which is exactly what this card spent its life as.
-                let outcome = match self.clipboard.as_mut() {
+                let outcome = match self.shared.clipboard.borrow_mut().as_mut() {
                     // No OS clipboard connection at all is a different fact
                     // from an empty one — the user cannot fix it by copying.
                     None => Err("the clipboard is unavailable in this session".to_string()),
@@ -6899,7 +6909,7 @@ impl App {
                 }
                 let action = self.picker.as_ref().and_then(|p| p.actions.get(i).cloned());
                 if let Some(action) = action {
-                    self.run_picker_action(action, el, false);
+                    self.run_picker_action(action, false);
                 } else {
                     self.mark_chrome_dirty();
                 }
@@ -6915,7 +6925,7 @@ impl App {
                 if let Some(p) = self.palette_ui.as_mut() {
                     p.selected = i;
                 }
-                self.run_palette_selection(el);
+                self.run_palette_selection();
             }
             (HitRegion::PaletteScrim, MouseButton::Left) => {
                 self.palette_ui = None;
@@ -7136,7 +7146,7 @@ impl App {
                         // takes. Anything else and the drawn button quietly
                         // skips `persist_tabs`, so every launch would forget
                         // the tab set — a bug that only appears next time.
-                        CaptionButton::Close => self.request_close(el),
+                        CaptionButton::Close => self.request_close(),
                     }
                 }
             }
@@ -7151,20 +7161,18 @@ impl App {
         }
     }
 
-    /// End the session set and exit, exactly as `CloseRequested` does.
-    fn request_close(&mut self, el: &ActiveEventLoop) {
-        // Remember the set first: dropping is the detach, and what was open is
-        // what the next launch reopens.
-        self.persist_tabs();
-        self.tabs.clear();
-        el.exit();
+    /// Ask the process to close this window, exactly as `CloseRequested`
+    /// does. The process remembers the set first; dropping the window is the
+    /// detach of every tab, and the last window closing is what exits.
+    pub(crate) fn request_close(&mut self) {
+        self.requests.close = true;
     }
 
-    /// Remember what this window is showing, so the next launch can pick it
-    /// back up instead of guessing (#23's adopt bug, retired).
-    fn persist_tabs(&self) {
+    /// What this window is showing, for the file the next launch reopens
+    /// from (#23's adopt bug, retired). `None` when restore is off.
+    pub(crate) fn saved_window(&self) -> Option<SavedWindow> {
         if !self.config.tabs.restore {
-            return;
+            return None;
         }
         // Which tabs, and which of them leads the restore, is the strip's
         // call (`persistable` keeps the filter and the active-index remap
@@ -7180,7 +7188,7 @@ impl App {
                 title: tab.source().terminal().lock().title().trim().to_string(),
             })
             .collect();
-        crate::tabs_state::save(&crate::tabs_state::SavedTabs::new(active, tabs));
+        Some(SavedWindow { active, tabs, geometry: self.current_geometry() })
     }
 
     /// Toggle the fleet picker (⌘K, and the picker rows' Escape hatch).
@@ -7230,13 +7238,13 @@ impl App {
 
     /// Run the palette's selected command: close first, then perform —
     /// the command may itself open an overlay (settings, the picker).
-    fn run_palette_selection(&mut self, el: &ActiveEventLoop) {
+    fn run_palette_selection(&mut self) {
         let action =
             self.palette_ui.as_ref().and_then(|p| p.actions.get(p.selected).copied()).flatten();
         let Some(action) = action else { return };
         self.palette_ui = None;
         self.mark_chrome_dirty();
-        self.perform(action, el);
+        self.perform(action);
     }
 
     /// Open the Settings tab, or activate the one that exists (⌘, — §11:
@@ -7630,7 +7638,7 @@ impl App {
             Ok(()) => {
                 self.settings_error = None;
                 if zest_config::invalidate::class_of(&key) == zest_config::Invalidation::Restart {
-                    self.restart_pending.insert(key);
+                    self.shared.restart_pending.borrow_mut().insert(key);
                 }
                 self.reload_config();
             }
@@ -8718,7 +8726,7 @@ impl App {
         }
 
         // Sessions and hosts, from the fleet.
-        let fleet_hosts = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let fleet_hosts = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
         let mut session_rows = Vec::new();
         let mut host_rows = Vec::new();
         for host in &fleet_hosts {
@@ -8871,7 +8879,7 @@ impl App {
     /// says what to run and leaves open where. That arm re-opens the picker
     /// holding the command (see [`Pending`]), so the second half is the next
     /// row picked rather than a second overlay.
-    fn run_picker_action(&mut self, action: PickerAction, el: &ActiveEventLoop, shift: bool) {
+    fn run_picker_action(&mut self, action: PickerAction, shift: bool) {
         // Anything pending rides exactly one picker choice: a host or session
         // row carries it, anything else abandons it (and dismissing the picker
         // abandons it structurally — it lives on the picker's own state).
@@ -8907,7 +8915,7 @@ impl App {
             PickerAction::Perform(action) => {
                 self.picker = None;
                 self.mark_chrome_dirty();
-                self.perform(action, el);
+                self.perform(action);
                 return;
             }
             PickerAction::ShowScreen(screen) => {
@@ -8980,7 +8988,7 @@ impl App {
                 if let Some(Pending::Profile(name)) = &pending {
                     let name = name.clone();
                     let meta = crate::launcher::profile_meta(&self.settings, &name);
-                    let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+                    let fleet = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
                     // The picked host's display name, for the provenance line
                     // — the profile itself pinned none (that is what ask_host
                     // means).
@@ -9017,8 +9025,7 @@ impl App {
     /// The fleet's display name for `host`, falling back to the address being
     /// dialled — which still says *where* a pane is headed.
     fn host_label_for(&self, host: zest_proto::HostId, route: &HostRoute) -> String {
-        self.fleet
-            .as_ref()
+        self.shared.fleet.get()
             .map(|f| f.snapshot())
             .and_then(|hosts| hosts.iter().find(|e| e.host == host).map(|e| e.label.clone()))
             .unwrap_or_else(|| match route {
@@ -9060,7 +9067,7 @@ impl App {
 
     /// The account's relay origin, when there is one to reach through.
     fn relay_origin(&self) -> Option<String> {
-        self.fleet.as_ref().and_then(|f| f.relay_origin())
+        self.shared.fleet.get().and_then(|f| f.relay_origin())
     }
 
     /// The stored identity for hosts that are not this machine, loaded on
@@ -9068,22 +9075,22 @@ impl App {
     /// path for people who never leave loopback. Falls back to a throwaway
     /// key with a loud log, same trade as `--attach`.
     fn remote_identity(&mut self) -> Option<Arc<zest_mesh::identity::ClientIdentity>> {
-        if self.remote_identity.is_none() {
+        let mut cached = self.shared.remote_identity.borrow_mut();
+        if cached.is_none() {
             let store = zest_mesh::keystore::OsKeyStore;
             match zest_mesh::identity::ClientIdentity::load_or_create(&store) {
-                Ok(i) => self.remote_identity = Some(Arc::new(i)),
+                Ok(i) => *cached = Some(Arc::new(i)),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         "no credential store; using a throwaway key, the far host \
                          will ask for approval every time"
                     );
-                    self.remote_identity =
-                        zest_mesh::identity::ClientIdentity::generate().ok().map(Arc::new);
+                    *cached = zest_mesh::identity::ClientIdentity::generate().ok().map(Arc::new);
                 }
             }
         }
-        self.remote_identity.clone()
+        cached.clone()
     }
 
     /// The stored identity, or a refusal — never a throwaway.
@@ -9099,7 +9106,7 @@ impl App {
         {
             Ok(i) => {
                 let identity = Arc::new(i);
-                self.remote_identity = Some(Arc::clone(&identity));
+                *self.shared.remote_identity.borrow_mut() = Some(Arc::clone(&identity));
                 Ok(identity)
             }
             Err(e) => Err(format!("no credential store to keep the device key in ({e})")),
@@ -9165,7 +9172,7 @@ impl App {
             visible_approval(&queue, std::time::Instant::now()).map(|i| queue.remove(i))
         };
         let Some(request) = taken else { return };
-        if let Some(fleet) = self.fleet.as_ref() {
+        if let Some(fleet) = self.shared.fleet.get() {
             fleet.decide_pairing(request.client, approve);
         } else {
             tracing::warn!("no fleet model; the pairing decision has nowhere to go");
@@ -9223,9 +9230,8 @@ impl App {
         let command =
             if local { self.config.shell.clone().unwrap_or_default() } else { String::new() };
 
-        self.next_placeholder += 1;
         let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
-            self.next_placeholder,
+            self.shared.mint_placeholder(),
         )));
         let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
         let pending = Arc::clone(&self.pending_tabs);
@@ -9239,8 +9245,7 @@ impl App {
         // approval is owed.
         let pending_host = expect_host
             .and_then(|h| {
-                self.fleet
-                    .as_ref()
+                self.shared.fleet.get()
                     .map(|f| f.snapshot())
                     .and_then(|hosts| hosts.iter().find(|e| e.host == h).map(|e| e.label.clone()))
             })
@@ -9398,7 +9403,7 @@ impl App {
     /// rather than failing, which is worse — a row that launches something
     /// plausible and wrong.
     fn launch_published(&mut self, host: zest_proto::HostId, name: &str) {
-        let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let fleet = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
         let Some(entry) = fleet.iter().find(|h| h.host == host) else {
             // `host_id` rather than `host`: the machine is gone, so there is no
             // label to give — and a field that means an id here and a label
@@ -9469,7 +9474,7 @@ impl App {
             }
             return;
         }
-        let fleet = self.fleet.as_ref().map(|f| f.snapshot()).unwrap_or_default();
+        let fleet = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
         let target = crate::launch::resolve_host(
             meta.host.as_deref(),
             &fleet,
@@ -9550,9 +9555,7 @@ impl App {
         // reason the launcher's group keys carry a `HostId`. An unroutable
         // target has no id to match, and no far shell to know either.
         let far_shell = match &target {
-            crate::launch::HostTarget::Remote { host, .. } => self
-                .fleet
-                .as_ref()
+            crate::launch::HostTarget::Remote { host, .. } => self.shared.fleet.get()
                 .map(|f| f.snapshot())
                 .unwrap_or_default()
                 .iter()
@@ -9572,8 +9575,7 @@ impl App {
             &provenance,
             &host_label,
         );
-        self.next_placeholder += 1;
-        let placeholder = crate::tabs::placeholder_addr(self.next_placeholder);
+        let placeholder = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
         let hint = match &target {
             crate::launch::HostTarget::Remote { route, .. } => route.dial_hint(),
             _ => None,
@@ -9699,9 +9701,8 @@ impl App {
 
         match (&self.route, &self.client_identity) {
             (Some(route), Some(client)) => {
-                self.next_placeholder += 1;
                 let cell = Arc::new(parking_lot::Mutex::new(crate::tabs::placeholder_addr(
-                    self.next_placeholder,
+                    self.shared.mint_placeholder(),
                 )));
                 let wake = wake_for(&self.proxy, Arc::clone(&cell), Arc::clone(&self.activity));
                 // Empty means the host's default shell — for a remote host,
@@ -9757,8 +9758,7 @@ impl App {
             // in-process pty. Degraded but honest — the tab works, it just
             // cannot outlive the window.
             _ => {
-                self.next_placeholder += 1;
-                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
+                let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
                 let mut spec = self.build_spec(command.as_deref());
                 // The profile's starting_directory, resolved by the machine
@@ -9788,14 +9788,14 @@ impl App {
 
         self.after_activation();
         self.relayout_grid();
-        self.persist_tabs();
+        self.requests.persist = true;
     }
 
     /// Close one tab: local sessions die, remote ones are only let go of.
     ///
     /// `already_exited` marks the child as gone (a `TabExited` wakeup), where
     /// there is nothing left to kill. The last tab closing closes the window.
-    fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool, el: &ActiveEventLoop) {
+    fn close_tab(&mut self, addr: zest_proto::SessionAddr, already_exited: bool) {
         // The Settings tab has no session to kill or detach; closing it is
         // dropping its state and returning the keyboard (§11).
         if addr == crate::tabs::settings_addr() {
@@ -9805,8 +9805,8 @@ impl App {
         // Decided *before* the tab leaves the strip: a confirm that has
         // already taken it out has nothing left to cancel back to.
         match self.close_decision(addr, already_exited) {
-            CloseDecision::Close => self.finish_close_tab(addr, already_exited, false, el),
-            CloseDecision::Detach => self.finish_close_tab(addr, already_exited, true, el),
+            CloseDecision::Close => self.finish_close_tab(addr, already_exited, false),
+            CloseDecision::Detach => self.finish_close_tab(addr, already_exited, true),
             CloseDecision::Ask(question) => {
                 // The one-overlay rule (`toggle_picker` and friends): a
                 // question drawn over an open menu is a question about a tab
@@ -9934,15 +9934,15 @@ impl App {
 
     /// Answer the confirm. `Some(true)` closes, `Some(false)` detaches,
     /// `None` cancels; the modal empties either way.
-    fn answer_confirm_close(&mut self, close: Option<bool>, el: &ActiveEventLoop) {
+    fn answer_confirm_close(&mut self, close: Option<bool>) {
         let Some(q) = self.confirm_close.take() else { return };
         self.mark_chrome_dirty();
         match close {
             // The tab may have gone while the question was up (its shell
             // exited, or another path closed it); `finish_close_tab` no-ops on
             // an address the strip no longer holds.
-            Some(true) => self.finish_close_tab(q.addr, false, false, el),
-            Some(false) => self.finish_close_tab(q.addr, false, true, el),
+            Some(true) => self.finish_close_tab(q.addr, false, false),
+            Some(false) => self.finish_close_tab(q.addr, false, true),
             None => {}
         }
     }
@@ -9952,7 +9952,7 @@ impl App {
     /// The whole mechanism is `Drop`: `RemoteSession`'s destructor sends
     /// `Detach` and joins its writer, which is also what closing the window
     /// has always done to every tab.
-    fn detach_tab(&mut self, addr: zest_proto::SessionAddr, el: &ActiveEventLoop) {
+    fn detach_tab(&mut self, addr: zest_proto::SessionAddr) {
         if addr == crate::tabs::settings_addr() {
             // An app tab has no session; closing it is the only thing that
             // means anything, and ⌘W already does that.
@@ -9970,7 +9970,7 @@ impl App {
             self.refuse_detach(addr, title);
             return;
         }
-        self.finish_close_tab(addr, false, true, el);
+        self.finish_close_tab(addr, false, true);
     }
 
     /// Take the tab out of the strip and let go of its session — killing it
@@ -9980,7 +9980,6 @@ impl App {
         addr: zest_proto::SessionAddr,
         already_exited: bool,
         detach: bool,
-        el: &ActiveEventLoop,
     ) {
         let was_active = self.tabs.is_active(addr);
         let Some(tab) = self.tabs.close(addr) else { return };
@@ -9997,9 +9996,12 @@ impl App {
             tab.kill();
         }
 
-        self.persist_tabs();
+        self.requests.persist = true;
         if self.tabs.is_empty() {
-            el.exit();
+            // The last tab closing closes the window — the old single-session
+            // behavior — and the process decides whether that was the last
+            // window.
+            self.request_close();
             return;
         }
         if was_active {
@@ -10085,7 +10087,7 @@ impl App {
             }
         }
         self.mark_chrome_dirty();
-        self.persist_tabs();
+        self.requests.persist = true;
     }
 
     /// Recompute the grid after the strip's extent may have changed —
@@ -10503,7 +10505,7 @@ impl App {
         // wrong answer confidently drawn (#464).
         let session = tab.focused_session()?;
         let addr = tab.focused_addr();
-        let context = self.fleet.as_ref().and_then(|f| f.session_context(addr)).or_else(|| {
+        let context = self.shared.fleet.get().and_then(|f| f.session_context(addr)).or_else(|| {
             // An in-process session has no daemon listing to carry its
             // context — but this window *is* its host, so it probes like one
             // (#434): the same engine, the same filesystem, the same trust
@@ -10514,7 +10516,7 @@ impl App {
             if !matches!(session.origin(), crate::source::Origin::InProcess) {
                 return None;
             }
-            let engine = self.local_context.get_or_init(|| {
+            let engine = self.shared.local_context.get_or_init(|| {
                 // A no-op change callback on purpose: the chip row is
                 // rebuilt per frame and the cursor blink repaints anyway,
                 // so an async answer (the dirty star) surfaces within a
@@ -10634,7 +10636,7 @@ impl App {
                 // The link, this window's own fact (#432): shown only when
                 // there is a link worth naming — loopback would be a "local
                 // 0.0 ms" chip, noise wearing a number.
-                "link" => self.fleet.as_ref().and_then(|f| f.link_of(addr.host)).and_then(
+                "link" => self.shared.fleet.get().and_then(|f| f.link_of(addr.host)).and_then(
                     |(reach, rtt)| {
                         let name = match reach {
                             zest_mesh::Reachability::Loopback => return None,
@@ -10740,7 +10742,7 @@ impl App {
         );
     }
 
-    fn redraw(&mut self) {
+    pub(crate) fn redraw(&mut self) {
         let insets = self.insets();
         self.refresh_chrome();
         // Extracted under its own short lock, before the borrows below: the
@@ -11823,11 +11825,13 @@ impl App {
     }
 }
 
-impl ApplicationHandler<Wakeup> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
+impl App {
+    /// Create this window's OS window, its fonts, its GPU surface and its
+    /// first tab. Everything the old single-window `resumed` did for the
+    /// window; what it did for the *process* — the config watcher, the fleet
+    /// model — lives in [`crate::process::Process`] now.
+    pub(crate) fn open_window(&mut self, el: &ActiveEventLoop, plan: &WindowSpec) {
+        debug_assert!(self.window.is_none(), "a window opens once");
 
         let t0 = std::time::Instant::now();
 
@@ -11852,9 +11856,13 @@ impl ApplicationHandler<Wakeup> for App {
         // becoming exactly 100×30. Those are not the same — the insets take
         // their share, so the default window is nearer 98×27 — and that gap is
         // pre-existing rather than introduced here, but it is a gap: see #308.
-        let sized_from_cells = ["window.columns", "window.rows"]
-            .iter()
-            .any(|k| self.provenance.contains_key(*k));
+        //
+        // A remembered size outranks the setting: a person resized *that*
+        // window, and the setting describes windows that have no memory yet.
+        let sized_from_cells = plan.geometry.inner_size.is_none()
+            && ["window.columns", "window.rows"]
+                .iter()
+                .any(|k| self.provenance.contains_key(*k));
         let early = (sized_from_cells && self.screenshot.is_none())
             .then(|| self.window_size_in_cells(el))
             .flatten();
@@ -11869,16 +11877,23 @@ impl ApplicationHandler<Wakeup> for App {
             .with_transparent(self.config.opacity < 1.0)
             .with_visible(false);
         let mut attrs = platform::identify(attrs);
-        attrs = match (self.screenshot.as_ref(), early.as_ref()) {
+        attrs = match (self.screenshot.as_ref(), plan.geometry.inner_size, early.as_ref()) {
             // `--screenshot-size` is an explicit instruction from this
             // invocation and outranks a stored preference.
-            (Some(shot), _) => attrs
+            (Some(shot), _, _) => attrs
                 .with_inner_size(winit::dpi::LogicalSize::new(shot.size.0, shot.size.1)),
-            (None, Some(sized)) => {
+            (None, Some([w, h]), _) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
+            (None, None, Some(sized)) => {
                 attrs.with_inner_size(winit::dpi::PhysicalSize::new(sized.width, sized.height))
             }
-            (None, None) => attrs.with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0)),
+            (None, None, None) => attrs.with_inner_size(winit::dpi::LogicalSize::new(960.0, 600.0)),
         };
+        if let Some([x, y]) = plan.geometry.position {
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
+        if plan.geometry.maximized {
+            attrs = attrs.with_maximized(true);
+        }
         // Not borderless (issue #9, WS-C2: borderless costs traffic lights,
         // native fullscreen, Sequoia tiling and accessibility). A transparent
         // full-size titlebar keeps all of that, and the tab strip is what
@@ -12039,61 +12054,52 @@ impl ApplicationHandler<Wakeup> for App {
         // an in-process pty. This slot -- after the window is visible and the
         // first paint is measured, before GPU init -- is the one ADR-007 names,
         // and nothing above line 649 may move below it.
-        // Restore replaces adoption: reopen what this window was showing
-        // last time. The synchronous slot fits exactly one attach, and only
-        // a local one keeps the startup budget honest — everything else
-        // arrives in the background.
-        let restore = (!self.new_session
-            && !self.no_daemon
-            && self.attach_addr.is_none()
-            && self.config.tabs.restore)
-            .then(crate::tabs_state::load)
-            .flatten();
-        let (restore_active, restore_rest) = match restore {
-            Some(saved) => {
-                let mut tabs = saved.tabs;
-                let sync = if tabs.get(saved.active).is_some_and(|t| t.local) {
-                    Some(saved.active)
-                } else {
-                    // A remote active tab would put a network dial on the
-                    // startup path; restore it in the background and lead
-                    // with the first local one instead.
-                    tabs.iter().position(|t| t.local)
-                };
-                match sync {
-                    Some(i) => {
-                        let lead = tabs.remove(i);
-                        (Some(lead.addr), tabs)
-                    }
-                    None => (None, tabs),
-                }
-            }
-            None => (None, Vec::new()),
+        // The synchronous slot fits exactly one attach, and only a local one
+        // keeps the startup budget honest — everything else arrives in the
+        // background. Which tab that is was the process's call
+        // (`windows_state::split_lead`).
+        let (restore_active, restore_rest): (
+            Option<zest_proto::SessionAddr>,
+            &[crate::tabs_state::SavedTab],
+        ) = match &plan.first_tab {
+            FirstTab::Attach { restore, rest } => (*restore, rest.as_slice()),
+            FirstTab::Inherit { .. } => (None, &[]),
         };
 
-        let mut tab: Tab = match self.attach_to_daemon(cols, rows, &proxy, restore_active) {
-            Some(tab) => tab,
-            None => {
-                self.next_placeholder += 1;
-                let addr = crate::tabs::placeholder_addr(self.next_placeholder);
-                let cell = Arc::new(parking_lot::Mutex::new(addr));
-                let session = Session::spawn(
-                    &spec,
-                    PtySize::new(cols, rows),
-                    self.config.scrollback,
-                    wake_for(&proxy, cell, Arc::clone(&self.activity)),
-                )
-                .expect("spawn shell");
-                tracing::debug!(
-                    elapsed_ms = t0.elapsed().as_millis(),
-                    cols,
-                    rows,
-                    "shell spawned in-process"
-                );
-                Tab::in_process(session, addr, (cols, rows))
+        let mut tab: Option<Tab> = match &plan.first_tab {
+            // Opened from another window: its route and identity are already
+            // proven, so the shell comes through the ordinary ⌘T path once
+            // the surface exists to size it — below, after the GPU.
+            FirstTab::Inherit { route, identity } => {
+                self.route = Some(route.clone());
+                self.client_identity = identity.clone();
+                None
             }
+            FirstTab::Attach { .. } => match self.attach_to_daemon(cols, rows, &proxy, restore_active) {
+                Some(tab) => Some(tab),
+                None => {
+                    let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
+                    let cell = Arc::new(parking_lot::Mutex::new(addr));
+                    let session = Session::spawn(
+                        &spec,
+                        PtySize::new(cols, rows),
+                        self.config.scrollback,
+                        wake_for(&proxy, cell, Arc::clone(&self.activity)),
+                    )
+                    .expect("spawn shell");
+                    tracing::debug!(
+                        elapsed_ms = t0.elapsed().as_millis(),
+                        cols,
+                        rows,
+                        "shell spawned in-process"
+                    );
+                    Some(Tab::in_process(session, addr, (cols, rows)))
+                }
+            },
         };
-        tab.source().terminal().lock().set_palette(self.palette.clone());
+        if let Some(tab) = tab.as_ref() {
+            tab.source().terminal().lock().set_palette(self.palette.clone());
+        }
 
         // The surface is NOT sRGB (the resolve pass encodes), so the clear value
         // is written verbatim -- pass the theme background already in sRGB.
@@ -12121,9 +12127,11 @@ impl ApplicationHandler<Wakeup> for App {
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
         let (gpu_cols, gpu_rows) = insets.grid_dims(metrics, gpu.config.width, gpu.config.height);
-        if (gpu_cols, gpu_rows) != (cols, rows) {
-            tab.source().resize(gpu_cols, gpu_rows);
-            tab.sized = (gpu_cols, gpu_rows);
+        if let Some(tab) = tab.as_mut() {
+            if (gpu_cols, gpu_rows) != (cols, rows) {
+                tab.source().resize(gpu_cols, gpu_rows);
+                tab.sized = (gpu_cols, gpu_rows);
+            }
         }
 
         self.fonts = Some(fonts);
@@ -12131,7 +12139,9 @@ impl ApplicationHandler<Wakeup> for App {
         // Everything downstream of this line works the same whether the shell
         // is in this process or on another machine, which is the property the
         // abstraction exists for.
-        self.tabs.push(tab);
+        if let Some(tab) = tab {
+            self.tabs.push(tab);
+        }
         // The rest of the remembered set, off the startup path. Parallel
         // workers, so one sleeping host cannot serialize the others behind
         // its timeout; arrival order may differ from the saved order, which
@@ -12152,6 +12162,9 @@ impl ApplicationHandler<Wakeup> for App {
             self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false, None);
         }
         self.window = Some(window);
+        if matches!(plan.first_tab, FirstTab::Inherit { .. }) {
+            self.open_shell_tab(None, None, None);
+        }
 
         // `--screen`: dispatched here — window and session exist, the first
         // real frame has not been built — so the frame a screenshot captures
@@ -12234,88 +12247,19 @@ impl ApplicationHandler<Wakeup> for App {
             "zesterm ready"
         );
 
-        // Last, and off the measured path: watching costs a thread and an
-        // inotify/ReadDirectoryChanges handle, and none of it is needed to show
-        // the first frame.
-        self.watch_config();
-
-        // The fleet view, also off the measured path. The window's own daemon
-        // is synthesized into the listing from its signed Welcome (`addr.host`
-        // of the tab it attached) — a default daemon is mDNS-invisible, so
-        // discovery alone would omit the one host that certainly exists.
-        let local = self.tabs.active().and_then(|tab| {
-            if crate::tabs::is_placeholder(tab.addr) {
-                return None;
-            }
-            let label = match tab.source().origin() {
-                Origin::Daemon { host, .. } => host,
-                Origin::InProcess => return None,
-            };
-            Some((tab.addr.host, label))
-        });
-        let fleet = crate::fleet::FleetModel::start(self.proxy.clone(), local);
-        if let Some(route) = self.route.clone() {
-            // One watching connection to the window's daemon keeps its
-            // session list fresh through pushes — and carries the approval
-            // queue, whose pushes raise the modal.
-            let approval = Arc::clone(&self.approval);
-            let proxy = self.proxy.clone();
-            fleet.watch(
-                move || route.dialer(),
-                move |event| {
-                    let proxy = proxy.clone();
-                    let post: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                        let _ = proxy.send_event(Wakeup::PairingChanged);
-                    });
-                    match event {
-                        crate::fleet::PairingEvent::Requested {
-                            client,
-                            label,
-                            remote,
-                            code,
-                            expires_in_secs,
-                        } => arm_approval_request(
-                            &approval,
-                            client,
-                            label,
-                            remote,
-                            code,
-                            expires_in_secs,
-                            post,
-                        ),
-                        // Someone answered — at the daemon's stdin, in
-                        // another window — or the device gave up. Either
-                        // way there is nothing left to decide.
-                        crate::fleet::PairingEvent::Resolved { client } => {
-                            let mut queue = approval.lock();
-                            let before = queue.len();
-                            queue.retain(|r| r.client != client);
-                            if queue.len() != before {
-                                drop(queue);
-                                post();
-                            }
-                        }
-                    }
-                },
-            );
-        }
-        self.fleet = Some(fleet);
-        // `--screen fleet` showed the screen before the fleet model existed,
-        // so its start_account_watch found nothing to start; catch up now.
-        if self.screen == AppScreen::Fleet {
-            self.start_account_watch();
-        }
     }
 
-    /// A wakeup from the parser thread.
-    fn user_event(&mut self, el: &ActiveEventLoop, event: Wakeup) {
+    /// A wakeup from a parser thread, a worker or a watcher, already routed
+    /// to this window by the process.
+    pub(crate) fn handle_wakeup(&mut self, event: Wakeup) {
         match event {
             Wakeup::Redraw => {
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
             }
-            Wakeup::Exited => el.exit(),
+            // Routed to the process, which is what exits (`process::route`).
+            Wakeup::Exited => {}
             Wakeup::Attention(addr, cause) => self.note_attention(addr, cause),
             Wakeup::SignalChanged => self.mark_chrome_dirty(),
             // The active source parked the answer; a stale or unsolicited
@@ -12475,15 +12419,11 @@ impl ApplicationHandler<Wakeup> for App {
                         w.request_redraw();
                     }
                 }
-                self.persist_tabs();
+                self.requests.persist = true;
             }
-            // The picker's data moved. Consume the latch; the chrome decides
-            // whether anything visible depends on it.
-            Wakeup::FleetChanged => {
-                if self.fleet.as_ref().is_some_and(|f| f.take_changed()) {
-                    self.mark_chrome_dirty();
-                }
-            }
+            // The latch is the process's to consume (`process::route`): it
+            // clears once, and the process tells every window.
+            Wakeup::FleetChanged => {}
             // An account worker settled; adopt what it parked. The fleet
             // header is part of the cached chrome, so this is a rebuild.
             Wakeup::AccountChanged => {
@@ -12556,7 +12496,7 @@ impl ApplicationHandler<Wakeup> for App {
                     self.mark_chrome_dirty();
                     return;
                 }
-                self.close_tab(addr, true, el);
+                self.close_tab(addr, true);
             }
             // A pinned tab's host answered and its session no longer exists.
             // The prompt itself travels in the shared pairing cell; this
@@ -12601,7 +12541,7 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    pub(crate) fn handle_window_event(&mut self, event: WindowEvent) {
         match event {
             // Detach, never close. The session keeps running in the daemon and
             // can be picked up from another window or another device -- which
@@ -12611,7 +12551,7 @@ impl ApplicationHandler<Wakeup> for App {
             // Dropping the session is what sends the Detach: a destructor
             // covers every way this process can end, including the ones no
             // `CloseRequested` arm would see.
-            WindowEvent::CloseRequested => self.request_close(el),
+            WindowEvent::CloseRequested => self.request_close(),
 
             WindowEvent::Resized(size) => self.resize_surface(size.width, size.height),
 
@@ -12742,7 +12682,7 @@ impl ApplicationHandler<Wakeup> for App {
                 if self.confirm_close.is_some() {
                     use winit::keyboard::{Key, NamedKey};
                     match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => self.answer_confirm_close(None, el),
+                        Key::Named(NamedKey::Escape) => self.answer_confirm_close(None),
                         // Enter takes the answer that destroys nothing, and
                         // takes it only when there is one — a reflexive Enter
                         // after ⌘W must never be the thing that kills a
@@ -12752,7 +12692,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 c.choices == crate::chrome::model::ConfirmChoices::DetachOrClose
                             }) =>
                         {
-                            self.answer_confirm_close(Some(false), el);
+                            self.answer_confirm_close(Some(false));
                         }
                         _ => {}
                     }
@@ -12771,7 +12711,7 @@ impl ApplicationHandler<Wakeup> for App {
                     {
                         self.block_menu = None;
                         self.mark_chrome_dirty();
-                        self.perform(binding.action, el);
+                        self.perform(binding.action);
                         return;
                     }
                     match &event.logical_key {
@@ -12817,7 +12757,7 @@ impl ApplicationHandler<Wakeup> for App {
                     {
                         self.launcher = None;
                         self.mark_chrome_dirty();
-                        self.perform(binding.action, el);
+                        self.perform(binding.action);
                         return;
                     }
                     match &event.logical_key {
@@ -12980,7 +12920,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 .and_then(|p| p.actions.get(p.selected).cloned());
                             if let Some(action) = action {
                                 let shift = self.modifiers.shift_key();
-                                self.run_picker_action(action, el, shift);
+                                self.run_picker_action(action, shift);
                             }
                         }
                         _ => {}
@@ -13172,7 +13112,7 @@ impl ApplicationHandler<Wakeup> for App {
                             self.palette_ui = None;
                         }
                         Key::Named(NamedKey::Enter) => {
-                            self.run_palette_selection(el);
+                            self.run_palette_selection();
                         }
                         Key::Named(NamedKey::ArrowDown) => {
                             if let Some(p) = self.palette_ui.as_mut() {
@@ -13339,7 +13279,7 @@ impl ApplicationHandler<Wakeup> for App {
                             | keymap::Action::PrevTab
                             | keymap::Action::NextTab),
                         ) => {
-                            self.perform(action, el);
+                            self.perform(action);
                             self.mark_chrome_dirty();
                             return;
                         }
@@ -13596,7 +13536,7 @@ impl ApplicationHandler<Wakeup> for App {
                             | keymap::Action::PrevTab
                             | keymap::Action::NextTab),
                         ) => {
-                            self.perform(action, el);
+                            self.perform(action);
                             self.mark_chrome_dirty();
                             return;
                         }
@@ -13834,7 +13774,7 @@ impl ApplicationHandler<Wakeup> for App {
                         return;
                     }
                     if let Some(binding) = keymap::lookup(&event.logical_key, event.physical_key, self.modifiers) {
-                        self.perform(binding.action, el);
+                        self.perform(binding.action);
                     }
                     return;
                 }
@@ -13855,7 +13795,7 @@ impl ApplicationHandler<Wakeup> for App {
                         }),
                     };
                     if swallow {
-                        self.perform(binding.action, el);
+                        self.perform(binding.action);
                         return;
                     }
                 }
@@ -14003,7 +13943,7 @@ impl ApplicationHandler<Wakeup> for App {
                 // the grid for symmetry with CursorMoved.
                 if !self.mouse.is_dragging() {
                     if let Some(region) = self.chrome_hit(self.pointer_pos.0, self.pointer_pos.1) {
-                        self.on_chrome_click(region, button, state, el);
+                        self.on_chrome_click(region, button, state);
                         return;
                     }
                 }
@@ -14397,7 +14337,7 @@ impl ApplicationHandler<Wakeup> for App {
         }
     }
 
-    fn new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
+    pub(crate) fn on_new_events(&mut self, cause: winit::event::StartCause) {
         // The animation clock fired: one repaint, then `about_to_wait`
         // schedules the next tick — or nothing, if the animator's condition
         // cleared in between. That is the settle guarantee in one place.
@@ -14412,32 +14352,68 @@ impl ApplicationHandler<Wakeup> for App {
         }
     }
 
-    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        let now = std::time::Instant::now();
+    /// When this window next needs the loop to wake — a due screenshot, or
+    /// the animation clock's one deadline. The process merges every
+    /// window's answer into the loop's single control flow.
+    pub(crate) fn next_wake(&self, now: std::time::Instant) -> NextWake {
         let shot = self.screenshot_at.map(|at| at.saturating_duration_since(now));
-        match next_wake(shot, self.anim_deadline()) {
-            // Drawn from here rather than asked for through the window,
-            // because in screenshot mode there is no window to ask: it is
-            // never made visible, so the OS never sends it a paint and
-            // `new_events`' `request_redraw` reaches nothing (#255).
-            NextWake::CaptureNow => self.redraw(),
-            NextWake::After(delay) => el.set_control_flow(ControlFlow::WaitUntil(now + delay)),
-            NextWake::Idle => el.set_control_flow(ControlFlow::Wait),
-        }
-        // The PNG is written; leave through the front door so the pty, the
-        // clipboard and the tab state all get their `Drop` rather than being
-        // cut off by `process::exit`. The code travels back to `main` in the
-        // field, which is the whole reason it is a field. Checked *after* the
-        // capture above, which is what sets it.
-        if self.exit_code.is_some() {
-            el.exit();
-        }
+        next_wake(shot, self.anim_deadline())
     }
+}
+
+/// One watching connection to a window's daemon keeps its session list
+/// fresh through pushes — and carries the approval queue, whose pushes
+/// raise the modal in every window.
+pub(crate) fn watch_pairings(
+    fleet: &crate::fleet::FleetModel,
+    route: HostRoute,
+    approval: ApprovalCell,
+    proxy: &EventLoopProxy<Wakeup>,
+) {
+    let proxy = proxy.clone();
+    fleet.watch(
+        move || route.dialer(),
+        move |event| {
+            let proxy = proxy.clone();
+            let post: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let _ = proxy.send_event(Wakeup::PairingChanged);
+            });
+            match event {
+                crate::fleet::PairingEvent::Requested {
+                    client,
+                    label,
+                    remote,
+                    code,
+                    expires_in_secs,
+                } => arm_approval_request(
+                    &approval,
+                    client,
+                    label,
+                    remote,
+                    code,
+                    expires_in_secs,
+                    post,
+                ),
+                // Someone answered — at the daemon's stdin, in another
+                // window — or the device gave up. Either way there is
+                // nothing left to decide.
+                crate::fleet::PairingEvent::Resolved { client } => {
+                    let mut queue = approval.lock();
+                    let before = queue.len();
+                    queue.retain(|r| r.client != client);
+                    if queue.len() != before {
+                        drop(queue);
+                        post();
+                    }
+                }
+            }
+        },
+    );
 }
 
 /// What the event loop should do once it runs out of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NextWake {
+pub(crate) enum NextWake {
     /// A screenshot's delay has elapsed: draw the frame now, in place.
     CaptureNow,
     After(std::time::Duration),
