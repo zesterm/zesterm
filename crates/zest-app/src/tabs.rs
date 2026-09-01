@@ -1863,7 +1863,15 @@ mod tests {
         assert!(strip.profiles_active() && !strip.settings_active(), "…and back the other way");
 
         // Closing the tab that is *not* holding the keyboard must not take
-        // the keyboard from the one that is.
+        // the keyboard from the one that is — and must report itself as an
+        // inactive close, which is the `was_active` the app reads to decide
+        // whether the close counts as an activation. A background close that
+        // claimed to be one would snap a wheel-scrolled strip back to the
+        // active chip and pull the next × out from under the pointer, which
+        // is the rule `finish_close_tab` has followed for sessions all along.
+        // Unreachable until app tabs grew a ×: ⌘W only ever fired on the
+        // active one.
+        assert!(!strip.settings_active(), "Settings is the background tab here");
         strip.close_settings();
         assert!(
             strip.profiles_active(),

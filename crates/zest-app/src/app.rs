@@ -5165,9 +5165,10 @@ impl App {
         // ⌘W that silently declines to close is worse than dropping a value
         // that could never have been written.
         let _ = self.profiles_commit_edit();
+        let was_active = self.tabs.profiles_active();
         self.profiles_ui = None;
         self.tabs.close_profiles();
-        self.after_activation();
+        self.settled_after_close(was_active);
     }
 
     /// The Profiles editor holds the keyboard and the grid area.
@@ -7276,9 +7277,10 @@ impl App {
         // silently declines to close is worse than dropping a value that could
         // never have been written. The profiles tab settled this the same way.
         let _ = self.settings_commit_edit();
+        let was_active = self.tabs.settings_active();
         self.settings_ui = None;
         self.tabs.close_settings();
-        self.after_activation();
+        self.settled_after_close(was_active);
     }
 
     /// The Settings tab holds the keyboard and the grid area.
@@ -10041,6 +10043,27 @@ impl App {
     /// Forget a tab's unseen signal, because it has now been seen.
     fn clear_attention(&mut self, addr: zest_proto::SessionAddr) {
         if self.attention.remove(&addr).is_some() {
+            self.mark_chrome_dirty();
+        }
+    }
+
+    /// What a closed app tab leaves behind: an activation only if it was the
+    /// one being looked at.
+    ///
+    /// `finish_close_tab` has taken this decision for session tabs all along
+    /// (`was_active`, captured before the tab leaves the strip) and writes
+    /// down why: closing a *background* chip changed no pane, so
+    /// `after_activation`'s ensure-visible flag would snap a wheel-scrolled
+    /// strip back to the active chip mid-close-spree and pull the next target
+    /// out from under the pointer. The app tabs could not reach that case
+    /// while neither drew a × — the only close was ⌘W, which only ever fires
+    /// on the active one — so both closes called `after_activation`
+    /// unconditionally. Giving them a × is what made the background close
+    /// possible, and this is the one copy of the rule they now share.
+    fn settled_after_close(&mut self, was_active: bool) {
+        if was_active {
+            self.after_activation();
+        } else {
             self.mark_chrome_dirty();
         }
     }
