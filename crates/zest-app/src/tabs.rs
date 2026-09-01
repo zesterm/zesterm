@@ -1639,6 +1639,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_taken_out_whole_is_owned_by_nobody_here_and_intact() {
+        // The tear-off (#501): the process routes a session's wakeups to the
+        // window whose strip `owns` it, so the moment a tab leaves one strip
+        // that strip must answer no — and the tab itself must come back
+        // whole, session and all, for the next window to adopt as-is.
+        let mut strip = TabStrip::default();
+        strip.push(fake(1));
+        strip.push(fake(2));
+        let addr = placeholder_addr(1);
+        assert!(strip.owns(addr), "the strip holds it before the move");
+        let moved = strip.close(addr).expect("the tab comes out whole");
+        assert_eq!(moved.addr, addr, "the same tab, not a copy");
+        assert_eq!(moved.sized, (10, 4), "its last-told size travels with it, for the new window to compare against");
+        assert!(!strip.owns(addr), "a wakeup for it must now go to the window that adopted it");
+        assert!(strip.owns(placeholder_addr(2)), "the neighbour stays");
+    }
+
+    #[test]
     fn a_connecting_tab_shows_provenance_and_settles_failed_with_the_error() {
         // The issue-#175 path: the tab exists before any socket does,
         // showing where the launch is going, and a host that never answers

@@ -1391,7 +1391,7 @@ const fn attention_is_news(is_active: bool, window_focused: bool) -> bool {
 }
 
 /// Last-output instants by session, shared with every tab's wake callback.
-type ActivityMap =
+pub(crate) type ActivityMap =
     Arc<parking_lot::Mutex<std::collections::HashMap<zest_proto::SessionAddr, std::time::Instant>>>;
 
 /// Park an account state for the event loop and wake it. The cell holds one
@@ -2357,6 +2357,7 @@ impl App {
             text_tuning,
             proxy,
             approval: Arc::clone(&shared.approval),
+            activity: Arc::clone(&shared.activity),
             shared,
             requests: WindowRequests::default(),
             window: None,
@@ -2376,7 +2377,6 @@ impl App {
             chip_hits: crate::chrome::hit::ChromeHitMap::default(),
             folded_blocks: std::collections::HashMap::new(),
             selected_block: std::collections::HashMap::new(),
-            activity: ActivityMap::default(),
             route: None,
             client_identity: None,
             local_file_replies: Arc::default(),
@@ -2509,6 +2509,26 @@ impl App {
 
     pub(crate) fn take_requests(&mut self) -> WindowRequests {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Take a tab out of this window, whole, for another window to adopt
+    /// (#501). Neither killed nor detached: the session, its connection and
+    /// its wake callback go with it. A window emptied by this asks to close,
+    /// exactly as the last tab closing does.
+    pub(crate) fn take_tab(&mut self, addr: zest_proto::SessionAddr) -> Option<Tab> {
+        let was_active = self.tabs.is_active(addr);
+        let tab = self.tabs.close(addr)?;
+        self.attention.remove(&addr);
+        self.requests.persist = true;
+        if self.tabs.is_empty() {
+            self.request_close();
+        } else if was_active {
+            self.after_activation();
+            self.relayout_grid();
+        } else {
+            self.mark_chrome_dirty();
+        }
+        Some(tab)
     }
 
     pub(crate) fn route(&self) -> Option<&HostRoute> {
@@ -3582,9 +3602,16 @@ impl App {
         match action {
             Action::NewTab => self.new_tab(),
             Action::NewWindow => self.requests.new_window = true,
-            // Filled in with the tear-off (#501); the row exists first so the
-            // palette and the keymap land together.
-            Action::MoveTabToNewWindow => {}
+            Action::MoveTabToNewWindow => {
+                // Only a session tab has anywhere to go; the app tabs are
+                // singletons of the window that holds them.
+                if self.settings_tab_active() || self.screen == AppScreen::Profiles {
+                    return;
+                }
+                if let Some(tab) = self.tabs.active() {
+                    self.requests.tear_off = Some(tab.addr);
+                }
+            }
             Action::CloseTab => {
                 // App tabs first, whichever holds the pane: closing one is
                 // closing a tab (§11's rule), and ⌘W is one of the three
@@ -11928,7 +11955,7 @@ impl App {
     /// first tab. Everything the old single-window `resumed` did for the
     /// window; what it did for the *process* — the config watcher, the fleet
     /// model — lives in [`crate::process::Process`] now.
-    pub(crate) fn open_window(&mut self, el: &ActiveEventLoop, plan: &WindowSpec) {
+    pub(crate) fn open_window(&mut self, el: &ActiveEventLoop, plan: WindowSpec) {
         debug_assert!(self.window.is_none(), "a window opens once");
 
         let t0 = std::time::Instant::now();
@@ -12167,24 +12194,26 @@ impl App {
         // keeps the startup budget honest — everything else arrives in the
         // background. Which tab that is was the process's call
         // (`windows_state::split_lead`).
-        let (restore_active, restore_rest): (
-            Option<zest_proto::SessionAddr>,
-            &[crate::tabs_state::SavedTab],
-        ) = match &plan.first_tab {
-            FirstTab::Attach { restore, rest } => (*restore, rest.as_slice()),
-            FirstTab::Inherit { .. } => (None, &[]),
+        let (restore_active, restore_rest, adopted, inherited) = match plan.first_tab {
+            FirstTab::Attach { restore, rest } => (restore, rest, None, None),
+            FirstTab::Inherit { route, identity, open } => {
+                (None, Vec::new(), None, Some((route, identity, open)))
+            }
+            FirstTab::Adopt(tab) => (None, Vec::new(), Some(*tab), None),
         };
 
-        let mut tab: Option<Tab> = match &plan.first_tab {
+        let mut tab: Option<Tab> = match (&inherited, adopted) {
             // Opened from another window: its route and identity are already
             // proven, so the shell comes through the ordinary ⌘T path once
             // the surface exists to size it — below, after the GPU.
-            FirstTab::Inherit { route, identity, .. } => {
+            (Some((route, identity, _)), _) => {
                 self.route = Some(route.clone());
                 self.client_identity = identity.clone();
                 None
             }
-            FirstTab::Attach { .. } => match self.attach_to_daemon(cols, rows, &proxy, restore_active) {
+            // A tab moved here whole (#501): nothing to dial, only to size.
+            (None, Some(tab)) => Some(tab),
+            (None, None) => match self.attach_to_daemon(cols, rows, &proxy, restore_active) {
                 Some(tab) => Some(tab),
                 None => {
                     let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
@@ -12236,8 +12265,11 @@ impl App {
         // The surface may have landed on a slightly different size than the
         // window reported, so reconcile before the first frame.
         let (gpu_cols, gpu_rows) = insets.grid_dims(metrics, gpu.config.width, gpu.config.height);
+        // Against what the tab was last told, not against `cols`/`rows`:
+        // a fresh tab was told exactly those, and an adopted one (#501) was
+        // told its old window's.
         if let Some(tab) = tab.as_mut() {
-            if (gpu_cols, gpu_rows) != (cols, rows) {
+            if tab.sized != (gpu_cols, gpu_rows) {
                 tab.source().resize(gpu_cols, gpu_rows);
                 tab.sized = (gpu_cols, gpu_rows);
             }
@@ -12255,7 +12287,7 @@ impl App {
         // workers, so one sleeping host cannot serialize the others behind
         // its timeout; arrival order may differ from the saved order, which
         // a background tab can afford.
-        for saved in restore_rest {
+        for saved in &restore_rest {
             let route = if saved.local {
                 HostRoute::LocalSocket(zest_daemon::default_socket_path())
             } else {
@@ -12271,7 +12303,7 @@ impl App {
             self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false, None);
         }
         self.window = Some(window);
-        if let FirstTab::Inherit { open, .. } = &plan.first_tab {
+        if let Some((_, _, open)) = &inherited {
             self.open_tab(open);
         }
 

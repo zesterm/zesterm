@@ -25,7 +25,8 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::WindowId;
 
-use crate::app::{App, ApprovalCell, NextWake, Screenshot, StartScreen};
+use crate::app::{ActivityMap, App, ApprovalCell, NextWake, Screenshot, StartScreen};
+use crate::tabs::Tab;
 use crate::instance::{self, OpenRequest, OpenTarget, PendingOpens, Reply};
 use crate::session::Wakeup;
 use crate::tabs_state::SavedTab;
@@ -61,6 +62,11 @@ pub struct Shared {
     /// Restart-class keys edited this run. A restart is owed by the process,
     /// whichever window's settings tab did the editing.
     pub restart_pending: RefCell<std::collections::BTreeSet<String>>,
+    /// When each session last produced output, stamped by the tabs' wake
+    /// callbacks. Per session, not per window: a tab moved to another
+    /// window (#501) keeps the callback it was built with, so the map it
+    /// stamps must be the one every window reads.
+    pub activity: ActivityMap,
 }
 
 impl Shared {
@@ -79,6 +85,7 @@ impl Shared {
             remote_identity: RefCell::new(None),
             local_context: std::sync::OnceLock::new(),
             restart_pending: RefCell::new(std::collections::BTreeSet::new()),
+            activity: ActivityMap::default(),
         }
     }
 
@@ -125,6 +132,8 @@ pub struct WindowRequests {
     pub new_window: bool,
     /// The tab set changed; remember every window.
     pub persist: bool,
+    /// Move this tab out into a window of its own (#501).
+    pub tear_off: Option<zest_proto::SessionAddr>,
 }
 
 /// What a tab opened on an existing route holds.
@@ -176,6 +185,9 @@ pub enum FirstTab {
         identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
         open: TabOpen,
     },
+    /// A tab taken out of another window (#501): its session, its
+    /// connection and its wake callback come along, so nothing is redialled.
+    Adopt(Box<Tab>),
 }
 
 pub struct WindowSpec {
@@ -390,7 +402,7 @@ impl Process {
                     if let Some(screen) = req.screen {
                         app = app.with_start_screen(screen);
                     }
-                    app.open_window(el, &spec);
+                    app.open_window(el, spec);
                     self.windows.push(app);
                     self.windows.len() - 1
                 }
@@ -468,7 +480,7 @@ impl Process {
             && t.resolved.settings.tabs.restore
     }
 
-    fn open_window(&mut self, el: &ActiveEventLoop, spec: &WindowSpec) {
+    fn open_window(&mut self, el: &ActiveEventLoop, spec: WindowSpec) {
         let mut app = self.new_app();
         app.open_window(el, spec);
         if let Some(id) = app.window_id() {
@@ -513,6 +525,7 @@ impl Process {
         let mut persist = false;
         let mut to_open = Vec::new();
         let mut to_close = Vec::new();
+        let mut tear_offs = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
             let req = w.take_requests();
             persist |= req.persist;
@@ -522,24 +535,46 @@ impl Process {
             if req.close {
                 to_close.push(i);
             }
+            if let Some(addr) = req.tear_off {
+                tear_offs.push((i, addr));
+            }
         }
-        if persist {
-            self.persist_all();
-        }
-        if !to_open.is_empty() {
+        if !to_open.is_empty() || !tear_offs.is_empty() {
             let monitors = Self::monitors(el);
             // The spec is built before the new window is pushed, so the
             // borrow of its parent never overlaps the push.
-            let specs: Vec<_> = to_open
+            let mut specs: Vec<_> = to_open
                 .iter()
                 .map(|&i| {
                     let open = TabOpen::Shell { command: None, cwd: None };
                     WindowSpec::cascade_from(&self.windows[i], &monitors, open)
                 })
                 .collect();
-            for spec in specs {
-                self.open_window(el, &spec);
+            for (i, addr) in tear_offs {
+                // Taking the tab may empty its window, which then asks to
+                // close; that request is read here, in the same pass, so the
+                // source does not linger empty until the next event.
+                let Some(tab) = self.windows[i].take_tab(addr) else { continue };
+                let req = self.windows[i].take_requests();
+                if req.close && !to_close.contains(&i) {
+                    to_close.push(i);
+                }
+                specs.push(WindowSpec {
+                    geometry: windows_state::cascade(self.windows[i].current_geometry(), &monitors),
+                    first_tab: FirstTab::Adopt(Box::new(tab)),
+                    activation_token: None,
+                });
+                persist = true;
             }
+            for spec in specs {
+                self.open_window(el, spec);
+                if let Some(w) = self.windows.last() {
+                    w.focus();
+                }
+            }
+        }
+        if persist {
+            self.persist_all();
         }
         // Highest first, so each index still names the window it did.
         for i in to_close.into_iter().rev() {
@@ -561,7 +596,7 @@ impl ApplicationHandler<Wakeup> for Process {
             }
             None => vec![WindowSpec::fresh()],
         };
-        for spec in &specs {
+        for spec in specs {
             self.open_window(el, spec);
             // The probes measure the first window and leave from inside it.
             if el.exiting() {
