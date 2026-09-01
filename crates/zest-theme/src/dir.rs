@@ -19,7 +19,7 @@ use std::path::Path;
 
 use crate::Theme;
 
-/// How many theme files one directory may contribute.
+/// How many theme files one directory may be read out of.
 ///
 /// A bound rather than tidiness: [`load_dir`] runs on the daemon's serve loop,
 /// which holds a connection's lock across the message it is answering, so an
@@ -27,6 +27,14 @@ use crate::Theme;
 /// stalls that session's own input and output. It lives beside the reader
 /// rather than at a call site because a second caller is how a bound gets
 /// forgotten.
+///
+/// It counts files **examined**, not themes returned, and the difference is
+/// the whole of the protection. Capping the output bounds nothing: a
+/// directory of ten thousand malformed `.toml` files yields no themes at all,
+/// so an output cap never trips, while every one of them still costs a
+/// `read_to_string` and a parse attempt — which is exactly the work the serve
+/// loop cannot afford. A file that fails to parse, shadows a built-in, or
+/// duplicates an id has already been paid for by the time we know.
 pub const MAX_THEMES: usize = 256;
 
 /// Every parseable theme in `dir`, sorted by name for a stable gallery.
@@ -42,8 +50,17 @@ pub fn load_dir(dir: &Path) -> Vec<Theme> {
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
     let mut out: Vec<Theme> = Vec::new();
+    // Counts candidates opened, not themes kept -- see `MAX_THEMES`. The
+    // increment therefore sits above every `continue` that can reject a file,
+    // because each of those has already spent the read this bound exists to
+    // limit.
+    let mut examined = 0usize;
     for entry in entries {
-        if out.len() >= MAX_THEMES {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        if examined >= MAX_THEMES {
             tracing::warn!(
                 dir = %dir.display(),
                 max = MAX_THEMES,
@@ -51,10 +68,7 @@ pub fn load_dir(dir: &Path) -> Vec<Theme> {
             );
             break;
         }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
+        examined += 1;
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         // One bad file must not poison the rest: themes are user-authored
         // input, and the never-crash rule for a deleted scheme (see
@@ -228,6 +242,35 @@ mod tests {
         let dir = scratch("garbage");
         assert!(install(&dir, "definitely not a colour scheme").is_err());
         assert!(load_dir(&dir).is_empty(), "nothing is written on failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_of_unreadable_files_stops_at_the_cap_too() {
+        // The cap has to count files *examined*, and this is the test that can
+        // tell the two implementations apart: capping the output would let a
+        // directory of malformed files run to the end, because no output is
+        // ever produced to trip it -- while every file still costs a read and
+        // a parse on the serve loop.
+        //
+        // Observable because the good theme sorts last: if the scan stopped at
+        // the cap, it never reached it.
+        let dir = scratch("cap-malformed");
+        for i in 0..(MAX_THEMES + 20) {
+            std::fs::write(dir.join(format!("{i:04}-bad.toml")), "not = a theme").unwrap();
+        }
+        let mut good = crate::builtin::paper();
+        good.id = "zzz-good".into();
+        good.name = "ZZZ Good".into();
+        std::fs::write(dir.join("zzz-good.toml"), toml::to_string_pretty(&good).unwrap())
+            .unwrap();
+
+        assert!(
+            load_dir(&dir).is_empty(),
+            "the scan read past {MAX_THEMES} unparseable files to reach the last one: \
+             the cap is counting themes returned rather than files opened, which bounds \
+             nothing when nothing parses"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -15,8 +15,9 @@
 //! The one exception is [`dir`], behind the off-by-default `fs` feature: reading
 //! the user's imported themes off disk. It is a feature rather than a module
 //! because the constraint above is what the crate is *for*, and a `read_dir`
-//! that a wasm build has to compile past would erode it a call at a time. The
-//! native app and the daemon turn it on; nothing else does.
+//! that a wasm build has to compile past would erode it a call at a time.
+//! `zest-app` turns it on; the browser client's build does not, which is the
+//! whole point of the split.
 //!
 //! [`@sigx/terminal-zero`]: https://sigx.dev/terminal/docs/theming
 

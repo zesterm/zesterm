@@ -109,6 +109,32 @@ mod tests {
         assert_eq!(user.len(), 2);
     }
 
+    /// Swap the process-global roster for the duration of a test and put it
+    /// back on the way out.
+    ///
+    /// A guard rather than a `clear()` at the end of the test, because the
+    /// interesting case is the one where the assertion *fails*: a panic skips
+    /// the cleanup line, and every test that runs afterwards in the same
+    /// process then sees a roster somebody else stuffed. That turns one real
+    /// failure into a spray of unrelated ones, which is the shape #403's umask
+    /// leak had -- process-global state whose victims are nowhere near the
+    /// culprit. `Drop` runs during unwind; the line after the assert does not.
+    struct Roster(Vec<Theme>);
+    impl Roster {
+        fn set(themes: Vec<Theme>) -> Self {
+            Self(std::mem::replace(&mut *USER.write().unwrap(), themes))
+        }
+    }
+    impl Drop for Roster {
+        fn drop(&mut self) {
+            // `PoisonError::into_inner`: another test panicking while holding
+            // this lock must not turn into a second panic here, which would
+            // abort the whole run and bury the first failure's message.
+            let mut slot = USER.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = std::mem::take(&mut self.0);
+        }
+    }
+
     #[test]
     fn a_builtin_outranks_an_import_of_the_same_id() {
         // The rule the module exists to hold: `zest_theme::dir::load_dir`
@@ -116,13 +142,12 @@ mod tests {
         // even if some other path put it in the roster. Two guards, because
         // this one decides what every `theme = "obsidian"` in every config
         // resolves to.
-        *USER.write().unwrap() = vec![theme("obsidian")];
+        let _roster = Roster::set(vec![theme("obsidian")]);
         let got = get("obsidian").expect("a built-in is always resolvable");
         assert_eq!(
             got,
             zest_theme::builtin::obsidian(),
             "an import shadowed a built-in, restyling every config that names it"
         );
-        USER.write().unwrap().clear();
     }
 }
