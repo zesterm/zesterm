@@ -12199,7 +12199,13 @@ impl App {
             FirstTab::Inherit { route, identity, open } => {
                 (None, Vec::new(), None, Some((route, identity, open)))
             }
-            FirstTab::Adopt(tab) => (None, Vec::new(), Some(*tab), None),
+            FirstTab::Adopt { tab, route, identity } => {
+                // The new window is on the tab's host from the first moment,
+                // so ⌘T and a split there reach the same daemon the tab did.
+                self.route = route;
+                self.client_identity = identity;
+                (None, Vec::new(), Some(*tab), None)
+            }
         };
 
         let mut tab: Option<Tab> = match (&inherited, adopted) {

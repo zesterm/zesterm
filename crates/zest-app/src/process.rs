@@ -186,8 +186,14 @@ pub enum FirstTab {
         open: TabOpen,
     },
     /// A tab taken out of another window (#501): its session, its
-    /// connection and its wake callback come along, so nothing is redialled.
-    Adopt(Box<Tab>),
+    /// connection and its wake callback come along, so nothing is redialled
+    /// — and so do the source window's route and identity, or ⌘T in the new
+    /// window would find no daemon and fall back to an in-process shell.
+    Adopt {
+        tab: Box<Tab>,
+        route: Option<zest_fleet::HostRoute>,
+        identity: Option<Arc<zest_mesh::identity::ClientIdentity>>,
+    },
 }
 
 pub struct WindowSpec {
@@ -559,9 +565,14 @@ impl Process {
                 if req.close && !to_close.contains(&i) {
                     to_close.push(i);
                 }
+                let source = &self.windows[i];
                 specs.push(WindowSpec {
-                    geometry: windows_state::cascade(self.windows[i].current_geometry(), &monitors),
-                    first_tab: FirstTab::Adopt(Box::new(tab)),
+                    geometry: windows_state::cascade(source.current_geometry(), &monitors),
+                    first_tab: FirstTab::Adopt {
+                        tab: Box::new(tab),
+                        route: source.route().cloned(),
+                        identity: source.client_identity(),
+                    },
                     activation_token: None,
                 });
                 persist = true;
