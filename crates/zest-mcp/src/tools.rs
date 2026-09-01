@@ -123,6 +123,27 @@ pub enum ExitSource {
     ProcessExit,
 }
 
+/// Where a block's author came from.
+///
+/// A *third* class beside [`ExitSource`], and stronger than either of its
+/// variants. Both of those grade a fact about the session's *contents*, and the
+/// argument between them is which one a program inside the terminal could have
+/// printed. This one is a fact about the **connection**: the daemon recorded it
+/// from the authenticated client that wrote the bytes, and nothing running
+/// inside the terminal can influence it.
+///
+/// What it still does not claim: OSC 133 decides *when* a block opens, so a
+/// shell can open one nobody typed and it will bear whoever wrote last. It
+/// cannot make a block bear a *different* client's id. Provenance, never
+/// authorization.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorSource {
+    /// The daemon saw this connection write to the pty. Not forgeable by
+    /// anything the session contains.
+    DaemonWitness,
+}
+
 /// A fence that terminal output cannot forge.
 ///
 /// A fresh one per call, from `RandomState`, which the OS seeds. Per call
@@ -802,7 +823,7 @@ impl ToolSet {
                     .blocks()
                     .iter()
                     .filter(|b| since.is_none_or(|s| b.id > s))
-                    .map(block_json)
+                    .map(|b| block_json(b, Some(conn.client_id())))
                     .collect();
                 let mut out = json!({
                     "session": Resolver::format(addr),
@@ -833,7 +854,7 @@ impl ToolSet {
             let (shown, omitted) = truncate_middle(&rows, max_lines);
             Ok(json!({
                 "session": Resolver::format(addr),
-                "block": block.as_ref().map(block_json),
+                "block": block.as_ref().map(|b| block_json(b, Some(conn.client_id()))),
                 "total_lines": total,
                 "omitted_lines": omitted,
                 "text": untrusted(&shown.join("\n")),
@@ -1125,6 +1146,9 @@ impl ToolSet {
     /// with `blocks(wait:)`; and this is somebody's shell, so ending it is never
     /// this tool's business.
     fn run(&self, conn: &Conn, addr: SessionAddr, args: &Value) -> Result<Value, ToolError> {
+        // Read before the closure below borrows the connection: the payload
+        // reports this agent's own blocks as "you".
+        let me = conn.client_id();
         let command = run::check_command(args.get("command").and_then(Value::as_str).unwrap_or(""))?;
         if command.is_empty() {
             return Err(ToolError::Missing { field: "command" });
@@ -1156,6 +1180,7 @@ impl ToolSet {
                         timed_out,
                     },
                     max_lines,
+                    Some(me),
                 ))
             },
         )
@@ -1692,7 +1717,7 @@ struct Outcome<'a> {
 }
 
 /// The answer `run` gives, built in exactly one place.
-fn run_json(o: &Outcome, max_lines: usize) -> Value {
+fn run_json(o: &Outcome, max_lines: usize, me: Option<zest_proto::ClientId>) -> Value {
     let block = match &o.progress {
         Progress::Running(b) | Progress::Finished(b) => Some(b),
         Progress::NotStarted | Progress::Lost => None,
@@ -1741,7 +1766,7 @@ fn run_json(o: &Outcome, max_lines: usize) -> Value {
         // came from OSC 133;D and any program can print those markers; the
         // unforgeable status belongs to `run_isolated` alone.
         "exit_code_source": exit.map(|_| ExitSource::ShellMarker),
-        "block": block.map(block_json),
+        "block": block.map(|b| block_json(b, me)),
         "warnings": o.warnings,
         "total_lines": total,
         "omitted_lines": omitted,
@@ -1978,7 +2003,7 @@ fn truncate_middle(rows: &[String], max: usize) -> (Vec<&str>, usize) {
 /// cost carrying no fact. `exit_code` is deliberately the other way round:
 /// there the null *is* the fact, because a shell that reported no status is not
 /// a shell that reported zero.
-fn block_json(b: &BlockPayload) -> Value {
+fn block_json(b: &BlockPayload, me: Option<zest_proto::ClientId>) -> Value {
     let (state, exit) = match b.state {
         BlockState::Prompt => ("prompt", None),
         BlockState::Running => ("running", None),
@@ -2003,6 +2028,19 @@ fn block_json(b: &BlockPayload) -> Value {
         // and like every context fact it is display, never a gate.
         "context": b.context,
     });
+    // Present or absent as a pair, the `exit_code`/`exit_code_source` rule:
+    // an author with no source cannot be weighed, and a source with no author
+    // labels nothing. `"you"` rather than a hex id plus a separate boolean --
+    // a 64-character opaque handle tells a model nothing, and the single most
+    // useful question it asks of shared scrollback is whether it ran this
+    // itself. Comparisons still work: every `"you"` is one principal and every
+    // hex id is a distinct other.
+    if let Some(author) = b.author {
+        let who = if Some(author) == me { "you".to_string() } else { author.short() };
+        let obj = v.as_object_mut().expect("json! built an object");
+        obj.insert("author".into(), json!(who));
+        obj.insert("author_source".into(), json!(AuthorSource::DaemonWitness));
+    }
     let obj = v.as_object_mut().expect("json! built an object");
     for (key, line) in [("output_line", b.output_line), ("end_line", b.end_line)] {
         if let Some(line) = line {
@@ -2413,6 +2451,7 @@ mod tests {
             started_ms: Some(1),
             ended_ms: None,
             context: None,
+            author: None,
         }
     }
 
@@ -2443,7 +2482,7 @@ mod tests {
         // real one. `process_exit` belongs to `run_isolated` alone, and the two
         // read identically in a payload, which is what makes this cheap to undo.
         let b = payload_block(BlockState::Finished { exit_code: Some(0) });
-        let v = run_json(&outcome(Progress::Finished(b), Some(vec!["ok".into()])), 200);
+        let v = run_json(&outcome(Progress::Finished(b), Some(vec!["ok".into()])), 200, None);
         assert_eq!(v["exit_code"], 0);
         assert_eq!(
             v["exit_code_source"], "shell_marker",
@@ -2451,6 +2490,67 @@ mod tests {
         );
         assert_eq!(v["state"], "finished");
         assert_eq!(v["block_id"], 4);
+    }
+
+    /// A finished block, for the author tests below.
+    fn authored_block(author: Option<zest_proto::ClientId>) -> BlockPayload {
+        let mut b = payload_block(BlockState::Finished { exit_code: Some(0) });
+        b.author = author;
+        b
+    }
+
+    #[test]
+    fn a_blocks_author_and_its_source_are_present_together_or_not_at_all() {
+        // The `exit_code`/`exit_code_source` rule: an author with no source
+        // cannot be weighed, and a source with no author labels nothing.
+        let v = block_json(&authored_block(None), None);
+        assert!(
+            v.get("author").is_none() && v.get("author_source").is_none(),
+            "an unattributed block carries neither key: two nulls on every prompt block \
+             is cost carrying no fact, got {v}"
+        );
+
+        let who = zest_proto::ClientId::from_bytes([0xa1; 32]);
+        let v = block_json(&authored_block(Some(who)), None);
+        assert_eq!(v["author"], who.short(), "another device is named by its short id");
+        assert_eq!(v["author_source"], "daemon_witness");
+    }
+
+    #[test]
+    fn an_author_the_daemon_recorded_is_labelled_apart_from_the_shells_word() {
+        // The two facts sit in one payload and read alike, and ADR-015 exists
+        // because that is exactly how a trust distinction gets lost. The exit
+        // code is the shell's word; the author is the daemon's.
+        let who = zest_proto::ClientId::from_bytes([0xa1; 32]);
+        let v = block_json(&authored_block(Some(who)), None);
+        assert_eq!(
+            v["exit_code_source"], "shell_marker",
+            "any program can print OSC 133;D, and the payload must keep saying so"
+        );
+        assert_eq!(
+            v["author_source"], "daemon_witness",
+            "nothing running inside the terminal can change whose id a block carries, \
+             which is a different and stronger claim than its neighbour's"
+        );
+    }
+
+    #[test]
+    fn this_agents_own_blocks_read_as_you_and_another_devices_as_an_id() {
+        // The one question an agent asks of a shared shell, and the reason the
+        // id is projected rather than passed through: a 64-character handle
+        // tells a model nothing about whether it ran the thing itself.
+        let me = zest_proto::ClientId::from_bytes([0x11; 32]);
+        let them = zest_proto::ClientId::from_bytes([0x22; 32]);
+
+        let mine = block_json(&authored_block(Some(me)), Some(me));
+        assert_eq!(mine["author"], "you", "this agent's own command must say so plainly");
+
+        let theirs = block_json(&authored_block(Some(them)), Some(me));
+        assert_eq!(
+            theirs["author"], them.short(),
+            "somebody else's command is the fact worth a chip, and it stays distinguishable"
+        );
+        assert_ne!(theirs["author"], "you");
     }
 
     #[test]
@@ -2473,7 +2573,7 @@ mod tests {
             ),
         ];
         for (what, p) in cases {
-            let v = run_json(&outcome(p, None), 200);
+            let v = run_json(&outcome(p, None), 200, None);
             assert_eq!(
                 v["exit_code"].is_null(),
                 v["exit_code_source"].is_null(),
@@ -2494,7 +2594,7 @@ mod tests {
             Some(vec!["Password:".into()]),
         );
         o.timed_out = true;
-        let v = run_json(&o, 200);
+        let v = run_json(&o, 200, None);
         assert_eq!(v["state"], "running");
         assert_eq!(v["timed_out"], true);
         assert!(v["exit_code"].is_null(), "a command still running has no status: {v}");
@@ -2510,7 +2610,7 @@ mod tests {
     fn a_run_that_never_started_has_no_text_rather_than_an_empty_fence() {
         // An empty fence reads as "the command printed nothing", which is a
         // different answer from "there is no command to have printed anything".
-        let v = run_json(&outcome(Progress::NotStarted, None), 200);
+        let v = run_json(&outcome(Progress::NotStarted, None), 200, None);
         assert!(v["text"].is_null(), "no block means no output to fence: {v}");
         assert!(v["block_id"].is_null());
         assert_eq!(v["state"], "prompt");
@@ -2550,8 +2650,9 @@ mod tests {
             started_ms: None,
             ended_ms: None,
             context: None,
+            author: None,
         };
-        let v = block_json(&b);
+        let v = block_json(&b, None);
         assert_eq!(v["state"], "finished");
         assert!(v["exit_code"].is_null(), "an unreported status must not become zero");
         assert_eq!(
@@ -2576,8 +2677,9 @@ mod tests {
             started_ms: Some(1),
             ended_ms: None,
             context: None,
+            author: None,
         };
-        let v = block_json(&b);
+        let v = block_json(&b, None);
         assert_eq!(v["state"], "running");
         assert!(v["exit_code"].is_null());
         assert!(
@@ -2613,8 +2715,9 @@ mod tests {
             started_ms: None,
             ended_ms: None,
             context: None,
+            author: None,
         };
-        let v = block_json(&b);
+        let v = block_json(&b, None);
         assert_eq!(v["output_line"], 6);
         assert_eq!(
             v["end_line"], 5,
@@ -2639,8 +2742,9 @@ mod tests {
             started_ms: None,
             ended_ms: None,
             context: None,
+            author: None,
         };
-        let v = block_json(&b);
+        let v = block_json(&b, None);
         assert_eq!(v["state"], "prompt");
         assert_eq!(
             v["prompt_line"], 91_442,

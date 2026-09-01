@@ -112,6 +112,10 @@ export class HandshakeDriver {
       // undecodable frame ends a connection rather than being skipped, which
       // is why the host has to be told rather than left to guess.
       watch_signals: true,
+      // A person is looking at this tab. The browser is also the client that
+      // answers the approval modal, so declaring otherwise would refuse it
+      // the one authority it exists to exercise.
+      agent: false,
     };
   }
 

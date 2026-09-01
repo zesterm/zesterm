@@ -84,6 +84,29 @@ pub struct Block {
     /// predating the field.
     #[cfg_attr(feature = "serde", serde(default))]
     pub context: Option<BlockContext>,
+    /// Which client's input started this command, as the *daemon* witnessed
+    /// it.
+    ///
+    /// Thirty-two opaque bytes, and deliberately not a `ClientId`: `zest-proto`
+    /// depends on this crate and not the reverse, so the type that names a
+    /// device lives one layer up and the wire converts, exactly as `LineId`
+    /// becomes `i64` there. Nothing in this crate may interpret them.
+    ///
+    /// Caller-supplied, the [`Self::started_ms`] pattern
+    /// ([`crate::Terminal::set_input_author`]): a parser sees a byte stream
+    /// and cannot know who wrote into the pty. `None` for a session with no
+    /// daemon, a host predating this field, and a block opened before anybody
+    /// had written anything.
+    ///
+    /// **What it is not.** It names whoever last wrote to this pty when
+    /// OSC 133 `C` arrived — not proof that they typed every byte of
+    /// `command`, and never authorization. A shell chooses *when* a block
+    /// opens, so it can open one nobody typed and that block will bear the
+    /// last writer's id; what it cannot do is make a block bear a *different*
+    /// client's. That asymmetry is the whole value, and every consumer of this
+    /// field repeats it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub author: Option<[u8; 32]>,
 }
 
 /// The surroundings a command ran in, stamped at its start.
@@ -240,6 +263,9 @@ impl BlockIndex {
             started_ms: None,
             ended_ms: None,
             context: None,
+            // A prompt has run nothing, so there is nothing to attribute yet;
+            // `begin_output` stamps it when a command actually starts.
+            author: None,
         });
         id
     }
@@ -259,13 +285,25 @@ impl BlockIndex {
     /// A command was submitted and output begins (OSC 133;C).
     ///
     /// `now_ms` is the embedder's wall clock (see [`Block::started_ms`]);
-    /// `None` when it never provided one.
-    pub fn begin_output(&mut self, line: LineId, command: String, now_ms: Option<u64>) {
+    /// `None` when it never provided one. `author` likewise, and see
+    /// [`Block::author`] for what it does and does not claim.
+    pub fn begin_output(
+        &mut self,
+        line: LineId,
+        command: String,
+        now_ms: Option<u64>,
+        author: Option<[u8; 32]>,
+    ) {
         if let Some(b) = self.blocks.last_mut() {
             b.output_line = Some(line);
             b.command = command;
             b.state = BlockState::Running;
             b.started_ms = now_ms;
+            // Read once, here, and never revisited. `C` is the moment the
+            // command starts; re-reading the embedder's latch afterwards would
+            // let a keystroke arriving during a long build steal that build's
+            // author.
+            b.author = author;
         }
     }
 
@@ -420,7 +458,7 @@ mod tests {
     fn index_with_one_finished_block() -> BlockIndex {
         let mut idx = BlockIndex::new();
         idx.begin_prompt(10, "/home".into());
-        idx.begin_output(11, "cargo build".into(), None);
+        idx.begin_output(11, "cargo build".into(), None, None);
         idx.finish(40, Some(0), None);
         idx
     }
@@ -442,7 +480,7 @@ mod tests {
         // it finishes.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(5, "/x".into());
-        idx.begin_output(6, "cargo test".into(), None);
+        idx.begin_output(6, "cargo test".into(), None, None);
         let b = idx.last().expect("one block");
         assert!(b.is_running());
         assert!(b.contains(9_999), "a running block has no end yet");
@@ -455,7 +493,7 @@ mod tests {
         // nothing at all.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(0, String::new());
-        idx.begin_output(1, "flaky".into(), None);
+        idx.begin_output(1, "flaky".into(), None, None);
         idx.finish(2, None, None);
         let b = idx.last().expect("one block");
         assert!(!b.failed(), "unknown is not failure");
@@ -466,7 +504,7 @@ mod tests {
     fn a_nonzero_status_is_a_failure() {
         let mut idx = BlockIndex::new();
         idx.begin_prompt(0, String::new());
-        idx.begin_output(1, "false".into(), None);
+        idx.begin_output(1, "false".into(), None, None);
         idx.finish(2, Some(1), None);
         assert!(idx.last().expect("one block").failed());
     }
@@ -475,7 +513,7 @@ mod tests {
     fn lines_map_back_to_their_block() {
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "ls".into(), None);
+        idx.begin_output(42, "ls".into(), None, None);
         idx.finish(45, Some(0), None);
 
         assert_eq!(idx.block_at(25).map(|b| b.command.as_str()), Some("cargo build"));
@@ -492,7 +530,7 @@ mod tests {
         // readable.
         let mut idx = BlockIndex::new();
         idx.begin_prompt(2, "/x".into());
-        idx.begin_output(3, "cargo build".into(), None);
+        idx.begin_output(3, "cargo build".into(), None, None);
         idx.finish(9, Some(0), None);
 
         // Lines 0-2 did not survive the rewrap; 3 onwards did, renumbered down.
@@ -511,7 +549,7 @@ mod tests {
         // what a live block is.
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "ls".into(), None);
+        idx.begin_output(42, "ls".into(), None, None);
         idx.finish(45, Some(0), None);
 
         // Only the newer block's lines came through the rewrap.
@@ -536,7 +574,7 @@ mod tests {
         // no end line and must not be evicted by a scrollback bound.
         let mut idx = index_with_one_finished_block();
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "tail -f".into(), None);
+        idx.begin_output(42, "tail -f".into(), None, None);
 
         idx.evict_before(41);
         assert_eq!(idx.blocks().len(), 1, "the finished block should be gone");
@@ -553,10 +591,10 @@ mod tests {
         // headers for ever. (#204)
         let mut idx = index_with_one_finished_block(); // block 0, ends line 40
         idx.begin_prompt(41, "/home".into());
-        idx.begin_output(42, "ls".into(), None);
+        idx.begin_output(42, "ls".into(), None, None);
         idx.finish(45, Some(0), None); // block 1
         idx.begin_prompt(46, "/home".into());
-        idx.begin_output(47, "pwd".into(), None);
+        idx.begin_output(47, "pwd".into(), None, None);
         idx.finish(50, Some(0), None); // block 2
 
         idx.erase_screen(41); // destroys 1 and 2; the watermark falls to announce it

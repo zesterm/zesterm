@@ -96,7 +96,26 @@ watch_hosts: boolean,
  * an old daemon ignores the flag and sends nothing, which is exactly
  * today's behaviour at both ends.
  */
-watch_signals: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+watch_signals: boolean, 
+/**
+ * This connection is a program acting for a model, not a person.
+ *
+ * Set once at startup, before the client has read a byte of terminal
+ * text, and it only ever *removes* authority: a connection that says
+ * this is refused [`Self::PairingDecision`] and [`Self::Enroll`] even
+ * on loopback, and is never subscribed to the approval queue, so the
+ * six-digit matching code never enters a model's context.
+ *
+ * `#[serde(default)]` for `watch_sessions`' reason, with one
+ * difference worth stating plainly: absent means `false`, and `false`
+ * is the *permissive* answer. It has to be — every already-shipped
+ * client omits the field, and a default that revoked their authority
+ * would break the desktop approval modal against a new daemon. So it
+ * binds a **cooperating** client that declares itself, and is not a
+ * gate against one that stays quiet; `zest_daemon::auth::Auth` carries
+ * the rest of that argument.
+ */
+agent: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */

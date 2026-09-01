@@ -151,6 +151,7 @@ mod tests {
             watch_pairings: false,
             watch_hosts: false,
             watch_signals: false,
+            agent: false,
         }
     }
 

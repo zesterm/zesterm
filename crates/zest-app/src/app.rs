@@ -10484,6 +10484,12 @@ impl App {
                 Some(crate::chrome::blocks::BlockView {
                     id: b.id.0,
                     branch: b.context.as_ref().map(|c| c.branch.clone()).unwrap_or_default(),
+                    // Empty when we ran it ourselves, which is the common case
+                    // and the one that should take no room.
+                    author: crate::chrome::blocks::author_label(
+                        b.author,
+                        self.client_identity.as_ref().map(|i| i.client_id()),
+                    ),
                     rows,
                     // A block still "running" in a session whose host went
                     // away is not running anywhere; the rail says so.

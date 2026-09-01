@@ -190,6 +190,7 @@ fn handshake(peer: &mut Peer, identity: &Arc<ClientIdentity>) -> (ClientMessage,
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     });
 
     let challenge =
@@ -328,6 +329,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     });
     let challenge = second
         .wait_for(|m| matches!(m, HostMessage::Challenge { .. }))
@@ -377,6 +379,7 @@ fn a_captured_proof_cannot_be_replayed_onto_a_second_connection() {
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     });
     assert!(
         third.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).is_some(),
@@ -571,6 +574,7 @@ fn a_client_that_dialled_another_host_notices() {
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     });
     let challenge =
         stream.wait_for(|m| matches!(m, HostMessage::Challenge { .. })).expect("no challenge");

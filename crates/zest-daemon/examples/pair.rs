@@ -77,6 +77,7 @@ fn main() {
         watch_pairings: false,
         watch_hosts: false,
         watch_signals: false,
+        agent: false,
     };
     write(&mut stream, None, &hello);
 

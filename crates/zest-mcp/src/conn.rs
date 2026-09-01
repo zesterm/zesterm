@@ -140,6 +140,9 @@ type State = Arc<(Mutex<Shared>, Condvar)>;
 pub struct Conn {
     host: HostId,
     label: String,
+    /// This connection's own client id, so a block's author can be reported as
+    /// "you" rather than as an opaque handle the model has no way to place.
+    client: zest_proto::ClientId,
     tx: Sender<Outbound>,
     state: State,
     /// Told to the reader so it stops without waiting for the socket to close.
@@ -206,6 +209,15 @@ impl Conn {
                 // subscription that exists to be discarded.
                 signals: false,
             },
+            // Every connection this server opens, with no way to opt out. The
+            // daemon refuses an agent `PairingDecision` and `Enroll` even on
+            // loopback, and never sends it a pairing code; this is the
+            // declaration that earns those refusals. Said at startup, before
+            // any tool has returned a byte of terminal text -- a client that
+            // declared itself only when it felt untrustworthy would be
+            // declaring it after the moment that matters. (`pairings: false`
+            // above is now this crate's half of the same rule.)
+            zest_daemon::client::ClientKind::Agent,
             on_pending,
         )?;
 
@@ -251,7 +263,7 @@ impl Conn {
             tx.clone(),
         );
 
-        Ok(Self { host, label: host_label, tx, state, stopping })
+        Ok(Self { host, label: host_label, client: identity.client_id(), tx, state, stopping })
     }
 
     #[must_use]
@@ -262,6 +274,18 @@ impl Conn {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// The client id this connection authenticated as.
+    ///
+    /// Note this is a *throwaway* key on the local path (see `main.rs`), so it
+    /// names this process rather than this agent across restarts. That is
+    /// enough for the one question it answers -- was this block mine or
+    /// somebody else's, in this session -- and deliberately not enough to be
+    /// mistaken for a durable identity.
+    #[must_use]
+    pub fn client_id(&self) -> zest_proto::ClientId {
+        self.client
     }
 
     /// Read the shared state under its lock.

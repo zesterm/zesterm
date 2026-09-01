@@ -26,6 +26,29 @@ use super::hit::{ChromeHitMap, HitRegion};
 use super::layout::TextRun;
 use super::theme::ChromeColors;
 
+/// How a block's author is shown: nothing at all when it was this client.
+///
+/// An id beside every command a person ran themselves is noise; the fact worth
+/// the room is that *somebody else* ran it. Same convention as `branch` and
+/// `cwd` — empty takes no space — and the short form is the one the pairing
+/// prompt already speaks, so the two places a device id appears agree.
+///
+/// The human-readable label lives in the daemon's trust store keyed by this
+/// id, and deliberately does not ride on the block: that would be a second
+/// home for a fact the trust store owns, and an attacker-influenced string
+/// riding in scrollback besides.
+#[must_use]
+pub fn author_label(
+    author: Option<[u8; 32]>,
+    me: Option<zest_proto::ClientId>,
+) -> String {
+    match author {
+        None => String::new(),
+        Some(a) if Some(zest_proto::ClientId::from_bytes(a)) == me => String::new(),
+        Some(a) => zest_proto::ClientId::from_bytes(a).short(),
+    }
+}
+
 /// One block's header, as data. Extracted by the app, drawn here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockView {
@@ -42,6 +65,9 @@ pub struct BlockView {
     /// The branch the command ran on (#429), with `*` when known-dirty.
     /// Empty when the host never stamped a context.
     pub branch: String,
+    /// Who ran it, when that was not this client — see [`author_label`].
+    /// Empty otherwise, and then it takes no room at all.
+    pub author: String,
     /// "51.2s" — pre-formatted; empty when the host sent no stamps.
     pub duration: String,
     /// "exit 0" / "exit 1"; empty while running (the ring says it instead).
@@ -275,6 +301,10 @@ pub fn layout_blocks(
         // tint where the rest of the meta stays faint. Empty when the host
         // never stamped one, and then it takes no room at all.
         meta(&v.branch, colors.success, &mut right, &mut out);
+        // Who ran it, when it was not us. Faint like the rest of the meta: it
+        // is provenance, not a warning, and a block somebody else ran is
+        // ordinary in a shared session.
+        meta(&v.author, colors.text_faint, &mut right, &mut out);
 
         // The command, in the room that remains.
         let cmd_x = chev_x + 16.0 * s;
@@ -342,6 +372,7 @@ mod tests {
             command: "cargo build".into(),
             cwd: "~/dev".into(),
             branch: String::new(),
+            author: String::new(),
             duration: "51.2s".into(),
             exit_label: "exit 0".into(),
             running_label: String::new(),
@@ -616,6 +647,35 @@ mod tests {
             cmd(BlockView { interrupted: true, ..view(1, (0, 1)) }),
             c.text_inactive,
             "the host went away"
+        );
+    }
+
+    #[test]
+    fn an_author_that_is_this_client_prints_nothing() {
+        // An id beside every command you ran yourself is noise. The rule is a
+        // decision rather than a formatting detail, so it is asserted here
+        // rather than left to whichever call site happens to get it right.
+        let me = zest_proto::ClientId::from_bytes([0x11; 32]);
+        assert_eq!(author_label(Some([0x11; 32]), Some(me)), "");
+        assert_eq!(
+            author_label(None, Some(me)),
+            "",
+            "a block the host never attributed says nothing rather than guessing"
+        );
+    }
+
+    #[test]
+    fn another_devices_author_prints_its_short_id() {
+        // The fact worth the room: somebody else ran this. Short form, because
+        // that is what the pairing prompt speaks -- the two places a device id
+        // is shown must agree or they read as different devices.
+        let me = zest_proto::ClientId::from_bytes([0x11; 32]);
+        let them = zest_proto::ClientId::from_bytes([0x22; 32]);
+        assert_eq!(author_label(Some([0x22; 32]), Some(me)), them.short());
+        assert_eq!(
+            author_label(Some([0x22; 32]), None),
+            them.short(),
+            "a client with no identity of its own still shows whose command it was"
         );
     }
 }

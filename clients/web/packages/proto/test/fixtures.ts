@@ -71,6 +71,7 @@ export interface BlockExpect {
   cwd: string;
   started_ms?: number;
   ended_ms?: number;
+  author?: string;
 }
 
 export interface FrameExpect {

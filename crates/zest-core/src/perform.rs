@@ -868,7 +868,7 @@ impl TermState {
         // Column zero means the shell emitted the newline first, and then this
         // line really is where output begins.
         let line = if self.grid.cursor.col > 0 { line + 1 } else { line };
-        self.blocks.begin_output(line, command, self.now_ms);
+        self.blocks.begin_output(line, command, self.now_ms, self.input_author);
         self.prompt_end = None;
         self.touch();
     }
