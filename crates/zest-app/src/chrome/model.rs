@@ -450,6 +450,28 @@ pub struct OpenFileModel {
     pub host: String,
 }
 
+/// The find bar, while it is open (#519).
+///
+/// A floating panel in the focused pane's top-right — not docked above the
+/// grid, which would resize the pty (ADR-013's most expensive operation) and
+/// reflow the very text being searched, and not at the bottom, where the prompt
+/// chips and the live prompt are and `prompt_chips`'s never-overlay rule
+/// protects the caret.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindBarModel {
+    pub query: String,
+    pub caret: Caret,
+    /// `3 of 47`, `3 of 5000+`, or `No results` — never `0 of 0`.
+    pub count: String,
+    /// No hits, so the count is drawn in `danger` rather than `faint`.
+    pub empty: bool,
+    /// The `Aa` chip is lit.
+    pub case_sensitive: bool,
+    /// This session is remote, so the grid holds only what crossed the wire and
+    /// the count describes less than the session does.
+    pub local_only: bool,
+}
+
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScreenModel {
@@ -1065,6 +1087,8 @@ pub struct ChromeModel {
     /// The fleet picker, drawn over everything when open.
     /// The "Open file…" prompt, while it is up (#464).
     pub open_file: Option<OpenFileModel>,
+    /// The find bar, when open (#519).
+    pub find: Option<FindBarModel>,
     pub picker: Option<PickerModel>,
     /// The command palette, likewise modal. The app enforces that at most
     /// one overlay is open, so layout never has to rank them.

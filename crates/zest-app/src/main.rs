@@ -16,6 +16,7 @@ mod cloud;
 mod console;
 mod editor;
 mod fair_mutex;
+mod find;
 mod fleet;
 mod instance;
 mod keymap;
@@ -165,9 +166,10 @@ fn screen_from(value: Option<&str>) -> Result<app::StartScreen, String> {
         Some("profiles-rename") => Ok(app::StartScreen::ProfilesRename),
         Some("open-file") => Ok(app::StartScreen::OpenFile),
         Some("editor") => Ok(app::StartScreen::Editor),
+        Some("find") => Ok(app::StartScreen::Find),
         _ => Err(
             "--screen needs one of fleet|themes|settings|settings-menu|palette|dir-picker|\
-             launcher|profiles|profiles-rename|open-file|editor"
+             launcher|profiles|profiles-rename|open-file|editor|find"
                 .into(),
         ),
     }

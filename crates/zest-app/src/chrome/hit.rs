@@ -88,6 +88,18 @@ pub enum HitRegion {
     Strip,
     /// The title bar's "⌘K" pill; clicking opens the palette.
     PalettePill,
+    /// The find bar's panel — swallows a near-miss so a click beside the entry
+    /// does not fall through to the grid and move the selection out from under
+    /// the search.
+    FindPanel,
+    /// Previous / next hit. There is no chord for these (see
+    /// `Action::ToggleFind`), so the buttons and ⏎/⇧⏎ are the whole affordance.
+    FindPrev,
+    FindNext,
+    /// The `Aa` chip.
+    FindCase,
+    /// The find bar's ✕.
+    FindClose,
     /// The sidebar's search affordance; clicking opens the palette.
     SidebarSearch,
     /// The sidebar's footer ("4 hosts online · 1 asleep"); clicking opens
@@ -343,6 +355,14 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelT
         // scroll either while it is up.
         R::OpenFilePanel | R::OpenFileScrim => WheelTarget::Swallow,
 
+        // The find bar floats over the grid and has nothing to scroll of its
+        // own. Swallowed rather than passed through: the wheel would move the
+        // text out from under a hit the bar is pointing at, which reads as the
+        // search having jumped.
+        R::FindPanel | R::FindPrev | R::FindNext | R::FindCase | R::FindClose => {
+            WheelTarget::Swallow
+        }
+
         R::Strip
         | R::Tab(_)
         | R::TabClose(_)
@@ -447,6 +467,22 @@ pub struct ChromeHitMap {
 impl ChromeHitMap {
     pub fn push(&mut self, rect: [f32; 4], region: HitRegion) {
         self.regions.push((rect, region));
+    }
+
+    /// Where the pass put a region, if it drew one.
+    ///
+    /// The inverse of [`Self::hit`], and it exists for the discipline this map
+    /// is here to keep: a layout test asserts that what was *drawn* is what a
+    /// click *finds*, and without this it could only probe points it had
+    /// already assumed the answer for.
+    ///
+    /// `cfg(test)` because nothing in the running app asks this question --
+    /// and in a binary crate `pub` does not make an unused item allowed, so
+    /// leaving it in would fail `-D warnings` on every platform (#472).
+    #[cfg(test)]
+    #[must_use]
+    pub fn rect_of(&self, region: HitRegion) -> Option<[f32; 4]> {
+        self.regions.iter().rev().find(|(_, r)| *r == region).map(|(rect, _)| *rect)
     }
 
     /// The topmost region containing the point, if any.

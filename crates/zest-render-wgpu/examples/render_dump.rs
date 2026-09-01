@@ -199,6 +199,7 @@ async fn run() {
                 zest_core::Selection { anchor: a, head: b, mode: zest_core::SelectionMode::Simple }
             }),
             selection_bg: to_core_palette(&resolved).colors[8],
+            find: None,
             preedit: preedit.as_deref().map(|text| Preedit {
                 // Mid-string, so the caret is drawn between characters rather
                 // than only at an end -- the case that is easy to get wrong.

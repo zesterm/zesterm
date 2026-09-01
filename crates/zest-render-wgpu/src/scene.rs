@@ -218,6 +218,24 @@ fn advance(run: &mut Option<BandRun>, row: usize, at: Option<(u32, u64)>) -> Opt
 }
 
 /// One terminal view: a grid, where to draw it, and how it is coloured.
+/// What the find bar wants painted, and in which two colours.
+///
+/// Positions rather than text: a hit is a span of cells the grid already holds,
+/// so restating the characters here would be a second copy of the screen that
+/// could disagree with the first.
+#[derive(Debug, Clone, Copy)]
+pub struct FindHighlights<'a> {
+    /// Every hit on screen or off it; `span_on` drops the ones that are not
+    /// visible, exactly as it does for a selection reaching into scrollback.
+    pub matches: &'a [zest_core::search::Match],
+    /// Index into `matches` of the one the keyboard is on, if it is in range.
+    pub current: Option<usize>,
+    /// Fill for the hits that are not current.
+    pub bg: zest_core::Rgb,
+    /// Fill for the current hit. Drawn last, so it wins where hits abut.
+    pub current_bg: zest_core::Rgb,
+}
+
 pub struct Viewport<'a> {
     /// Where this viewport sits, in physical pixels.
     pub rect: [f32; 4],
@@ -275,6 +293,12 @@ pub struct Viewport<'a> {
     pub selection: Option<zest_core::Selection>,
     /// Colour of the selection highlight.
     pub selection_bg: zest_core::Rgb,
+    /// Find hits to highlight, when the find bar is open.
+    ///
+    /// Beside the selection rather than replacing it: a drag and a search are
+    /// two different questions about the same grid, and a person searching
+    /// inside text they have selected must keep seeing both.
+    pub find: Option<&'a FindHighlights<'a>>,
     /// Text an input method is still composing, drawn over the cursor.
     ///
     /// **Not in the grid, deliberately.** A composition is provisional and
@@ -637,6 +661,7 @@ impl Scene {
         // either way — a highlight that skipped it would make the selection lie
         // about what it will paste.
         self.emit_selection(grid, vp, ox, oy, cw, ch, clip);
+        self.emit_find(grid, vp, ox, oy, cw, ch, clip);
 
         for row in 0..drawn_rows(grid) {
             if !grid_draws(&rows, row) {
@@ -1318,6 +1343,87 @@ impl Scene {
         }
     }
 
+    /// Highlight every find hit on each visible row.
+    ///
+    /// `emit_selection`'s loop with one deliberate difference: it does **not**
+    /// consult `Selection::is_empty`. That is true whenever anchor == head,
+    /// which for a drag means a click that never moved and for a match means a
+    /// one-cell hit -- so the guard that is right one function up would silently
+    /// paint nothing for every single-character search. `span_on` is inclusive
+    /// of `head` and already answers correctly for a hit of any length.
+    ///
+    /// Drawn after the selection and before the glyphs: a hit composes with a
+    /// drag rather than replacing it, and text stays readable over both.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_find(
+        &mut self,
+        grid: &Grid,
+        vp: &Viewport<'_>,
+        ox: f32,
+        oy: f32,
+        cw: f32,
+        ch: f32,
+        clip: [f32; 4],
+    ) {
+        let Some(find) = vp.find else { return };
+        let cols = grid.cols();
+        let fill = |c: zest_core::Rgb| LinearRgba::opaque(c.r, c.g, c.b);
+
+        // Resolve each visible row's line **once**, then look matches up in it.
+        // The obvious shape -- for every match, scan every row -- is
+        // O(matches x rows), and `DEFAULT_MATCH_LIMIT` is 5,000: a one-letter
+        // needle on a tall window is a quarter of a million `resolved_row`
+        // calls per frame, which is jank in exactly the case a find bar is
+        // most likely to be open (a common word, while output streams).
+        let mut rows: Vec<(zest_core::LineId, isize)> = (0..drawn_rows(grid))
+            .filter_map(|row| {
+                let r = grid_row(row);
+                resolved_row(grid, vp, r).map(|line| (line.id, r))
+            })
+            .collect();
+        // Sorted so a match can binary-search into it. A fold reorders nothing
+        // today, but this pass must not be the thing that assumes so.
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        if rows.is_empty() {
+            return;
+        }
+
+        // Current last, so where two hits abut the current one wins: the last
+        // rect pushed is the one drawn on top.
+        let order = (0..find.matches.len())
+            .filter(|i| Some(*i) != find.current)
+            .chain(find.current.filter(|i| *i < find.matches.len()));
+
+        for i in order {
+            let m = find.matches[i];
+            let sel = m.highlight();
+            let paint = fill(if Some(i) == find.current { find.current_bg } else { find.bg });
+            // Only the rows this match actually spans, found by binary search
+            // rather than by scanning: a match covers one row and a bit even
+            // when it crosses a wrap.
+            let from = rows.partition_point(|(id, _)| *id < m.start.line);
+            for &(line, row) in &rows[from..] {
+                if line > m.end.line {
+                    break;
+                }
+                let Some((lo, hi)) = sel.span_on(line, cols) else { continue };
+                if hi <= lo {
+                    continue;
+                }
+                self.rects.push(RectInstance::filled(
+                    [
+                        ox + lo as f32 * cw,
+                        oy + row as f32 * ch,
+                        (hi - lo) as f32 * cw,
+                        ch,
+                    ],
+                    paint,
+                    clip,
+                ));
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emit_cursor(
         &mut self,
@@ -1639,6 +1745,7 @@ mod tests {
             scale: 1.0,
             selection: None,
             selection_bg: Rgb::new(0x33, 0x44, 0x55),
+            find: None,
             preedit: None,
             predicted: None,
             cursor_on: true,
@@ -2539,4 +2646,156 @@ mod tests {
         assert!(s.rects.is_empty());
         assert_eq!(s.rects.capacity(), cap);
     }
+
+    fn hit(line: u64, from: usize, to: usize) -> zest_core::search::Match {
+        zest_core::search::Match {
+            start: zest_core::AbsPos::new(line, from),
+            end: zest_core::AbsPos::new(line, to),
+        }
+    }
+
+    #[test]
+    fn a_find_hit_paints_the_rect_a_selection_would() {
+        // The anti-drift assertion. A hit is painted by handing
+        // `Match::highlight()` to the same `span_on` a drag uses, so these two
+        // paths must produce the identical rect -- if they ever diverge, a find
+        // bar highlights cells the clipboard would not copy.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(1, 2, 5)];
+
+        let mut by_find = Scene::default();
+        let vpf = Viewport {
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: None,
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: Rgb::new(0x99, 0x77, 0x22),
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vpf);
+        by_find.emit_find(&grid, &vpf, ox, oy, 8.0, 16.0, vpf.rect);
+
+        let mut by_sel = Scene::default();
+        let vps = Viewport { selection: Some(m[0].highlight()), ..viewport(&grid, &p, 1.0) };
+        by_sel.emit_selection(&grid, &vps, ox, oy, 8.0, 16.0, vps.rect);
+
+        assert_eq!(by_find.rects.len(), 1, "one row, one rect");
+        assert_eq!(
+            by_find.rects[0].rect, by_sel.rects[0].rect,
+            "a hit and the selection covering it paint the same cells"
+        );
+    }
+
+    #[test]
+    fn a_single_character_hit_is_painted() {
+        // The trap this exists for: `Selection::is_empty()` is true whenever
+        // anchor == head, which for a drag means a click that never moved --
+        // and `emit_selection` returns early on it. A one-cell match has
+        // anchor == head too, so an `emit_find` written by copying that loop
+        // draws nothing for every single-character search, which is among the
+        // likeliest things anyone types into a find bar.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(1, 3, 3)];
+        assert!(m[0].highlight().is_empty(), "the drag question calls this empty");
+
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: Some(0),
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: Rgb::new(0x99, 0x77, 0x22),
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        scene.emit_find(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+
+        assert_eq!(scene.rects.len(), 1, "the hit is drawn anyway");
+        assert_eq!(scene.rects[0].rect[2], 8.0, "one cell wide");
+    }
+
+    #[test]
+    fn the_current_hit_is_painted_last() {
+        // Where two hits abut, the one the keyboard is on has to be the one you
+        // see. Last pushed is drawn on top, so ordering is the whole mechanism.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(1, 0, 1), hit(1, 2, 3), hit(1, 4, 5)];
+        let current = Rgb::new(0x99, 0x77, 0x22);
+
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: Some(1),
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: current,
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        scene.emit_find(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+
+        assert_eq!(scene.rects.len(), 3, "every hit is drawn");
+        let last = scene.rects.last().expect("three rects");
+        assert_eq!(
+            last.rect[0],
+            ox + 2.0 * 8.0,
+            "the current hit is the one pushed last, so it wins where hits abut"
+        );
+    }
+
+    #[test]
+    fn a_match_off_screen_costs_no_rects() {
+        // The reason the row map is built once and binary-searched: the obvious
+        // shape scans every visible row for every match, and the limit is 5,000
+        // -- a one-letter needle on a tall window would be a quarter of a
+        // million span tests per frame, in exactly the case a find bar is most
+        // likely to be open. A match far above the viewport must cost nothing.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(9_000, 0, 3), hit(1, 0, 3)];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: None,
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: Rgb::new(0x99, 0x77, 0x22),
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        scene.emit_find(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+        assert_eq!(scene.rects.len(), 1, "only the on-screen match painted");
+    }
+
+    #[test]
+    fn a_hit_on_a_folded_row_paints_nothing() {
+        // Folded output is not on screen, and `resolved_row` already answers
+        // that for the selection. The find pass must not have its own opinion.
+        let p = palette();
+        let grid = lined(4, 10);
+        let m = [hit(1, 0, 4)];
+        let map = [0usize, 2, 3];
+        let mut scene = Scene::default();
+        let vp = Viewport {
+            row_map: Some(&map),
+            find: Some(&FindHighlights {
+                matches: &m,
+                current: None,
+                bg: Rgb::new(0x33, 0x44, 0x55),
+                current_bg: Rgb::new(0x99, 0x77, 0x22),
+            }),
+            ..viewport(&grid, &p, 1.0)
+        };
+        let (ox, oy) = grid_origin(&vp);
+        scene.emit_find(&grid, &vp, ox, oy, 8.0, 16.0, vp.rect);
+        assert!(scene.rects.is_empty(), "a row the fold hid has nothing to highlight");
+    }
+
 }

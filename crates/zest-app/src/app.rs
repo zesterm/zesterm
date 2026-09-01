@@ -2044,6 +2044,15 @@ pub struct App {
     /// The "Open file…" prompt, while it is up (#464). One of the
     /// mutually-exclusive overlays the app allows at most one of.
     open_file: Option<TextField>,
+    /// The find bar's query, while it is open (#519).
+    ///
+    /// Deliberately **not** exclusive with the other overlays: searching is
+    /// something you do *to* the grid you are looking at, so it stays up while
+    /// a block menu or the palette is used over it, and the grid keeps its own
+    /// selection underneath.
+    find: Option<TextField>,
+    /// What the last scan found for `find`'s query.
+    find_state: crate::find::FindState,
     settings_ui: Option<SettingsUiState>,
     /// The Profiles tab's editor state, while that tab exists (§12).
     profiles_ui: Option<ProfilesUiState>,
@@ -2207,6 +2216,12 @@ pub struct App {
     /// Composition state for the input method. See `zest_input::ime`.
     ime: zest_input::Ime,
     selection_bg: zest_core::Rgb,
+    /// `ui.accent` as the grid speaks it, for the current find hit (#519).
+    ///
+    /// Cached beside `selection_bg` and refreshed with it: both are theme
+    /// facts the renderer wants as `Rgb`, and a second one resolved per frame
+    /// would be the same conversion done sixty times a second.
+    accent_bg: zest_core::Rgb,
     /// Accumulated fractional wheel lines, so trackpads do not lose precision.
     scroll_accum: f32,
 
@@ -2311,6 +2326,10 @@ pub enum StartScreen {
     /// name is a click, and a review of a rename affordance that cannot be
     /// photographed is a review of the diff only.
     ProfilesRename,
+    /// The find bar, open over a session with a query already typed (#519).
+    /// ⌘F is a keystroke, so a picture of the bar needs a way in that is not
+    /// a keyboard — `settings-menu`'s argument.
+    Find,
     /// The "Open file…" prompt (#464) — `settings-menu`'s argument: a prompt
     /// that takes a keystroke to reach cannot otherwise be photographed.
     OpenFile,
@@ -2351,6 +2370,8 @@ impl App {
             resolved.selection_bg.g,
             resolved.selection_bg.b,
         );
+        let accent_bg =
+            zest_core::Rgb::new(theme.ui.accent.r, theme.ui.accent.g, theme.ui.accent.b);
 
         Self {
             config,
@@ -2384,6 +2405,8 @@ impl App {
             palette_ui: None,
             dir_picker: None,
             open_file: None,
+            find: None,
+            find_state: crate::find::FindState::default(),
             settings_ui: None,
             profiles_ui: None,
             launcher: None,
@@ -2434,6 +2457,7 @@ impl App {
             themes_view: Vec::new(),
             ime: zest_input::Ime::new(),
             selection_bg,
+            accent_bg,
             scroll_accum: 0.0,
             settings,
             cli_layer,
@@ -3157,6 +3181,114 @@ impl App {
         }
     }
 
+    /// Open the find bar, or re-select its query if it is already up (⌘F).
+    ///
+    /// Seeds from a single-line selection, the browsers' convention: the common
+    /// reason to select a word and press ⌘F is to look for that word. A
+    /// multi-line selection is not a search term and is ignored rather than
+    /// flattened into one.
+    ///
+    /// Not exclusive with the other overlays, unlike `open_file_prompt`:
+    /// searching is something you do *to* the grid you are looking at.
+    fn toggle_find(&mut self) {
+        let seed = self
+            .tabs
+            .active()
+            .and_then(|t| t.focused_session().or_else(|| Some(t.source())))
+            .and_then(|s| s.terminal().lock().selection_text())
+            .filter(|t| !t.is_empty() && !t.contains('\n'));
+
+        let mut field = self.find.take().unwrap_or_default();
+        if let Some(seed) = seed.filter(|_| field.text().is_empty()) {
+            field.set(seed);
+        }
+        // Select all so the next keystroke replaces: ⌘F on an open bar means
+        // "search for something else", never "append to what is there".
+        field.select_all();
+        self.find = Some(field);
+        self.run_find();
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Close the find bar, leaving the grid's own selection alone.
+    ///
+    /// Design §3 forbids two things lit at once, so the hits go and whatever
+    /// was selected before stays selected — Escape out of a search must not
+    /// also undo a drag.
+    fn close_find(&mut self) {
+        self.find = None;
+        self.find_state = crate::find::FindState::default();
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Re-scan the focused pane for the current query.
+    fn run_find(&mut self) {
+        let Some(field) = self.find.as_ref() else { return };
+        let needle = field.text().to_string();
+        let Some(tab) = self.tabs.active() else {
+            self.find_state = crate::find::FindState::default();
+            return;
+        };
+        let session = tab.focused_session().unwrap_or_else(|| tab.source());
+        // A remote pane's grid holds only what has crossed the wire: nothing
+        // asks the host for scrollback today, so the count describes what this
+        // window received rather than what the session has.
+        let local_only =
+            matches!(session.origin(), crate::source::Origin::Daemon { local: false, .. });
+        let query = zest_core::search::Query::smart(needle);
+        let (found, near) = {
+            let term = session.terminal();
+            let term = term.lock();
+            let found = term.grid().search(&query, zest_core::search::DEFAULT_MATCH_LIMIT);
+            (found, term.grid().line_id_at(0))
+        };
+        self.find_state.case_sensitive = query.case_sensitive;
+        self.find_state.local_only = local_only;
+        self.find_state.accept(found, near);
+        self.reveal_find_hit();
+    }
+
+    /// Step to the next or previous hit and bring it into view.
+    fn step_find(&mut self, delta: isize) {
+        self.find_state.step(delta);
+        self.reveal_find_hit();
+        self.mark_chrome_dirty();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Scroll the focused pane so the current hit is on screen.
+    fn reveal_find_hit(&mut self) {
+        let Some(line) = self.find_state.selected().map(|m| m.start.line) else { return };
+        let Some(tab) = self.tabs.active() else { return };
+        let session = tab.focused_session().unwrap_or_else(|| tab.source());
+        let mut term = session.terminal().lock();
+        term.scroll_to_line(line);
+    }
+
+    /// The find bar as the layout pass wants it.
+    fn find_model(&self) -> Option<crate::chrome::model::FindBarModel> {
+        let field = self.find.as_ref()?;
+        Some(crate::chrome::model::FindBarModel {
+            query: field.text().to_string(),
+            caret: crate::chrome::model::Caret {
+                at: field.caret(),
+                selection: field.selection(),
+            },
+            count: self.find_state.count_label(field.text().is_empty()),
+            empty: self.find_state.hits.is_empty() && !field.text().is_empty(),
+            case_sensitive: self.find_state.case_sensitive,
+            local_only: self.find_state.local_only,
+        })
+    }
+
     /// Open the "Open file…" prompt (#464).
     ///
     /// Exclusive with the other overlays, like every one of them: the app
@@ -3695,6 +3827,7 @@ impl App {
             Action::ToggleTabLayout => self.toggle_tab_layout(),
             Action::SplitRight => self.split_right(),
             Action::OpenFile => self.open_file_prompt(),
+            Action::ToggleFind => self.toggle_find(),
             Action::SplitRightOnHost => self.arm_pending(Pending::Split),
             Action::FocusPaneLeft => self.cycle_pane_focus(-1),
             Action::FocusPaneRight => self.cycle_pane_focus(1),
@@ -5680,6 +5813,10 @@ impl App {
             // appears, with nothing to see in any log.
             && self.block_menu.is_none()
             && self.open_file.is_none()
+            // The same trap again (#519): the find bar is chrome, and with the
+            // strip hidden it would be laid out into a cache thrown away before
+            // it is drawn — the bar opens, nothing appears, nothing logs it.
+            && self.find.is_none()
             // The same trap as the block menu, one surface along: a file pane
             // *is* chrome, so with the strip hidden its whole body would be
             // laid out and thrown away, and the pane would show nothing with
@@ -5811,6 +5948,7 @@ impl App {
 
         // Before the `&mut self` borrow below, since it reads the tab.
         let open_file_model = self.open_file_model();
+        let find_model = self.find_model();
         let dir_picker_model = self.dir_picker.as_mut().map(|state| {
             // Rows and their answers in one pass: `..` first when there is a
             // parent, then the children the filter keeps. The parallel
@@ -6522,6 +6660,7 @@ impl App {
             palette: palette_model,
             dir_picker: dir_picker_model,
             open_file: open_file_model,
+            find: find_model,
             settings: settings_model,
             launcher: launcher_model,
             block_menu: block_menu_model,
@@ -6710,6 +6849,19 @@ impl App {
                 self.launcher = None;
                 self.mark_chrome_dirty();
             }
+            (HitRegion::FindPrev, MouseButton::Left) => self.step_find(-1),
+            (HitRegion::FindNext, MouseButton::Left) => self.step_find(1),
+            (HitRegion::FindClose, MouseButton::Left) => self.close_find(),
+            (HitRegion::FindCase, MouseButton::Left) => {
+                // Smart case reads the query, so forcing it here would be a
+                // second source of truth for the same fact. Typing a capital
+                // is the toggle; the chip reports it.
+                self.run_find();
+                self.mark_chrome_dirty();
+            }
+            // Swallowed: a click beside the entry must not reach the grid and
+            // move the selection out from under the search.
+            (HitRegion::FindPanel, _) => {}
             (HitRegion::PalettePill, MouseButton::Left)
             | (HitRegion::SidebarSearch, MouseButton::Left) => {
                 self.perform(keymap::Action::ToggleFleetPicker);
@@ -10974,6 +11126,23 @@ impl App {
         // window, and this returned before drawing **anything**: not the file,
         // not the other panes, not the chrome, and not the screenshot this
         // frame was for. The one arm that needs a session takes it there.
+        // Resolved before the `&mut` borrows below, and from the fields
+        // directly rather than through `find_highlights(&self)`: a method
+        // taking all of `self` would collide with `gpu`/`fonts`, where these
+        // three fields are disjoint from them.
+        let find_hl = (self.find.is_some() && !self.find_state.hits.is_empty()).then(|| {
+            zest_render_wgpu::FindHighlights {
+                matches: &self.find_state.hits,
+                current: self.find_state.current,
+                // No new theme token: one would move the JSON schema, all five
+                // built-in themes and `check-export-web` for a colour the
+                // selection already has. The current hit takes the accent, so
+                // "the one I am on" reads without a legend.
+                bg: self.selection_bg,
+                current_bg: self.accent_bg,
+            }
+        });
+        let find_open = self.find.is_some();
         let (Some(gpu), Some(fonts), Some(window)) =
             (self.gpu.as_mut(), self.fonts.as_mut(), self.window.as_ref())
         else {
@@ -11299,7 +11468,10 @@ impl App {
                                 grid: term.grid(),
                                 palette: term.palette(),
                                 scroll_px,
-                                focused: self.focused && focused,
+                                // The find bar has the keyboard while it is
+                                // up, so the caret draws hollow and says where
+                                // the keys are going.
+                                focused: self.focused && focused && !find_open,
                                 opacity: pane_opacity(self.config.opacity, identity),
                                 // The same picture in every pane of the tab,
                                 // fitted to each one: the identity is the
@@ -11320,6 +11492,7 @@ impl App {
                                 scale,
                                 selection: term.selection(),
                                 selection_bg: pane_selection_bg(self.selection_bg, identity),
+                                find: if focused { find_hl.as_ref() } else { None },
                                 preedit: if focused { preedit } else { None },
                                 predicted: if focused {
                                     predicted.as_ref().map(|p| zest_render_wgpu::Predicted {
@@ -11401,7 +11574,9 @@ impl App {
                             grid: term.grid(),
                             palette: term.palette(),
                             scroll_px,
-                            focused: self.focused,
+                            // The find bar has the keyboard while it is up, so the
+                            // caret draws hollow and says where the keys are going.
+                            focused: self.focused && !find_open,
                             opacity: pane_opacity(self.config.opacity, identity),
                             background,
                             blocks: &bands,
@@ -11409,6 +11584,7 @@ impl App {
                             scale,
                             selection: term.selection(),
                             selection_bg: pane_selection_bg(self.selection_bg, identity),
+                            find: find_hl.as_ref(),
                             preedit: self.ime.preedit().map(|p| {
                                 zest_render_wgpu::Preedit { text: &p.text, cursor: p.cursor }
                             }),
@@ -11683,6 +11859,8 @@ impl App {
             resolved.selection_bg.g,
             resolved.selection_bg.b,
         );
+        self.accent_bg =
+            zest_core::Rgb::new(theme.ui.accent.r, theme.ui.accent.g, theme.ui.accent.b);
         // Seeding replaces the palette the escape sequences mutate, so an
         // `OSC 4` set before the theme change is deliberately lost -- a theme
         // change is exactly the moment the seed should win. Every tab: a
@@ -12361,6 +12539,23 @@ impl App {
                 self.open_dir_picker(cwd);
             }
             Some(StartScreen::OpenFile) => self.open_file_prompt(),
+            Some(StartScreen::Find) => {
+                self.toggle_find();
+                if let Some(field) = self.find.as_mut() {
+                    field.set("the");
+                }
+                self.run_find();
+                // Said out loud rather than photographed silently: a bar over a
+                // grid with nothing matching is a picture of the empty state
+                // wearing the full state's clothes, and #236's rule is that a
+                // screen which cannot be rendered honestly says so.
+                if self.find_state.hits.is_empty() {
+                    tracing::warn!(
+                        "--screen find: nothing in this session matches the seeded query, so \
+                         the picture shows the no-results state"
+                    );
+                }
+            }
             Some(StartScreen::Editor) => {
                 // A real file from wherever the binary was run, read through
                 // the in-process session's own host — which under
@@ -13098,6 +13293,58 @@ impl App {
                                 let shift = self.modifiers.shift_key();
                                 self.run_picker_action(action, shift);
                             }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                // The find bar takes the keys that are *text*, and only those.
+                //
+                // It is the one overlay that is not exclusive with the others,
+                // so it must not own the keyboard the way they do: swallowing
+                // everything here would stop ⌘K opening the palette over it and
+                // would make ⌘F on an open bar do nothing, when it is supposed
+                // to re-select the query. `command_for` first — the rule every
+                // text entry here follows (#228/#251/#270), so ⌘V reaches the
+                // field — then the chord table, on the block menu's pattern
+                // twenty lines up, except that a chord leaves the bar *open*:
+                // it is a search still in progress, not a menu being dismissed.
+                if self.find.is_some() {
+                    use winit::keyboard::{Key, NamedKey};
+                    if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
+                        let pasted = self.paste_text(&cmd);
+                        let mut copied = None;
+                        if let Some(field) = self.find.as_mut() {
+                            copied = field.apply(cmd, pasted.as_deref()).copied;
+                        }
+                        if let Some(text) = copied {
+                            self.set_clipboard(text);
+                        }
+                        self.run_find();
+                        self.mark_chrome_dirty();
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    if let Some(binding) =
+                        keymap::lookup(&event.logical_key, event.physical_key, self.modifiers)
+                    {
+                        self.perform(binding.action);
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.close_find();
+                        }
+                        // ⏎ / ⇧⏎ rather than a chord: ⌘G is spent by Open
+                        // file… and ⌘⇧F folds onto ⌘F's own Windows spelling,
+                        // so there is no letter left for find-next. See
+                        // `Action::ToggleFind`.
+                        Key::Named(NamedKey::Enter) => {
+                            let back = self.modifiers.shift_key();
+                            self.step_find(if back { -1 } else { 1 });
                         }
                         _ => {}
                     }
@@ -14489,6 +14736,14 @@ impl App {
                         self.chrome_layout = None;
                     }
                 }
+                // Re-scan once per frame at most, and only when the grid
+                // actually moved: an idle terminal produces no `grid_dirty`, so
+                // the 0%-idle damage guarantee above is untouched by having a
+                // find bar open.
+                if grid_dirty && self.find.is_some() {
+                    self.run_find();
+                    self.mark_chrome_dirty();
+                }
                 // Integrated once per frame, before the damage test decides
                 // anything: a spring in flight *is* damage, and asking it after
                 // the test would need a second reason to draw.
@@ -14498,7 +14753,15 @@ impl App {
                     // is about what the user is looking at, and the parser has
                     // no business knowing that. It also means a flood costs one
                     // snap per frame, not one per line.
-                    if grid_dirty && self.config.scroll_on_output {
+                    // Not while the find bar is holding a hit: a build printing
+                    // lines must not yank the view off the match somebody just
+                    // stepped to, which reads as the search having lost its
+                    // place. With no current hit there is nothing to protect
+                    // and the setting behaves as it always did.
+                    if grid_dirty
+                        && self.config.scroll_on_output
+                        && self.find_state.selected().is_none()
+                    {
                         if let Some(session) = self.tabs.active_source() {
                             session.terminal().lock().scroll_to_bottom();
                         }
