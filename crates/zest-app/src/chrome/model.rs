@@ -509,6 +509,17 @@ pub enum InheritChip {
     Overrides,
     /// Fell through to `profiles.defaults`: "inherited from Defaults", faint.
     Inherited,
+    /// Not about inheritance at all: this row reaches a session when it
+    /// *starts*, so changing it leaves every open tab as it was.
+    ///
+    /// Deliberately not the Settings screen's `restart` chip, which says
+    /// "needs a restart" in warning colours: nothing here needs zesterm
+    /// restarted, and a badge that over-claims is one people learn to ignore.
+    /// A process cannot be handed a new environment on any operating system —
+    /// WezTerm's docs say exactly this, in prose, next to the option; saying
+    /// it in the editor instead is the same fact where someone is actually
+    /// looking.
+    NewSessions,
 }
 
 /// One scheme option of the §12 swatch picker: a builtin theme's normal ANSI

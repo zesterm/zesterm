@@ -603,16 +603,45 @@ app-level, and putting them here invites profiles that fight each other over one
 
 **`env` is what makes a profile an identity rather than a colour.** Point a tool at its own
 config directory and the profile becomes a separate login — `CLAUDE_CONFIG_DIR`, `GH_CONFIG_DIR`,
-`KUBECONFIG`, `GIT_CONFIG_GLOBAL` are all the same one-line shape. Three placeholders, and no
-others: `${profile_dir}` (`<config>/profiles/<name>`, created when something points into it),
-`${profile}`, `${home}`. They resolve on the machine that *runs* the profile, which is what lets
-one profile mean the same thing on every machine in the fleet — the rule `starting_directory`
-already follows. `$FOO` is **not** expanded: these values reach the child's environment block
-without a shell, so implying otherwise would promise a substitution nothing performs. An empty
-value unsets a variable, and an unresolvable placeholder is left as written rather than emptied
-(emptying `"${profile_dir}/claude"` yields `/claude`, an absolute path at the filesystem root).
-Do not set `HOME`: the zsh hook resolves the user's dotfiles from the *daemon's* `HOME`, so a
-session would hand itself back the wrong ones — per-tool config-dir variables avoid it entirely.
+`KUBECONFIG`, `GIT_CONFIG_GLOBAL` are all the same one-line shape.
+
+Four placeholders and no others: `${profile_dir}` (`<config>/profiles/<name>`, created when
+something points into it), `${profile}`, `${home}`, and `${env:NAME}` for a variable the session
+would inherit anyway — `PATH = "${env:PATH}:/opt/bin"`. They resolve on the machine that *runs*
+the profile, which is what lets one profile mean the same thing on every machine in the fleet —
+the rule `starting_directory` already follows.
+
+Four decisions worth keeping, each with a failure behind it:
+
+- **A bare `$FOO` is text.** These values reach the child's environment block without a shell,
+  so implying shell expansion would promise a substitution nothing performs. `${env:NAME}` is
+  the explicit spelling, taken from VS Code, which documents exactly this for terminal `env`
+  values.
+- **`${env:…}` is namespaced so nothing can collide.** A bare `${VAR}` would make `${profile}`
+  ambiguous between our placeholder and a variable of that name, and a precedence rule is a
+  thing every user has to learn. kitty's bare form is safe only because kitty has no
+  placeholders of its own.
+- **An unresolvable placeholder is left as written, never emptied.** Emptying
+  `"${profile_dir}/claude"` yields `/claude`, an absolute path at the filesystem root. kitty and
+  Windows Terminal both leave it; Tabby empties it, which turns one typo in a `PATH` entry into
+  a destroyed `PATH` with nothing to see.
+- **`${env:…}` reads the inherited environment, never a sibling entry.** kitty resolves earlier
+  `env` lines because its config is line-ordered; a profile's env is a map, so "earlier" would
+  mean *alphabetically* earlier — one entry resolving and another not, for a reason invisible in
+  the file.
+
+`${home}` is **not** a synonym for `${env:HOME}`: `HOME` is `USERPROFILE` on Windows, and a
+profile written on one machine gets launched on another.
+
+An empty value unsets a variable — which is also how you drop something `profiles.defaults.env`
+sets, per variable rather than all-or-nothing. Do not set `HOME`: the zsh hook resolves the
+user's dotfiles from the *daemon's* `HOME`, so a session would hand itself back the wrong ones.
+
+The row carries an **`applies to new sessions`** chip rather than an inheritance one. A running
+process cannot be handed a new environment on any operating system, so editing this leaves open
+tabs as they were — and `env` is the one row whose inheritance is genuinely partial, so either
+inheritance chip would be a lie about half of it. No terminal surveyed shows this in its UI;
+WezTerm states it in prose beside the option, which is the closest prior art.
 
 Unlike the appearance rows, Defaults' `env` **merges** key by key: `profiles.defaults.env` is
 where fleet-wide variables live, and a profile naming one of its own must not throw them away.

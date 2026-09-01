@@ -146,7 +146,13 @@ pub fn build_profile_rows(
         for idx in members {
             let field = &fields[idx];
             let provenance = resolved.provenance_of(&field.key);
-            let chip = if ctx.is_defaults || NEVER_CHIP.contains(&field.key.as_str()) {
+            // `env` gives its chip slot to a different fact: it is on
+            // NEVER_CHIP because an inheritance chip could only ever be half
+            // true for it (`fold_meta` merges it key by key), and the slot is
+            // better spent saying when the row takes effect.
+            let chip = if field.key == "env" {
+                Some(InheritChip::NewSessions)
+            } else if ctx.is_defaults || NEVER_CHIP.contains(&field.key.as_str()) {
                 None
             } else {
                 match provenance {
@@ -758,17 +764,33 @@ mod tests {
     }
 
     #[test]
-    fn the_env_row_never_claims_a_single_inheritance() {
-        // Every other row's chip says one of two things. `env` is genuinely
-        // both at once -- `fold_meta` merges it key by key -- so either chip
-        // would be a lie about half the rows.
+    fn the_env_row_says_when_it_takes_effect_rather_than_claiming_an_inheritance() {
+        // Every other row's chip says one of two things about inheritance.
+        // `env` is genuinely both at once -- `fold_meta` merges it key by key
+        // -- so either would be a lie about half the rows, and the slot is
+        // better spent on the fact a user actually needs: a running process
+        // cannot be handed a new environment, so this reaches new sessions
+        // only.
         let c = config("[profiles.work.env]\nOWN = \"2\"\n");
         let (rows, chips, _) = build(&resolve_profile(&c, "work"), false);
         let idx = rows
             .iter()
             .position(|r| matches!(r, SettingsRowModel::Setting { key, .. } if key == "env"))
             .expect("the env row is rendered");
-        assert!(chips[idx].is_none(), "env must carry no inheritance chip");
+        assert_eq!(
+            chips[idx],
+            Some(InheritChip::NewSessions),
+            "env must say when it applies, and must never claim an inheritance it half has"
+        );
+
+        // And on Defaults, where every other chip is suppressed, it still
+        // says it: the fact is about processes, not about the cascade.
+        let (rows, chips, _) = build(&resolve_profile(&c, "defaults"), true);
+        let idx = rows
+            .iter()
+            .position(|r| matches!(r, SettingsRowModel::Setting { key, .. } if key == "env"))
+            .expect("the env row is rendered on Defaults too");
+        assert_eq!(chips[idx], Some(InheritChip::NewSessions));
     }
 
     #[test]
@@ -951,10 +973,19 @@ mod tests {
         );
         // And on Defaults itself, no chip lies about inheritance, but the
         // dot still marks (and resets) its own keys.
+        //
+        // `NewSessions` is exempt by construction rather than by exception:
+        // it is not an inheritance claim at all, it is a fact about processes
+        // — a running shell cannot be handed a new environment, on Defaults
+        // or anywhere else. Asserted as "no *inheritance* chip" so this test
+        // keeps meaning what its name says.
         let r = resolve_profile(&c, "defaults");
         let (rows, chips, _) = build(&r, true);
         for (row, chip) in rows.iter().zip(&chips) {
-            assert_eq!(*chip, None, "Defaults inherits from nothing: {row:?}");
+            assert!(
+                !matches!(chip, Some(InheritChip::Overrides | InheritChip::Inherited)),
+                "Defaults inherits from nothing: {row:?}"
+            );
         }
         let dot = rows.iter().find_map(|row| match row {
             SettingsRowModel::Setting { key, modified, .. } if key == "icon" => Some(*modified),

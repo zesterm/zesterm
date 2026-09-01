@@ -504,11 +504,27 @@ impl ExpandContext {
 /// | `${profile_dir}` | `<config dir>/profiles/<name>` |
 /// | `${profile}` | the profile's name |
 /// | `${home}` | the host's home directory |
+/// | `${env:NAME}` | the child's inherited `NAME` |
 ///
-/// `$FOO` is deliberately **not** expanded, and neither is any other token.
-/// These values go into the child's environment block directly, without a
-/// shell — so implying shell expansion would promise something nothing here
-/// delivers. A closed documented set is the honest shape.
+/// `$FOO` is deliberately **not** expanded: these values go into the child's
+/// environment block directly, without a shell, so implying shell expansion
+/// would promise something nothing here delivers. `${env:…}` is the explicit
+/// way to say it, spelled as VS Code spells it for the same job — and
+/// namespaced on purpose, so no environment variable can ever collide with a
+/// placeholder of ours. (kitty's bare `${VAR}` has no such problem only
+/// because kitty has no placeholders of its own.)
+///
+/// **`${home}` is not a synonym for `${env:HOME}`.** `HOME` is `USERPROFILE`
+/// on Windows, and a profile crosses the fleet: one written on a Mac may be
+/// launched on a Windows box, where the platform-neutral spelling is the only
+/// one that resolves.
+///
+/// **`${env:…}` sees the environment the child inherits, never a sibling entry
+/// in the same table.** kitty resolves earlier `env` lines because its config
+/// is line-ordered; a profile's env is a `BTreeMap`, so "earlier" would mean
+/// *alphabetically* earlier — `A = "${env:B}"` resolving differently from
+/// `Z = "${env:B}"` for a reason no one could see in the file. One pass, one
+/// source.
 ///
 /// An unresolvable or unknown `${token}` is left **verbatim** and warned about
 /// rather than replaced with an empty string. Silently emptying it would turn
@@ -538,7 +554,15 @@ pub fn expand(value: &str, ctx: &ExpandContext) -> String {
             "profile" => (!ctx.profile.is_empty()).then(|| ctx.profile.clone()),
             "profile_dir" => ctx.profile_dir().map(|p| p.display().to_string()),
             "home" => ctx.home.as_ref().map(|p| p.display().to_string()),
-            _ => None,
+            // The child inherits this process's environment, so reading it
+            // here gives the same answer the shell would have — which is what
+            // makes `PATH = "${env:PATH}:/x"` mean what it looks like. An
+            // empty name (`${env:}`) resolves to nothing and is left as
+            // written, like any other token we cannot answer.
+            _ => token
+                .strip_prefix("env:")
+                .filter(|name| !name.is_empty())
+                .and_then(|name| std::env::var(name).ok()),
         };
         match resolved {
             Some(text) => out.push_str(&text),
@@ -672,17 +696,33 @@ pub fn fields() -> Vec<UiField> {
         },
         UiField {
             widget: Widget::KeyValue,
-            description: "Environment for this profile's shell, over the host's own. \
-                          An empty value unsets a variable. Point a tool at its own \
-                          config directory and the profile becomes a separate login: \
+            // The first line is the whole row: `settings_ui::first_line` splits
+            // on a newline and a Rust `\` continuation makes none, so writing
+            // this as one flowing paragraph put 600 characters in a control
+            // that shows one. The rest is for the schema and the web client's
+            // editor, which render the full text.
+            description: "Environment for this profile's shell, layered over the host's own.\n\
+                          \n\
+                          An empty value unsets a variable. Pointing a tool at its own \
+                          config directory is what makes a profile a separate login: \
                           `CLAUDE_CONFIG_DIR = \"${profile_dir}/claude\"`, and the same \
-                          shape for GH_CONFIG_DIR, KUBECONFIG or GIT_CONFIG_GLOBAL. \
-                          `${profile_dir}`, `${profile}` and `${home}` are the only \
-                          placeholders, resolved on the machine that runs the profile; \
-                          `$FOO` is not expanded, because there is no shell here to do \
-                          it. Do not set HOME — the zsh hook reads the daemon's, so a \
-                          session would hand itself back the wrong dotfiles. Applies to \
-                          sessions started after the change."
+                          one-line shape for GH_CONFIG_DIR, KUBECONFIG or \
+                          GIT_CONFIG_GLOBAL.\n\
+                          \n\
+                          Placeholders: `${profile_dir}` (this profile's own directory, \
+                          created when something points into it), `${profile}`, \
+                          `${home}`, and `${env:NAME}` for a variable the session would \
+                          inherit anyway — `PATH = \"${env:PATH}:/opt/bin\"`. They \
+                          resolve on the machine that *runs* the profile, so one profile \
+                          means the same thing on every machine in the fleet. Nothing \
+                          else expands: a bare `$FOO` is text, because there is no shell \
+                          here to expand it, and a placeholder with no answer is left as \
+                          written rather than emptied. `${env:…}` reads the inherited \
+                          environment, never another entry in this table.\n\
+                          \n\
+                          Do not set HOME: the zsh hook resolves your dotfiles from the \
+                          daemon's HOME, so the session would hand itself back the wrong \
+                          ones. Per-tool config-dir variables avoid this entirely."
                 .to_string(),
             default: serde_json::Value::Object(serde_json::Map::new()),
             ..text("env", "Launch", "")
@@ -893,6 +933,29 @@ mod tests {
     }
 
     #[test]
+    fn every_fields_first_line_fits_a_row() {
+        // The profiles editor renders `first_line(&description)` -- everything
+        // up to the first newline -- in one row. A Rust `\` continuation makes
+        // no newline, so a description written as one flowing paragraph
+        // arrives as a single 600-character "line" in a control sized for a
+        // sentence. `env` shipped that way until this test existed.
+        //
+        // 140 rather than a tight bound: this is a wall against the failure
+        // mode, not a style rule, and the longest existing field sits well
+        // under it.
+        for field in fields() {
+            let first = field.description.lines().next().unwrap_or_default();
+            assert!(
+                first.len() <= 140,
+                "'{}': the row shows only the first line, and this one is {} chars. \
+                 Put the summary first, then a blank line, then the detail.",
+                field.key,
+                first.len()
+            );
+        }
+    }
+
+    #[test]
     fn a_profiles_env_merges_over_defaults_key_by_key() {
         // The deliberate opposite of `shell_env_replaces_wholesale_through_defaults`
         // directly above, and the reason `env` is a profile-only key rather
@@ -1023,6 +1086,85 @@ mod tests {
             "every occurrence expands, not just the first"
         );
         assert_eq!(expand("plain", &ctx), "plain", "a value with no token is untouched");
+    }
+
+    #[test]
+    fn env_colon_reads_the_environment_the_child_will_inherit() {
+        // The escape hatch, spelled as VS Code spells it for the same job.
+        // Namespaced on purpose: a bare `${VAR}` would make `${profile}`
+        // ambiguous between our placeholder and a variable of that name, and a
+        // precedence rule is a thing users have to learn. kitty gets away with
+        // the bare form only because it has no placeholders of its own.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("ZESTERM_TEST_EXPAND_SRC");
+        std::env::set_var("ZESTERM_TEST_EXPAND_SRC", "/opt/base");
+
+        let ctx = ExpandContext::default();
+        assert_eq!(
+            expand("${env:ZESTERM_TEST_EXPAND_SRC}/bin", &ctx),
+            "/opt/base/bin",
+            "the PATH-prepending case, which is why this exists at all"
+        );
+        assert_eq!(
+            expand("${env:ZESTERM_TEST_NOT_SET_ANYWHERE}", &ctx),
+            "${env:ZESTERM_TEST_NOT_SET_ANYWHERE}",
+            "an unset name is left as written -- Tabby empties it instead, which turns one \
+             typo in a PATH entry into a destroyed PATH with nothing to see"
+        );
+        assert_eq!(expand("${env:}", &ctx), "${env:}", "an empty name answers nothing");
+    }
+
+    #[test]
+    fn a_placeholder_of_ours_is_never_shadowed_by_a_variable_of_the_same_name() {
+        // The collision the `env:` prefix exists to make impossible. With a
+        // bare `${profile}` this test could not be written -- one of the two
+        // readings would have to lose, and which one would be a rule rather
+        // than a fact.
+        struct RestoreVar(&'static str);
+        impl Drop for RestoreVar {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _restore = RestoreVar("profile");
+        std::env::set_var("profile", "the-environments-idea-of-it");
+
+        let ctx = ExpandContext {
+            profile: "ours".into(),
+            config_dir: None,
+            home: None,
+        };
+        assert_eq!(expand("${profile}", &ctx), "ours", "our placeholder answers");
+        assert_eq!(
+            expand("${env:profile}", &ctx),
+            "the-environments-idea-of-it",
+            "and the environment is reachable under its own spelling, with no rule to learn"
+        );
+    }
+
+    #[test]
+    fn a_sibling_entry_is_not_a_source_for_expansion() {
+        // kitty resolves earlier `env` lines because kitty.conf is
+        // line-ordered. A profile's env is a `BTreeMap`, so "earlier" would
+        // mean *alphabetically* earlier: `A = "${env:B}"` would resolve and
+        // `Z = "${env:B}"` would not, for a reason invisible in the file.
+        // Expansion reads the inherited environment and nothing else, and this
+        // asserts the table itself is not a source.
+        let c = config(
+            "[profiles.work.env]\nBASE = \"/opt\"\nDERIVED = \"${env:BASE}/bin\"\n",
+        );
+        let meta = resolve_profile(&c, "work").meta;
+        let ctx = ExpandContext::default();
+        assert_eq!(
+            expand(meta.env.get("DERIVED").expect("the entry"), &ctx),
+            "${env:BASE}/bin",
+            "a sibling key must not resolve -- and being left as written says so plainly"
+        );
     }
 
     #[test]
