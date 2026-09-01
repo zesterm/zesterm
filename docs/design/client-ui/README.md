@@ -213,8 +213,10 @@ chip, a spacer, and `⌘K`. The launcher is not here — it sits beside the side
    reflows when the pointer arrives. A row 262px wide with a two-line label cannot
    spend width on both, which is why this one is revealed rather than always drawn
    — but a sidebar with no way to point at "close" is worse, and was the state
-   before #379: middle-click, unadvertised, or nothing. The pinned Settings row
-   still carries none (§11: app tabs have no close).
+   before #379: middle-click, unadvertised, or nothing. **The app rows carry the
+   same ×** on the same terms (#494) — the chord sits in that slot at rest, and
+   the argument above applies to them unchanged: a tab you cannot point at
+   "close" on is not an ordinary tab.
 5. Footer strip, 42px, top border `#1b2338`: `● 4 hosts online · 1 asleep` — clicking opens the fleet view.
 
 The header's session identity reads from the **active tab** — literal text there contradicts the pane the moment the active tab is not the first one.
@@ -414,15 +416,20 @@ list, and a modal cannot be left open beside a running shell.
 
 - **Horizontal layout:** an ordinary tab in the strip, **after the session tabs and before
   the `+`** — it takes its turn in the strip rather than being pinned anywhere. Same 34px
-  chip geometry and active treatment as a session tab (`ui.bg` fill, 1px `ui.line`, 2px
-  `ui.accent` inset top rule), but it sizes to its content instead of taking a 168px
-  minimum, and it carries no host dot, no close × and no second line: a ⚙ glyph plus
-  "Settings". At most one exists at a time.
-- **Vertical layout:** a pinned row directly above the fleet footer, separated by a 1px
-  `#1b2338` divider — ⚙, "Settings", and `⌘,` right-aligned in 10px mono. Selected row
-  fill `ui.accentSoft`, text `ui.accent`.
+  chip geometry, active treatment (`ui.bg` fill, 1px `ui.line`, 2px `ui.accent` inset top
+  rule) and **close ×** as a session tab, but it sizes to its content instead of taking a
+  168px minimum, and it carries no host dot and no second line: a ⚙ glyph plus "Settings".
+  The × has to be paid for in that content width or it lands on the label. At most one
+  exists at a time.
+- **Vertical layout:** an ordinary row in the scrolling list, **after the host groups**,
+  ungrouped — ⚙, "Settings", and `⌘,` right-aligned in 10px mono, replaced by the same ×
+  the session rows reveal under the pointer (§2), the slot reserved at the wider of the two
+  so the label never reflows. Selected row fill `ui.accentSoft`, text `ui.accent`. It has
+  no host, so it joins no group; it is not pinned anywhere either, because a tab that
+  cannot scroll off with the rest is not an ordinary tab.
 - `⌘,` opens it; if it is already open it activates that tab rather than opening a second.
-  Closing it is closing a tab.
+  Closing it is closing a tab — by the ×, by middle-click, or by `⌘W`, and all three go
+  through the same close path (#494).
 
 **Layout:** row — 214px category rail + content column.
 
@@ -541,7 +548,10 @@ reads the same walk — the web editor should render from that list, not a hand-
 Windows Terminal's model with the one addition the fleet forces: the host is part of the
 profile, so *"Ubuntu on forge"* is a single thing you can open, and a tab's colours tell you
 which machine you are typing on. Profiles get their **own top-level tab**, beside Settings —
-they are content, not preferences.
+they are content, not preferences. It is §11's app tab in every respect, in **both** tab
+positions, wearing ▤ where Settings wears ⚙ (two chips with one glyph are two chips you
+have to read the label of): same geometry, same close ×, same turn in the `⌘⇧]` cycle,
+opened and re-activated by `⌘⇧,`.
 
 Backed by `Settings::profiles` (`BTreeMap<String, toml::Table>` — the settings tree again,
 partially specified), so the editor is the same generated form scoped to a subtree, and the

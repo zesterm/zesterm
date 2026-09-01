@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty); every mutator replaces the file rather than truncating it, so a crash mid-save cannot cost somebody every setting they have |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, Settings and Profiles among them (#494), a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
@@ -315,6 +315,18 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       and the states (opening, refused, binary, empty), reached by ⌘G — not
       ⌘O, which a Desktop letter's Ctrl+Shift folding had already spent on
       copy-block-output. Design §13.
+- [x] **Settings and Profiles are ordinary, closable tabs — in both positions**
+      (#494). They were called ordinary and were not: neither drew a close ×,
+      Settings sat pinned in its own band above the fleet footer rather than in
+      the list, and Profiles was gated to the horizontal strip, so with left
+      tabs ⌘⇧, opened a pane the sidebar could neither show nor close. The cause
+      was that the two were modelled differently — Settings as two flags on
+      `TabStrip`, Profiles as a bool on its own struct beside an `AppScreen`
+      variant, which is one fact in two places. Both are now the same pair of
+      flags on `TabStrip`, so one `display_active()` answers for the strip, the
+      sidebar and the ⌘⇧] cycle (Profiles was missing from that cycle
+      entirely), and one `close_tab` answers for the ×, middle-click and ⌘W.
+      Design §11/§12.
 - [ ] **Editing and ⌘S**: the caret, selection, undo, and the conflict answer
       that offers reload-or-overwrite rather than picking one. The wire half
       (`WriteFile`, and a refusal carrying the disk's hash) landed in #446.

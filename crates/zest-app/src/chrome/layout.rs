@@ -140,6 +140,9 @@ const SEARCH_H: f32 = 30.0;
 const GROUP_HEADER_H: f32 = 26.0;
 const GROUP_GAP: f32 = 14.0;
 const SIDE_ROW_H: f32 = 44.0;
+/// App-tab rows in the sidebar (§11/§12). Shorter than a session row
+/// because they carry no cwd line — the only thing the second line was for.
+const APP_ROW_H: f32 = 32.0;
 const FOOTER_H: f32 = 42.0;
 /// The vertical layout's full-width header row (design §2). Public because
 /// `insets_at` must reserve it above the grid, exactly as it reserves the
@@ -249,6 +252,18 @@ pub fn pane_gutter(frame: [f32; 4], grid: [f32; 4], s: f32) -> f32 {
 const UI_BODY: f32 = 12.5;
 const UI_SMALL: f32 = 11.0;
 const UI_CHORD: f32 = 10.0;
+
+/// The glyph an app tab wears in both positions — ⚙ for Settings, ▤ for
+/// Profiles. One function so the chip and the sidebar row cannot drift; both
+/// are BMP, so ordinary font fallback finds them where a PUA icon would need
+/// a Nerd Font installed.
+#[must_use]
+fn app_tab_glyph(kind: TabKind) -> &'static str {
+    match kind {
+        TabKind::Profiles => "\u{25a4}",
+        _ => "\u{2699}",
+    }
+}
 const UI_STATUS: f32 = 10.5;
 
 /// Baseline that vertically centres a run of `px`-sized text in a band.
@@ -2470,10 +2485,11 @@ fn horizontal(
     // whenever the row overflowed.
     let viewport = (avail - new_tab_w).max(0.0);
 
-    // Widths per chip. App tabs (Settings, Profiles) size to their content;
-    // session chips share what is left at the 168px basis, shrink to the
-    // 104px floor, and past that the row scrolls rather than crushing —
-    // which is what makes the #51 class of overlap impossible.
+    // Widths per chip. App tabs (Settings, Profiles) size to their content —
+    // glyph, label and the same × every other chip carries (#494); session
+    // chips share what is left at the 168px basis, shrink to the 104px
+    // floor, and past that the row scrolls rather than crushing — which is
+    // what makes the #51 class of overlap impossible.
     let widths: Vec<f32> = {
         let mut app_total = 0.0;
         let mut sessions = 0usize;
@@ -2490,7 +2506,9 @@ fn horizontal(
                     let w = (2.0 * TAB_PAD * s
                         + TILE * s
                         + TAB_INNER_GAP * s
-                        + label_w)
+                        + label_w
+                        + TAB_INNER_GAP * s
+                        + CLOSE * s)
                         .min(TAB_MAX * s);
                     app_total += w;
                     w
@@ -2723,12 +2741,15 @@ fn horizontal(
                 );
             }
         } else {
-            // App tabs carry their own glyph (§11: ⚙ + "Settings") — BMP,
-            // reached by ordinary font fallback, unlike PUA icons.
+            // App tabs carry their own glyph (§11: ⚙ + "Settings"; §12: ▤ +
+            // "Profiles") — both BMP, reached by ordinary font fallback,
+            // unlike PUA icons. One glyph each rather than a shared ⚙: two
+            // chips that look the same are two chips you have to read.
             let gear_px = 12.0 * s;
-            let gw = measure("\u{2699}", gear_px, false, 0.0);
+            let glyph = app_tab_glyph(tab.kind);
+            let gw = measure(glyph, gear_px, false, 0.0);
             out.texts.push(TextRun {
-                text: "\u{2699}".into(),
+                text: glyph.into(),
                 pos: [
                     tile[0] + (tile[2] - gw) / 2.0,
                     baseline_in(tile[1], tile[3], gear_px),
@@ -2742,10 +2763,11 @@ fn horizontal(
             });
         }
 
-        // Session chips carry their close affordance, as the mock draws it;
-        // app tabs do not — closing Settings is closing a tab, but from its
-        // own chrome, not from a chip × it never shows.
-        let text_right = if tab.kind == TabKind::Session {
+        // Every chip carries the close affordance, as the mock draws it —
+        // app tabs included since #494. Closing Settings was always "closing
+        // a tab", and a tab whose only close is an unadvertised chord or a
+        // middle-click is not one you can point at.
+        let text_right = {
             let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
             let close =
                 [x + tab_w - TAB_PAD * s - CLOSE * s, chip_y + (TAB_H * s - CLOSE * s) / 2.0, CLOSE * s, CLOSE * s];
@@ -2770,8 +2792,6 @@ fn horizontal(
                 tracking: 0.0,
             });
             close[0] - TAB_INNER_GAP * s
-        } else {
-            x + tab_w - TAB_PAD * s
         };
 
         // The title only (design §1): host and cwd were a second line once,
@@ -3078,13 +3098,8 @@ fn vertical(
     }
 
     let footer_h = FOOTER_H * s;
-    // The pinned Settings row (§11): directly above the fleet footer,
-    // separated by its own divider, whenever the Settings tab exists.
-    let settings_tab = model.tabs.iter().position(|t| t.kind == TabKind::Settings);
-    let pinned_h = if settings_tab.is_some() { 37.0 * s } else { 0.0 };
     let rows_top = search[1] + search[3] + SEARCH_PAD * s;
-    let rows_clip =
-        [0.0, rows_top, sw, (m.height - rows_top - footer_h - pinned_h).max(0.0)];
+    let rows_clip = [0.0, rows_top, sw, (m.height - rows_top - footer_h).max(0.0)];
 
     // Geometry per group: a header line, then its session rows.
     let group_header_h = GROUP_HEADER_H * s;
@@ -3118,10 +3133,21 @@ fn vertical(
     let groups: &[super::model::HostGroup] =
         model.sidebar.as_ref().map_or(&fallback[..], |sb| &sb.groups[..]);
 
+    // The app tabs (§11/§12) are ordinary rows at the end of the list, not a
+    // band pinned above the footer: they scroll with everything else, which
+    // is what "treat them as normal tabs" costs and buys (#494). Ungrouped —
+    // they have no host — so they follow the last group rather than joining
+    // one.
+    let app_rows: Vec<usize> =
+        model.tabs.iter().enumerate()
+            .filter(|(_, t)| t.kind != TabKind::Session)
+            .map(|(i, _)| i)
+            .collect();
     let content_h: f32 = groups
         .iter()
         .map(|g| group_header_h + g.tabs.len() as f32 * row_h + GROUP_GAP * s)
-        .sum::<f32>();
+        .sum::<f32>()
+        + app_rows.len() as f32 * APP_ROW_H * s;
     let max_scroll = (content_h - rows_clip[3]).max(0.0);
     out.strip_scroll = model.strip_scroll.clamp(0.0, max_scroll);
 
@@ -3320,57 +3346,110 @@ fn vertical(
         y += GROUP_GAP * s;
     }
 
-    // The pinned Settings row (§11): ⚙, "Settings", the chord right-aligned
-    // in mono; selected takes the accentSoft fill and accent text.
-    if let Some(ti) = settings_tab {
-        let tab = &model.tabs[ti];
-        let py = m.height - footer_h - pinned_h;
-        out.rects.push(RectInstance::filled(
-            [0.0, py, sw, HAIRLINE * s],
-            colors.hairline_soft,
-            no_clip,
-        ));
-        let row = [ROW_HPAD * s, py + 4.0 * s, sw - 2.0 * ROW_HPAD * s, 30.0 * s];
-        let selected = ti == model.active;
-        let hovered = model.hover == Some(HitRegion::Tab(tab.addr));
-        if selected {
-            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.accent_soft, no_clip));
+    // The app tabs (§11/§12), in the same scrolling list as the sessions and
+    // wearing the same row: glyph, label, and a right slot that holds the
+    // chord until the pointer arrives and turns it into a ×.
+    //
+    // The slot is reserved at the wider of the two whichever is showing —
+    // the session row's rule (`slot_w` below), and for the same reason: a
+    // label that reflowed under the pointer is worse than no × at all.
+    for &ti in &app_rows {
+        let Some(tab) = model.tabs.get(ti) else { continue };
+        let row_box = [ROW_HPAD * s, y, sw - 2.0 * ROW_HPAD * s, APP_ROW_H * s];
+        let row = [row_box[0], row_box[1] + 1.0 * s, row_box[2], row_box[3] - 2.0 * s];
+
+        let active = ti == model.active;
+        // Row and × reveal together and stay revealed together — testing
+        // `Tab` alone would hide the × the moment the pointer entered it,
+        // and the click would fall through to the row and *activate*.
+        let close_hovered = model.hover == Some(HitRegion::TabClose(tab.addr));
+        let hovered = close_hovered || model.hover == Some(HitRegion::Tab(tab.addr));
+        if active {
+            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.accent_soft, rows_clip));
         } else if hovered {
-            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, no_clip));
+            out.rects.push(RectInstance::rounded(row, 8.0 * s, colors.tab_hover_bg, rows_clip));
         }
-        out.hit.push(row, HitRegion::Tab(tab.addr));
-        let ink = if selected { colors.accent } else { colors.text_inactive };
+        if let Some(hit) = intersect(row, rows_clip) {
+            out.hit.push(hit, HitRegion::Tab(tab.addr));
+        }
+
+        let ink = if active { colors.accent } else { colors.text_inactive };
+        let glyph = app_tab_glyph(tab.kind);
+        let glyph_px = 12.0 * s;
         out.texts.push(TextRun {
-            text: "\u{2699}".into(),
-            pos: [row[0] + 10.0 * s, baseline_in(row[1], row[3], 12.0 * s)],
+            text: glyph.into(),
+            pos: [row[0] + 10.0 * s, baseline_in(row[1], row[3], glyph_px)],
             max_width: 16.0 * s,
             color: ink,
-            clip: no_clip,
-            px: 12.0 * s,
+            clip: rows_clip,
+            px: glyph_px,
             bold: false,
             tracking: 0.0,
         });
+
+        let chord = match tab.kind {
+            TabKind::Profiles => &model.profiles_chord,
+            _ => &model.settings_chord,
+        };
+        let chord_w = measure(chord, UI_CHORD * s, false, 0.0);
+        let slot_w = chord_w.max(CLOSE * s);
+        let slot_right = row[0] + row[2] - 10.0 * s;
+        let text_right = slot_right - slot_w - TAB_INNER_GAP * s;
+
+        let text_x = row[0] + 28.0 * s;
         out.texts.push(TextRun {
             text: tab.title.clone(),
-            pos: [row[0] + 28.0 * s, baseline_in(row[1], row[3], UI_BODY * s)],
-            max_width: row[2] - 70.0 * s,
+            pos: [text_x, baseline_in(row[1], row[3], UI_BODY * s)],
+            max_width: (text_right - text_x).max(0.0),
             color: ink,
-            clip: no_clip,
+            clip: rows_clip,
             px: UI_BODY * s,
             bold: false,
             tracking: 0.0,
         });
-        let chord_w = measure(&model.settings_chord, UI_CHORD * s, false, 0.0);
-        out.texts.push(TextRun {
-            text: model.settings_chord.clone(),
-            pos: [row[0] + row[2] - 10.0 * s - chord_w, baseline_in(row[1], row[3], UI_CHORD * s)],
-            max_width: chord_w + 2.0,
-            color: colors.text_faint,
-            clip: no_clip,
-            px: UI_CHORD * s,
-            bold: false,
-            tracking: 0.0,
-        });
+
+        if hovered {
+            let close = [
+                slot_right - CLOSE * s,
+                row[1] + (row[3] - CLOSE * s) / 2.0,
+                CLOSE * s,
+                CLOSE * s,
+            ];
+            if close_hovered {
+                out.rects.push(RectInstance::rounded(close, 4.0 * s, colors.line, rows_clip));
+            }
+            // After the row's own region, never before it: `hit()` walks in
+            // reverse, so the last one pushed is the one that wins.
+            if let Some(hit) = intersect(close, rows_clip) {
+                out.hit.push(hit, HitRegion::TabClose(tab.addr));
+            }
+            let glyph_w = measure("\u{d7}", UI_BODY * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: "\u{d7}".into(),
+                pos: [
+                    close[0] + (close[2] - glyph_w) / 2.0,
+                    baseline_in(close[1], close[3], UI_BODY * s),
+                ],
+                max_width: close[2],
+                color: if close_hovered { colors.text_active } else { colors.text_faint },
+                clip: rows_clip,
+                px: UI_BODY * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        } else {
+            out.texts.push(TextRun {
+                text: chord.clone(),
+                pos: [slot_right - chord_w, baseline_in(row[1], row[3], UI_CHORD * s)],
+                max_width: chord_w + 2.0,
+                color: colors.text_faint,
+                clip: rows_clip,
+                px: UI_CHORD * s,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        y += APP_ROW_H * s;
     }
 
     // Footer: fleet counts, and the door to the fleet view.
@@ -3501,6 +3580,7 @@ mod tests {
             grid_area: [0.0, 46.0, 1200.0, 726.0],
             palette_chord: "⌘K".into(),
             settings_chord: "\u{2318},".into(),
+            profiles_chord: "\u{2318}\u{21e7},".into(),
             picker: None,
             palette: None,
             dir_picker: None,
@@ -3828,21 +3908,58 @@ mod tests {
     }
 
     #[test]
-    fn the_pinned_settings_row_offers_no_close() {
-        // Closing Settings is closing a tab, but from its own chrome — app
-        // tabs carry no × in either position (§11), and the pinned row is
-        // laid out by its own code, so the horizontal rule does not cover it.
-        let mut settings = tab(2, TabOrigin::Local, TabPresence::Online);
-        settings.kind = TabKind::Settings;
-        settings.title = "Settings".into();
-        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online), settings];
-        let m = metrics(1200.0, 800.0, 1.0);
-        let mut mo = model(tabs, TabsPosition::Left);
-        mo.hover = Some(HitRegion::Tab(addr(2)));
-        let l = layout(&mo, &colors(), &m, &mut measure);
-        assert!(
-            !sidebar_closes(&l).contains(&addr(2)),
-            "the pinned Settings row has no × to point at"
+    fn the_sidebars_app_rows_offer_a_close_like_every_other_row() {
+        // #494. These rows are laid out by their own code, so the horizontal
+        // rule does not cover them — and the sidebar was where the gap was
+        // worst: Settings sat pinned above the footer with nothing to point
+        // at, and Profiles was not drawn at all.
+        for (kind, title) in [(TabKind::Settings, "Settings"), (TabKind::Profiles, "Profiles")] {
+            let mut app = tab(2, TabOrigin::Local, TabPresence::Online);
+            app.kind = kind;
+            app.title = title.into();
+            let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online), app];
+            let m = metrics(1200.0, 800.0, 1.0);
+            let mut mo = model(tabs, TabsPosition::Left);
+
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            assert!(
+                !sidebar_closes(&l).contains(&addr(2)),
+                "{title}: at rest the slot holds the chord, not a ×"
+            );
+
+            mo.hover = Some(HitRegion::Tab(addr(2)));
+            let l = layout(&mo, &colors(), &m, &mut measure);
+            assert!(
+                sidebar_closes(&l).contains(&addr(2)),
+                "{title}: the pointer on the row reveals a × to point at"
+            );
+        }
+    }
+
+    #[test]
+    fn an_app_rows_label_does_not_move_when_its_close_appears() {
+        // The session row's rule (`a row with no age still does not move`),
+        // applied to the app rows: the right slot is reserved at the wider of
+        // the chord and the ×, so the title is handed the same budget either
+        // way. Making the reserve conditional is the tempting fix and it is
+        // the bug — the label would jump under the pointer.
+        let width_of = |hover: Option<HitRegion>| {
+            let mut app = tab(2, TabOrigin::Local, TabPresence::Online);
+            app.kind = TabKind::Settings;
+            app.title = "Settings".into();
+            let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online), app], TabsPosition::Left);
+            mo.hover = hover;
+            let l = layout(&mo, &colors(), &metrics(1200.0, 800.0, 1.0), &mut measure);
+            l.texts
+                .iter()
+                .find(|t| t.text == "Settings")
+                .map(|t| t.max_width)
+                .expect("the app row carries its label")
+        };
+        assert_eq!(
+            width_of(None),
+            width_of(Some(HitRegion::Tab(addr(2)))),
+            "the label keeps its budget when the × replaces the chord"
         );
     }
 
@@ -5124,10 +5241,12 @@ mod tests {
     }
 
     #[test]
-    fn app_tabs_size_to_content_and_offer_no_close() {
-        // Design §11: Settings and Profiles are ordinary tabs with the same
-        // active treatment, but they size to their content instead of taking
-        // the 168px basis, and carry no close ×.
+    fn app_tabs_size_to_content_and_offer_a_close() {
+        // Design §11/§12: Settings and Profiles are ordinary tabs with the
+        // same active treatment and the same close ×; the one thing they do
+        // differently is size to their content instead of taking the 168px
+        // basis. The × has to be paid for in that width, or it lands on the
+        // label (#494).
         let mut settings = tab(9, TabOrigin::Local, TabPresence::Online);
         settings.kind = TabKind::Settings;
         settings.title = "Settings".into();
@@ -5160,7 +5279,7 @@ mod tests {
         let close_anywhere = (0..1200).step_by(2).any(|x| {
             (0..46).any(|y| l.hit.hit(x as f32, y as f32) == Some(HitRegion::TabClose(addr(9))))
         });
-        assert!(!close_anywhere, "an app tab shows no close affordance");
+        assert!(close_anywhere, "an app tab shows the close affordance every chip has");
         assert!(
             l.texts.iter().any(|t| t.text == "Settings"),
             "the app tab carries its label"
@@ -5168,10 +5287,97 @@ mod tests {
     }
 
     #[test]
-    fn the_vertical_sidebar_pins_settings_above_the_fleet_footer() {
-        // §11: in the vertical layout Settings is a pinned row directly
-        // above the fleet footer with the ⌘, chord — never a session row
-        // grouped under a host it does not have.
+    fn the_profiles_tab_is_drawn_in_both_positions() {
+        // The regression #494 was opened for. Profiles was gated to
+        // `TabsPosition::Top`, so with left tabs ⌘⇧, opened a pane the
+        // sidebar could neither show nor close — and a horizontal-only test
+        // is exactly the one that cannot see it.
+        for position in [TabsPosition::Top, TabsPosition::Left] {
+            let mut profiles = tab(9, TabOrigin::Local, TabPresence::Online);
+            profiles.kind = TabKind::Profiles;
+            profiles.title = "Profiles".into();
+            profiles.host = String::new();
+            let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online), profiles];
+            let m = metrics(1000.0, 700.0, 1.0);
+            let mut mo = model(tabs, position);
+            mo.hover = Some(HitRegion::Tab(addr(9)));
+            let l = layout(&mo, &colors(), &m, &mut measure);
+
+            assert!(
+                l.texts.iter().any(|t| t.text == "Profiles"),
+                "{position:?}: the Profiles tab carries its label"
+            );
+            let hit_anywhere = |want: HitRegion| {
+                (0..1000).step_by(2).any(|x| {
+                    (0..700).step_by(2).any(|y| l.hit.hit(x as f32, y as f32) == Some(want))
+                })
+            };
+            assert!(
+                hit_anywhere(HitRegion::Tab(addr(9))),
+                "{position:?}: …and can be clicked"
+            );
+            assert!(
+                hit_anywhere(HitRegion::TabClose(addr(9))),
+                "{position:?}: …and closed by pointing at it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_active_app_tab_puts_no_host_in_the_vertical_header() {
+        // The header names the machine the *active tab's shell* runs on, and
+        // an app tab has none — it is a place. The layout already declines
+        // an empty host ("a pill with an empty label is chrome lint"), so
+        // what this pins is the other half: that the app never fills the
+        // field in. Profiles did, harmlessly, for as long as it could only
+        // appear in the horizontal strip — which draws no header — so
+        // showing it in both positions is what would have surfaced a
+        // "Profiles · local" pill on a tab with no shell behind it.
+        for kind in [TabKind::Settings, TabKind::Profiles] {
+            let mut app = tab(9, TabOrigin::Local, TabPresence::Online);
+            app.kind = kind;
+            app.title = "App".into();
+            app.host = String::new();
+            app.cwd = String::new();
+            let mut mo = model(vec![app], TabsPosition::Left);
+            mo.active = 0;
+            let l = layout(&mo, &colors(), &metrics(900.0, 600.0, 1.0), &mut measure);
+            // The header band is above the sidebar rows; nothing in it may
+            // name a host for a tab that has none.
+            assert!(
+                !l.texts.iter().any(|t| t.text == "local" || t.text.contains(" \u{b7} ")),
+                "{kind:?}: the header says no host for an app tab: {:?}",
+                l.texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_app_tabs_wear_different_glyphs() {
+        // Both drew ⚙ before #494, which is two chips you have to read the
+        // label of to tell apart — the glyph is doing no work at that point.
+        let glyphs = |kind| {
+            let mut app = tab(9, TabOrigin::Local, TabPresence::Online);
+            app.kind = kind;
+            app.title = "App".into();
+            let l = layout(
+                &model(vec![app], TabsPosition::Top),
+                &colors(),
+                &metrics(800.0, 600.0, 1.0),
+                &mut measure,
+            );
+            l.texts.iter().map(|t| t.text.clone()).collect::<Vec<_>>()
+        };
+        assert!(glyphs(TabKind::Settings).contains(&"\u{2699}".to_string()), "Settings wears ⚙");
+        assert!(glyphs(TabKind::Profiles).contains(&"\u{25a4}".to_string()), "Profiles wears ▤");
+    }
+
+    #[test]
+    fn the_vertical_sidebar_lists_the_app_tabs_after_the_sessions() {
+        // #494: the app rows follow the last host group *in the scrolling
+        // list* — they used to be a band pinned above the fleet footer,
+        // which is not where an ordinary tab lives. Still ungrouped: they
+        // have no host, and a row under a fake one would be worse than none.
         let mut settings = tab(9, TabOrigin::Local, TabPresence::Online);
         settings.kind = TabKind::Settings;
         settings.title = "Settings".into();
@@ -5180,23 +5386,31 @@ mod tests {
         let m = metrics(800.0, 600.0, 1.0);
         let l = layout(&model(tabs, TabsPosition::Left), &colors(), &m, &mut measure);
 
-        let hits: Vec<f32> = (0..600)
-            .map(|y| y as f32)
-            .filter(|&y| l.hit.hit(30.0, y) == Some(HitRegion::Tab(addr(9))))
-            .collect();
-        assert!(!hits.is_empty(), "the pinned row answers as the settings tab");
+        let rows_of = |a: SessionAddr| -> Vec<f32> {
+            (0..600)
+                .map(|y| y as f32)
+                .filter(|&y| l.hit.hit(30.0, y) == Some(HitRegion::Tab(a)))
+                .collect()
+        };
+        let session = rows_of(addr(1));
+        let app = rows_of(addr(9));
+        assert!(!app.is_empty(), "the app row answers as the settings tab");
+        assert!(
+            app[0] > *session.last().expect("the session row is drawn"),
+            "the app row follows the sessions: session {session:?}, app {app:?}"
+        );
         let footer_top = 600.0 - FOOTER_H;
         assert!(
-            hits.iter().all(|&y| y > footer_top - 40.0 && y < footer_top),
-            "the row sits directly above the footer, not among the session rows: {hits:?}"
+            app.iter().all(|&y| y < footer_top - 40.0),
+            "…and sits among the rows, not pinned against the footer: {app:?}"
         );
         assert!(
             l.texts.iter().any(|t| t.text == "\u{2318},"),
-            "the chord rides the pinned row"
+            "the chord rides the app row"
         );
         assert!(
             l.texts.iter().filter(|t| t.text == "Settings").count() == 1,
-            "settings appears once — pinned, not also grouped under a host"
+            "settings appears once — listed, not also grouped under a host"
         );
     }
 
