@@ -1151,11 +1151,13 @@ impl ToolSet {
     /// machine that runs it has one.
     fn config(conn: &Conn, args: &Value) -> Result<Value, ToolError> {
         let key = opt_str(args, "key")?.unwrap_or_default().trim().to_string();
+        let want_fields = opt_bool(args, "fields")?.unwrap_or(false);
+        let want_themes = opt_bool(args, "themes")?.unwrap_or(false);
         let reply = conn.get_config(
             if key.is_empty() { Vec::new() } else { vec![key] },
             opt_str(args, "profile")?.unwrap_or_default().trim().to_string(),
-            opt_bool(args, "fields")?.unwrap_or(false),
-            opt_bool(args, "themes")?.unwrap_or(false),
+            want_fields,
+            want_themes,
         )?;
         let HostMessage::ConfigState {
             path,
@@ -1192,23 +1194,31 @@ impl ToolSet {
         });
         let map = out.as_object_mut().expect("built as an object");
         if let Some(p) = profile_detail {
-            map.insert("profile".into(), serde_json::to_value(&*p).unwrap_or(Value::Null));
+            map.insert("profile".into(), json(&*p));
         }
-        if !fields.is_empty() {
-            map.insert("fields".into(), serde_json::to_value(&fields).unwrap_or(Value::Null));
+        // Keyed off what was **asked for**, not off whether the answer is
+        // empty. Those are different questions and conflating them makes the
+        // reply ambiguous exactly where a caller is already confused: ask for
+        // `fields` with a mistyped `key` and an emptiness-keyed reply omits
+        // them, which reads as "you did not ask" rather than "nothing matched
+        // that key". Same rule the wire itself follows -- an empty answer and
+        // a refused one must not render the same.
+        if want_fields {
+            map.insert("fields".into(), json(&fields));
         }
-        if !themes.is_empty() {
-            map.insert("themes".into(), serde_json::to_value(&themes).unwrap_or(Value::Null));
+        if want_themes {
+            map.insert("themes".into(), json(&themes));
         }
-        // Both are things the *person* would want to know and neither is a
-        // failure, so they ride along rather than becoming refusals: a typo in
-        // their config and a config written for a newer zesterm look identical,
-        // and only they can tell which it is.
+        // These two have no request flag, so absence is unambiguous: there was
+        // nothing to say. Both are things the *person* would want to know and
+        // neither is a failure, so they ride along rather than becoming
+        // refusals -- a typo in their config and a config written for a newer
+        // zesterm look identical, and only they can tell which it is.
         if !unknown_keys.is_empty() {
-            map.insert("unknown_keys".into(), serde_json::to_value(&unknown_keys).unwrap_or(Value::Null));
+            map.insert("unknown_keys".into(), json(&unknown_keys));
         }
         if !problems.is_empty() {
-            map.insert("problems".into(), serde_json::to_value(&problems).unwrap_or(Value::Null));
+            map.insert("problems".into(), json(&problems));
         }
         Ok(out)
     }
@@ -1547,6 +1557,17 @@ fn plan_ends_with_enter(keys: &[Chord]) -> bool {
 ///
 /// The same reasoning as [`opt_bool`]: `{"text": 42}` silently becoming "no
 /// text" is a call that reports success and types nothing.
+/// Serialize a config payload, or panic saying which one.
+///
+/// `unwrap_or(Value::Null)` was the wrong shape here: these are plain records
+/// of `String`s and `bool`s, so a failure is a bug in this process rather than
+/// anything a caller did — and silently emitting `null` would put a value in
+/// the reply that the tool's own schema says cannot appear, leaving whoever
+/// hits it to work backwards from a `null` with no message attached.
+fn json<T: serde::Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).expect("a config payload is plain data and always serializes")
+}
+
 fn opt_str<'a>(args: &'a Value, field: &'static str) -> Result<Option<&'a str>, ToolError> {
     match args.get(field) {
         None | Some(Value::Null) => Ok(None),

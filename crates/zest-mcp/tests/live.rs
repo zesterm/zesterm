@@ -1687,4 +1687,25 @@ fn the_field_metadata_and_theme_roster_are_opt_in() {
         themes.iter().any(|t| t["id"] == "obsidian" && t["builtin"] == true),
         "the roster must carry that machine's built-ins: {themes:?}"
     );
+
+    // Asked for and empty is not the same answer as not asked for, and this is
+    // the case that tells them apart: a mistyped `key` alongside `fields: true`
+    // matches nothing. Keyed off emptiness, the reply would omit `fields`
+    // entirely and read as "you did not ask" to the one caller who did --
+    // while the *values* list is empty for the same reason and says so.
+    let typo = t
+        .call("config", &serde_json::json!({ "key": "typographyy", "fields": true }))
+        .expect("a filter matching nothing is still a successful read");
+    let fields = typo["fields"]
+        .as_array()
+        .expect("`fields` was asked for, so it is present even when nothing matched");
+    assert!(fields.is_empty(), "nothing matches `typographyy`: {fields:?}");
+    assert!(
+        typo["values"].as_array().expect("values").is_empty(),
+        "and the values agree, which is what says the key was the problem"
+    );
+    assert!(
+        typo.get("themes").is_none(),
+        "while a slice that was not asked for stays absent: {typo}"
+    );
 }
