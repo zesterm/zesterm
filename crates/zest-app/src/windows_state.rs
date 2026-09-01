@@ -124,16 +124,24 @@ pub fn load() -> Option<SavedWindows> {
     from_file().or_else(|| crate::tabs_state::load().map(SavedWindows::from_tabs_v1))
 }
 
-/// Persist the window set. Atomic (temp + rename) so a crash mid-write leaves
-/// the previous set rather than half a file; never fatal, because losing the
-/// memory of windows must not take the windows with it.
+/// Persist the window set. Atomic (temp + `sync_all` + rename) so a crash
+/// mid-write leaves the previous set rather than half a file — the rename
+/// alone is not enough, since it can land before the bytes do; never fatal,
+/// because losing the memory of windows must not take the windows with it.
 pub fn save(saved: &SavedWindows) {
     let Some(path) = file() else { return };
     let Some(dir) = path.parent() else { return };
     let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        // A serialization failure is an error, not an empty file: an empty
+        // file reads as "nothing remembered" and would quietly erase the set.
+        let bytes = serde_json::to_vec_pretty(saved).map_err(std::io::Error::other)?;
         std::fs::create_dir_all(dir)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(saved).unwrap_or_default())?;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
         std::fs::rename(&tmp, &path)?;
         Ok(())
     };

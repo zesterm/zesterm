@@ -178,7 +178,8 @@ impl WindowSpec {
 /// Where a wakeup goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
-    /// The window whose strip holds this session (a tab or a pane).
+    /// Every window whose strip holds this session (a tab or a pane) —
+    /// possibly more than one, since adoption dedupes per strip.
     Owner(zest_proto::SessionAddr),
     /// Every window. Each arm is already a no-op for a window the event does
     /// not concern: a `Redraw` reaches a frame that finds nothing dirty and
@@ -475,11 +476,20 @@ impl ApplicationHandler<Wakeup> for Process {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: Wakeup) {
         match route(&event) {
-            Route::Owner(addr) => match self.windows.iter_mut().find(|w| w.owns(addr)) {
-                Some(w) => w.handle_wakeup(event),
-                // Closed between the send and now; nothing to tell.
-                None => tracing::debug!(%addr, ?event, "wakeup for a session no window holds"),
-            },
+            // Every owner, not the first: adoption refuses a duplicate within
+            // one strip, so the same session can be open in two windows, and
+            // a tab's exit must mark it in both.
+            Route::Owner(addr) => {
+                let mut delivered = false;
+                for w in self.windows.iter_mut().filter(|w| w.owns(addr)) {
+                    w.handle_wakeup(event);
+                    delivered = true;
+                }
+                if !delivered {
+                    // Closed between the send and now; nothing to tell.
+                    tracing::debug!(%addr, ?event, "wakeup for a session no window holds");
+                }
+            }
             Route::Broadcast => {
                 for w in &mut self.windows {
                     w.handle_wakeup(event);
