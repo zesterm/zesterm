@@ -610,6 +610,18 @@ pub fn rename_error(existing: &[String], from: &str, to: &str) -> Option<&'stati
     if to.chars().any(char::is_control) {
         return Some("a profile name cannot contain control characters");
     }
+    // A name is also a *path segment*: `${profile_dir}` is
+    // `<config>/profiles/<name>` (#496). A separator would make it two
+    // segments and `..` would climb out, so a profile could name a directory
+    // somewhere else entirely — and until this check existed, `profile_dir`'s
+    // own guard was the only thing standing there, silently refusing to
+    // resolve for a name the editor had happily accepted.
+    if to.contains(['/', '\\']) {
+        return Some("a profile name cannot contain / or \\");
+    }
+    if to.split(['/', '\\']).any(|part| part == "." || part == "..") {
+        return Some("a profile name cannot be . or ..");
+    }
     if existing.iter().any(|e| e == to) {
         return Some("a profile with that name already exists");
     }
@@ -688,6 +700,27 @@ mod tests {
             error: false,
             append: false,
         })
+    }
+
+    #[test]
+    fn a_profile_name_must_be_one_path_segment() {
+        // A name is a TOML key *and* a directory segment: `${profile_dir}` is
+        // `<config>/profiles/<name>` (#496). Review found the guard on the
+        // config side claiming this entry already enforced it, when nothing
+        // did -- so a name accepted here silently produced a profile whose
+        // `${profile_dir}` would not resolve, with the refusal landing at
+        // spawn time and nowhere near the entry that caused it.
+        let names = vec!["defaults".to_string(), "wsl".to_string()];
+        assert!(rename_error(&names, "wsl", "a/b").is_some(), "a separator makes it two segments");
+        assert!(rename_error(&names, "wsl", "a\\b").is_some(), "and so does the other one");
+        assert!(rename_error(&names, "wsl", "..").is_some(), "`..` climbs out of the directory");
+        assert!(rename_error(&names, "wsl", ".").is_some(), "and `.` is not a name");
+        assert_eq!(
+            rename_error(&names, "wsl", "node..old"),
+            None,
+            "a name that merely contains dots escapes nothing and stays legal"
+        );
+        assert_eq!(rename_error(&names, "wsl", "work"), None, "an ordinary name is unaffected");
     }
 
     #[test]

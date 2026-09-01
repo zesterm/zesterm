@@ -2317,7 +2317,15 @@ fn launch_expand_context(profile: &str) -> zest_config::profiles::ExpandContext 
 fn ensure_profile_dir(ctx: &zest_config::profiles::ExpandContext, env: &[(String, String)]) {
     let Some(dir) = ctx.profile_dir() else { return };
     let prefix = dir.display().to_string();
-    if !env.iter().any(|(_, v)| v.starts_with(&prefix)) {
+    // A path boundary, not a textual prefix: `<...>/profiles/work` is a prefix
+    // of `<...>/profiles/work2`, so a bare `starts_with` would have profile
+    // `work` mint its directory because some value pointed into `work2`'s.
+    let points_inside = |v: &str| {
+        v == prefix
+            || v.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+    };
+    if !env.iter().any(|(_, v)| points_inside(v)) {
         return;
     }
     if dir.is_dir() {
@@ -3819,6 +3827,52 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&expected);
         }
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_sibling_profiles_directory_is_not_this_ones() {
+        // Review's catch: `ensure_profile_dir` decided "does anything point
+        // inside my directory" with a textual `starts_with`, and
+        // `<config>/profiles/probe-sib` is a prefix of
+        // `<config>/profiles/probe-sib2`. So launching the first while some
+        // value pointed into the second minted a directory nobody asked for --
+        // litter that looks like state, on every machine the profile touches.
+        let Some(cfg) = zest_config::paths::config_dir() else { return };
+        let mine = cfg.join("profiles").join("probe-sib");
+        let sibling = cfg.join("profiles").join("probe-sib2");
+        let _ = std::fs::remove_dir_all(&mine);
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = std::env::temp_dir().join(format!("zest-env-sib-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_SIBLING", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                // Points into the *neighbour's* directory, not this profile's.
+                env: vec![(
+                    "ZESTERM_TEST_SIBLING".into(),
+                    format!("{}/x", sibling.display()),
+                )],
+                profile: "probe-sib".into(),
+            },
+        );
+
+        assert!(
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_SIBLING").is_some_and(|v| !v.is_empty())),
+            "the child never ran, so nothing here is about the boundary"
+        );
+        assert!(
+            !mine.is_dir(),
+            "a value pointing into a *sibling* directory must not create this profile's: {mine:?}"
+        );
 
         let _ = std::fs::remove_file(&out);
         drop(registry);

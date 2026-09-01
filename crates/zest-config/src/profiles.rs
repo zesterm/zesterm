@@ -115,6 +115,11 @@ pub struct ProfileMeta {
     /// Values may carry [`expand`]'s placeholders, left unexpanded here: they
     /// resolve on the machine that *runs* the profile, which is what lets one
     /// profile mean the same thing on every machine in the fleet.
+    ///
+    /// To drop a variable `profiles.defaults.env` sets, give it an empty value
+    /// rather than looking for a way to clear the table: empty means unset all
+    /// the way down to the child, and it is per-variable rather than
+    /// all-or-nothing.
     pub env: BTreeMap<String, String>,
     pub tab_title: TabTitle,
     /// Colour scheme id — the ANSI half of a theme, applied to the grid only.
@@ -370,9 +375,17 @@ fn meta_with_presence(table: &toml::Table) -> (ProfileMeta, BTreeSet<&'static st
     meta.starting_directory = str_key(table, "starting_directory");
     track("starting_directory", meta.starting_directory.is_some());
     if let Some(v) = env_key(table, "env") {
-        // Presence is the *table* being there, even empty: `[profiles.x.env]`
-        // with nothing under it is a deliberate "inherit nothing", which the
-        // merge above can express and a missing key cannot.
+        // Presence here is only provenance -- `fold_meta` merges `env`
+        // whichever way this lands, so an empty `[profiles.x.env]` is a no-op
+        // rather than a way to clear Defaults.
+        //
+        // That is deliberate, and the alternative was considered and rejected:
+        // "an empty table clears everything, one entry merges" is a rule that
+        // surprises exactly when someone deletes their last variable. Clearing
+        // one inherited entry is `NAME = ""`, which the empty-value-unsets
+        // convention already spells and which reaches the child as a genuinely
+        // absent variable. Per-variable beats all-or-nothing, and it is one
+        // rule rather than two.
         meta.env = v;
         track("env", true);
     }
@@ -454,16 +467,27 @@ impl ExpandContext {
         if self.profile.is_empty() {
             return None;
         }
-        // The profile name is a single path segment by construction: the
-        // profiles editor rejects a name with a separator in it, and
-        // `write_profile_value` has always treated it as one segment rather
-        // than a dotted path. Belt and braces here anyway, because this one
-        // builds a *filesystem* path out of it: a name that escaped would
-        // point somewhere else entirely.
-        if self.profile.contains(['/', '\\']) || self.profile.contains("..") {
+        // The profile name has to be a single path segment: this is the one
+        // place it becomes a *filesystem* path, and a name carrying a
+        // separator or climbing with `..` would point somewhere else entirely.
+        //
+        // `profiles_ui::rename_error` rejects such names at the door, so this
+        // is the second lock rather than the only one — but it is a config
+        // file, and a hand-written `[profiles."../x"]` never passes the
+        // editor. Refusing here means `${profile_dir}` stays unexpanded and
+        // says so, which is the never-crash rule's answer.
+        //
+        // `.` and `..` are checked as whole segments, not as a substring: a
+        // profile legitimately called `node..old` contains `..` and escapes
+        // nothing.
+        let unsafe_segment = self
+            .profile
+            .split(['/', '\\'])
+            .any(|part| part == "." || part == "..");
+        if self.profile.contains(['/', '\\']) || unsafe_segment {
             tracing::warn!(
                 profile = %self.profile,
-                "a profile name with a path separator has no directory of its own"
+                "a profile name that is not a single path segment has no directory of its own"
             );
             return None;
         }
@@ -886,6 +910,75 @@ mod tests {
             meta.env.get("OVERRIDDEN").map(String::as_str),
             Some("work"),
             "the named profile wins the keys it names, and only those"
+        );
+    }
+
+    #[test]
+    fn one_inherited_variable_is_dropped_by_emptying_it_not_by_clearing_the_table() {
+        // Review caught the comment here claiming an empty `[profiles.x.env]`
+        // meant "inherit nothing" while `fold_meta` merged regardless. The
+        // code was right and the comment was wrong: an empty table is a no-op,
+        // and the way to drop one inherited variable is the empty-value-unsets
+        // convention that already runs all the way to the child.
+        let c = config(
+            "[profiles.defaults.env]\nKEEP = \"1\"\nDROP = \"2\"\n\
+             [profiles.work.env]\nDROP = \"\"\n",
+        );
+        let meta = resolve_profile(&c, "work").meta;
+        assert_eq!(meta.env.get("KEEP").map(String::as_str), Some("1"), "the others are untouched");
+        assert_eq!(
+            meta.env.get("DROP").map(String::as_str),
+            Some(""),
+            "the empty value must survive resolution -- it is what unsets the variable at the \
+             pty, so swallowing it here would silently restore Defaults' value"
+        );
+
+        // And the no-op, stated so the comment cannot drift back.
+        let c = config("[profiles.defaults.env]\nKEEP = \"1\"\n[profiles.empty.env]\n");
+        let meta = resolve_profile(&c, "empty").meta;
+        assert_eq!(
+            meta.env.get("KEEP").map(String::as_str),
+            Some("1"),
+            "an empty table inherits; it is not a way to clear Defaults"
+        );
+    }
+
+    #[test]
+    fn a_profile_name_containing_another_is_not_inside_it() {
+        // `<config>/profiles/work` is a textual prefix of
+        // `<config>/profiles/work2`, which is the shape of the bug review
+        // found one layer up in `ensure_profile_dir`. Pinned here too, because
+        // this is where the two paths are built and the sibling relationship
+        // is created.
+        let ctx = |name: &str| ExpandContext {
+            profile: name.into(),
+            config_dir: Some(std::path::PathBuf::from("/cfg")),
+            home: None,
+        };
+        let work = ctx("work").profile_dir().expect("a plain name has a directory");
+        let work2 = ctx("work2").profile_dir().expect("so does its neighbour");
+        assert_ne!(work, work2);
+        assert!(
+            !work2.starts_with(&work),
+            "one profile's directory must not be inside another's: {work2:?} under {work:?}"
+        );
+    }
+
+    #[test]
+    fn a_dotted_name_that_escapes_nothing_keeps_its_directory() {
+        // The guard rejects `.` and `..` as whole segments, not as a
+        // substring: review pointed out the first spelling refused any name
+        // *containing* `..`, which a profile legitimately called `node..old`
+        // does while escaping nothing.
+        let ctx = ExpandContext {
+            profile: "node..old".into(),
+            config_dir: Some(std::path::PathBuf::from("/cfg")),
+            home: None,
+        };
+        assert_eq!(
+            ctx.profile_dir(),
+            Some(std::path::PathBuf::from("/cfg").join("profiles").join("node..old")),
+            "a name that merely contains dots is not a name that climbs"
         );
     }
 
