@@ -12264,9 +12264,18 @@ impl App {
         let gpu = match self.shared.gpu.get() {
             Some(host) => host.surface_for(&window, None, want_transparency, clear, antialias),
             None => pollster::block_on(GpuHost::new(&window)).and_then(|(host, surface)| {
-                let gpu = host.surface_for(&window, Some(surface), want_transparency, clear, antialias);
-                let _ = self.shared.gpu.set(host);
-                gpu
+                // Stored first, used through the cell: this window draws with
+                // the host every later window will find, never a twin of it.
+                // The cell was empty a moment ago on this same thread, so
+                // `set` cannot fail; if it ever did, the surface below is on
+                // a different instance and `surface_for` refuses it, which
+                // lands this window on a private device and says so.
+                if self.shared.gpu.set(host).is_err() {
+                    tracing::error!("a second GPU host was brought up; the first one stays");
+                }
+                self.shared.gpu.get().and_then(|host| {
+                    host.surface_for(&window, Some(surface), want_transparency, clear, antialias)
+                })
             }),
         };
         let shared_device = gpu.is_some();
@@ -14886,8 +14895,7 @@ impl GpuHost {
         if let Some(cache) = self.cache.as_ref() {
             // Saved by whichever window compiled something new; `save`
             // itself skips a cache that did not grow.
-            pipeline_cache::save(cache, &self.info, self.cache_len.get());
-            self.cache_len.set(cache.get_data().map_or(0, |d| d.len()));
+            self.cache_len.set(pipeline_cache::save(cache, &self.info, self.cache_len.get()));
         }
         tracing::debug!(elapsed_ms = t.elapsed().as_millis(), "pipelines");
 
@@ -14958,6 +14966,9 @@ fn surface_config(
     size: winit::dpi::PhysicalSize<u32>,
     max_dim: u32,
 ) -> wgpu::SurfaceConfiguration {
+    // A NON-sRGB format, deliberately. The resolve pass performs the sRGB
+    // encode itself so that premultiplication happens in encoded space; an sRGB
+    // surface would encode a second time and wash everything out. -> ADR-003.
     let format = caps
         .formats
         .iter()
@@ -15107,7 +15118,7 @@ async fn init_gpu(
     // Saved after the pipelines exist, so the blob contains what was just
     // compiled. Only writes when something new was added.
     if let Some(cache) = cache.as_ref() {
-        pipeline_cache::save(cache, &info, previous_len);
+        let _ = pipeline_cache::save(cache, &info, previous_len);
     }
 
     Gpu {
