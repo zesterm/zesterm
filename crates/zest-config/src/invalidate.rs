@@ -100,6 +100,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("window.custom_chrome", Invalidation::Restart),
     ("window.columns", Invalidation::Restart),
     ("window.rows", Invalidation::Restart),
+    // Read by the *launching* process from its own config load, so a change
+    // is in force for the next launch; the running one never consults it.
+    ("window.launch", Invalidation::None),
     // The strip takes space from the grid, so moving or resizing it changes
     // how many cells fit -- geometry, exactly like padding.
     ("tabs.position", Invalidation::Geometry),

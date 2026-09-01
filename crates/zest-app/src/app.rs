@@ -7,7 +7,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::process::{FirstTab, Shared, WindowRequests, WindowSpec};
+use crate::process::{FirstTab, Shared, TabOpen, WindowRequests, WindowSpec};
 use crate::windows_state::{Geometry, SavedWindow};
 
 use zest_font::{Fonts, Typography};
@@ -2294,7 +2294,7 @@ impl Default for Screenshot {
 /// `Palette` is the ⌘K fleet picker (design screen 6) — not the keymap's
 /// "command palette" (⌘⇧P), which is a different overlay with a confusingly
 /// adjacent name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StartScreen {
     Fleet,
     Themes,
@@ -2529,6 +2529,28 @@ impl App {
 
     pub(crate) fn restore_enabled(&self) -> bool {
         self.config.tabs.restore
+    }
+
+    /// Bring this window to the front — a second launch's window, or the
+    /// tab it opened, must not appear behind the shell it was launched from.
+    pub(crate) fn focus(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.focus_window();
+        }
+    }
+
+    /// Open a tab on this window's route: the ⌘T path, a profile launch, or
+    /// one of the app tabs — what a second launch asked for, or what a new
+    /// window's first tab is.
+    pub(crate) fn open_tab(&mut self, open: &TabOpen) {
+        match open {
+            TabOpen::Shell { command, cwd } => {
+                self.open_shell_tab(command.clone(), None, cwd.clone());
+            }
+            TabOpen::Profile(name) => self.launch_profile(name),
+            TabOpen::Settings => self.open_settings_tab(),
+            TabOpen::Profiles => self.open_profiles_tab(),
+        }
     }
 
     /// Where the window stands now, as the OS reports it; the default when
@@ -11894,6 +11916,17 @@ impl App {
         if plan.geometry.maximized {
             attrs = attrs.with_maximized(true);
         }
+        // The launcher's token: without it a Wayland compositor refuses a
+        // window opened by a process that was not itself interacted with
+        // the right to take focus, and the new window appears behind.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = match plan.activation_token.clone() {
+            Some(token) => {
+                use winit::platform::startup_notify::WindowAttributesExtStartupNotify;
+                attrs.with_activation_token(winit::window::ActivationToken::from_raw(token))
+            }
+            None => attrs,
+        };
         // Not borderless (issue #9, WS-C2: borderless costs traffic lights,
         // native fullscreen, Sequoia tiling and accessibility). A transparent
         // full-size titlebar keeps all of that, and the tab strip is what
@@ -12070,7 +12103,7 @@ impl App {
             // Opened from another window: its route and identity are already
             // proven, so the shell comes through the ordinary ⌘T path once
             // the surface exists to size it — below, after the GPU.
-            FirstTab::Inherit { route, identity } => {
+            FirstTab::Inherit { route, identity, .. } => {
                 self.route = Some(route.clone());
                 self.client_identity = identity.clone();
                 None
@@ -12162,8 +12195,8 @@ impl App {
             self.spawn_tab_worker_pinned(route, Some(saved.addr), expect, false, None);
         }
         self.window = Some(window);
-        if matches!(plan.first_tab, FirstTab::Inherit { .. }) {
-            self.open_shell_tab(None, None, None);
+        if let FirstTab::Inherit { open, .. } = &plan.first_tab {
+            self.open_tab(open);
         }
 
         // `--screen`: dispatched here — window and session exist, the first
@@ -12260,6 +12293,8 @@ impl App {
             }
             // Routed to the process, which is what exits (`process::route`).
             Wakeup::Exited => {}
+            // The process's to place (`Process::open_requested`).
+            Wakeup::OpenRequested => {}
             Wakeup::Attention(addr, cause) => self.note_attention(addr, cause),
             Wakeup::SignalChanged => self.mark_chrome_dirty(),
             // The active source parked the answer; a stale or unsolicited

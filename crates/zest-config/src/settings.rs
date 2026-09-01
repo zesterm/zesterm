@@ -416,6 +416,26 @@ pub struct Window {
     /// own: a restored window comes back the size it was closed at.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "number"))]
     pub rows: u16,
+    /// What a second `zesterm` launch does while one is already running.
+    /// `--new-window`, `--new-tab` and `--new-instance` override it for one
+    /// launch.
+    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "select"))]
+    pub launch: LaunchTarget,
+}
+
+/// Where a launch lands when zesterm is already running. The values are
+/// the flag suffixes (`--new-window` ⇔ `"window"`), so the flag and the
+/// setting need no table between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaunchTarget {
+    /// A new window of the running zesterm — what Warp and Windows Terminal
+    /// do by default.
+    Window,
+    /// A new tab in the running zesterm's focused window.
+    Tab,
+    /// A separate process, exactly as if none were running.
+    Instance,
 }
 
 impl Default for Window {
@@ -436,6 +456,7 @@ impl Default for Window {
             custom_chrome: CustomChrome::Auto,
             columns: 100,
             rows: 30,
+            launch: LaunchTarget::Window,
         }
     }
 }

@@ -728,6 +728,30 @@
     "restartHint": true
   },
   {
+    "key": "window.launch",
+    "group": "Window",
+    "widget": "select",
+    "description": "What a second `zesterm` launch does while one is already running.\n`--new-window`, `--new-tab` and `--new-instance` override it for one\nlaunch.",
+    "range": null,
+    "integer": false,
+    "variants": [
+      {
+        "value": "window",
+        "description": "A new window of the running zesterm — what Warp and Windows Terminal\ndo by default."
+      },
+      {
+        "value": "tab",
+        "description": "A new tab in the running zesterm's focused window."
+      },
+      {
+        "value": "instance",
+        "description": "A separate process, exactly as if none were running."
+      }
+    ],
+    "default": "window",
+    "restartHint": false
+  },
+  {
     "key": "window.opacity",
     "group": "Window",
     "widget": "slider",

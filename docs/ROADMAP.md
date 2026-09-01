@@ -67,15 +67,18 @@ the history behind them is in closed issues and PRs.
       from `WM_NCMOUSEMOVE`.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
-- [ ] Multi-window, the rest of #489 after #490 landed the windows: a second
-      `zesterm` launch opening in the running one (a per-user app socket,
-      `window.launch = window | tab | instance`); a tab moved to a new window
+- [ ] Multi-window, the rest of #489 after #490 (the windows) and #497 (a
+      second launch opens in the running one): a tab moved to a new window
       (palette, then drag-out); one GPU device shared across windows, if the
       measured cost of a second window says so. Known edges: closing the last
       window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
       `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
-      size-only (no global coordinates), and two windows on the Fleet screen
-      run two account watchers (idempotent, so merely wasteful).
+      size-only (no global coordinates), two windows on the Fleet screen run
+      two account watchers (idempotent, so merely wasteful), a `--new-tab`
+      into an *existing* window cannot be raised on Wayland (winit 0.30 takes
+      an activation token only for a new window), and Windows Terminal's
+      `useAnyExisting` — the same window per virtual desktop — has no
+      counterpart because nothing tracks desktops.
 - [ ] Perf validation: vtebench, >500 MB/s, <2ms CPU frame, <10ms keypress→pixel.
 - [ ] The tab-signal tail (#379–#385 left these deliberately): a right-click tab
       menu, which is where Detach belongs once there is one — today it is ⌘B, the

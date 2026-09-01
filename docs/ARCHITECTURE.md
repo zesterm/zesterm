@@ -1815,7 +1815,39 @@ rule, and it is tested.
 - **Stay alive with no windows on macOS.** winit 0.30 exposes no
   `applicationShouldHandleReopen`; closing the last window quits on every
   platform.
-- **Answer a second launch.** That is #489's next step: a per-user app
-  socket beside the daemon's, over which `zesterm` run again opens a window
-  in the running process.
+
+### A second launch is a request to the running process (#497)
+
+`zesterm` run while one is running does not become a second process; it
+asks the first to open what it was given. The rendezvous is a second per-user
+local endpoint beside the daemon's — `zesterm-app`, a unix socket or a named
+pipe — built on the daemon's own transport (`zest_daemon::LocalListener`,
+*lifted* out of `listen` rather than copied, because the flock-unlink-bind
+sequence and the overlapped `ConnectNamedPipe` are the paid-for traps and a
+copy is how one of them loses a step). It is deliberately **not** the daemon
+socket: the daemon is a session server, and "open a window" is nothing a
+session server should answer. Not loopback TCP either, for `local.rs`'s
+reason — the socket mode or pipe DACL is the authorization.
+
+Three rules hold it together. **A launch never hangs**: the launcher waits
+500 ms and then opens its own window, because a window too many is
+recoverable and a launch that does nothing is not. **The instance answers
+`Ok` only after the window exists**, and its acceptor's budget is *shorter*
+than the launcher's, so a wedged loop produces no answer rather than a late
+`Ok` to a launcher that has already left. **A different build is a different
+program**: the greeting carries the binary's own length and mtime, so
+`zesterm-dev`'s rebuilt binary never forwards to the stale one it replaces —
+one `stat`, no `build.rs`, and it distinguishes two builds of the same dirty
+tree where a git sha would not.
+
+The claim (one flock, or one `CreateNamedPipeW`) happens in `main` before
+the window, never between creating and showing it, and serving starts after
+the first paint — ADR-007's budget, kept. What forwards is what a running
+process can take: `-e`, `--profile` (as a launch, not as a cascade layer),
+`--screen`, `--attach`, and the directory the launcher was run from. A process
+whose flags are a config layer of its own (`--theme`, `--size`, …) neither
+forwards nor serves — a window opened later on someone else's behalf must
+not carry it — and the probes and `--screenshot` never touch the endpoint.
+`window.launch = window | tab | instance` is the setting; the values are the
+flag suffixes so the override needs no table.
 
