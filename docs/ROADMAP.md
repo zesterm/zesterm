@@ -71,8 +71,8 @@ the history behind them is in closed issues and PRs.
       second launch opens in the running one) and #501 (a tab moved to a new
       window, from the palette): drag-out — a chip dragged past the strip's
       edge — once the strip has chip dragging at all, on the same
-      `tear_off` path; one GPU device shared across windows, if the measured
-      cost of a second window says so. Known edges: closing the last
+      `tear_off` path (one GPU device across windows landed with #505).
+      Known edges: closing the last
       window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
       `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
       size-only (no global coordinates), two windows on the Fleet screen run

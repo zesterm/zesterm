@@ -71,26 +71,29 @@ pub fn create(
     })
 }
 
-/// Write the cache back out, if the driver produced anything new.
+/// Write the cache back out, if the driver produced anything new. Returns
+/// the length the cache now has, for the next call's `previous_len` — the
+/// one `get_data` here is the only serialization this costs.
 ///
 /// Failures are logged and ignored: a missing cache costs startup time, never
 /// correctness, so it must never be able to stop the terminal from running.
-pub fn save(cache: &wgpu::PipelineCache, info: &wgpu::AdapterInfo, previous_len: usize) {
-    let Some(data) = cache.get_data() else { return };
+pub fn save(cache: &wgpu::PipelineCache, info: &wgpu::AdapterInfo, previous_len: usize) -> usize {
+    let Some(data) = cache.get_data() else { return previous_len };
     if data.len() == previous_len {
         // Nothing new compiled; rewriting would only churn the disk.
-        return;
+        return previous_len;
     }
-    let Some(path) = cache_path(info) else { return };
+    let Some(path) = cache_path(info) else { return data.len() };
 
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::debug!(error = %e, "could not create the cache directory");
-            return;
+            return data.len();
         }
     }
     match std::fs::write(&path, &data) {
         Ok(()) => tracing::debug!(bytes = data.len(), ?path, "pipeline cache saved"),
         Err(e) => tracing::debug!(error = %e, "could not save the pipeline cache"),
     }
+    data.len()
 }

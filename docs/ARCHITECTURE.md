@@ -1837,12 +1837,25 @@ The first is what the user asked for, the second is quitting, and the single
 window always came back after quitting. `snapshot_after_close` is the whole
 rule, and it is tested.
 
+### One device, many surfaces (#505)
+
+The first window brings the GPU up — the backend ladder, the adapter, the
+device, the queue, the pipeline cache — as `GpuHost` on `Shared`, and every
+later window only makes a surface on it (`GpuHost::surface_for`). What stays
+per window is the surface, its configuration, and the `Renderer` with its
+atlas: `Fonts` is per scale factor and antialias-coupled, and an atlas shared
+across two monitors would be cleared by either one's DPI change. `Device` and
+`Queue` are `Clone`, so `Gpu` kept its shape and no call site moved. A window
+whose surface the shared adapter cannot present to — a window dragged to
+another GPU — falls back to a private device through the old `init_gpu`,
+which is also where "no adapter at all" is still diagnosed in full. The
+number behind it: a second device on Metal costs ~65 ms, which would not
+have justified the split; on Windows it is the ~700 ms of serial driver init
+`open_window`'s own comment describes, paid on every ⌘N and every forwarded
+launch.
+
 ### What this deliberately does not do yet
 
-- **Share the GPU device.** Each window has its own `Gpu` — instance,
-  adapter, device, pipelines, atlas. `Renderer` already takes the device by
-  reference, so sharing is a mechanical split of `init_gpu`; it lands when a
-  measured second-window cost says it should, not before.
 - **Address `Redraw`.** `wake_for` stamps a session address on `Attention`
   and could on `Redraw`; today `Redraw` is broadcast and each non-owner's
   `RedrawRequested` finds nothing dirty and skips. The follow-up is one line
