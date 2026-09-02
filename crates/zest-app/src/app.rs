@@ -173,10 +173,13 @@ pub struct Config {
 impl Config {
     /// Whether this window's surface has to carry per-pixel alpha.
     ///
-    /// One function because three places decide it — `with_transparent` at
-    /// window creation, [`App::apply_transparency`] on a reload, and
-    /// [`App::antialias_for`] — and three copies of `opacity < 1.0` is how the
-    /// second opacity gets added to one of them and forgotten in the others.
+    /// One function because *four* places decide it — `with_transparent` and
+    /// the swapchain's `want_transparency`, both in [`App::open_window`],
+    /// [`App::apply_transparency`] on a reload, and [`App::antialias_for`] —
+    /// and a copy of `opacity < 1.0` per site is how the second opacity gets
+    /// added to some of them and forgotten in the rest. Written as three, the
+    /// count was itself wrong by one, and that one was the swapchain: a first
+    /// launch with only `chrome_opacity` below 1 came up opaque.
     ///
     /// *Either* opacity below 1 needs it: chrome and grid each own their
     /// pixels' alpha now, so a glass titlebar over a solid grid is a
@@ -17013,10 +17016,10 @@ mod tuning_tests {
 
     #[test]
     fn either_opacity_makes_the_surface_translucent() {
-        // Three callers ask this -- `with_transparent` at window creation,
-        // `apply_transparency` on a reload, `antialias_for` -- and the way the
-        // second opacity gets forgotten is each spelling `opacity < 1.0` for
-        // itself. `chrome_opacity` below 1 is what makes `window.backdrop`
+        // Four callers ask this -- `with_transparent` and the swapchain's
+        // `want_transparency`, both in `open_window`, `apply_transparency` on
+        // a reload, and `antialias_for` -- and the way the second opacity gets
+        // forgotten is each spelling `opacity < 1.0` for itself. `chrome_opacity` below 1 is what makes `window.backdrop`
         // visible at `opacity = 1`: a material can only show through pixels the
         // surface leaves transparent.
         let surface = |opacity: f32, chrome: f32| {
