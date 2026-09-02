@@ -198,6 +198,17 @@
     "restartHint": false
   },
   {
+    "key": "history.blocks",
+    "group": "History",
+    "widget": "toggle",
+    "description": "Write every finished command block — the command, its directory and\nbranch, the exit code, when it ran and which paired device typed it,\nnever its output — to this machine's block history, so ⌘K can find\n\"that ffmpeg command from March\" after the session and the daemon\nare gone. It stays on this machine and is never uploaded; a paired\ndevice that searches sees the rows in its answer. Shell history\nalready keeps the commands; this adds where they ran and how they\nended. Read once, when this machine's daemon starts — the daemon\noutlives the window, so restarting a window does not apply a change.",
+    "range": null,
+    "integer": false,
+    "variants": [],
+    "default": true,
+    "restartHint": false
+  },
+  {
     "key": "motion.enabled",
     "group": "Motion",
     "widget": "toggle",

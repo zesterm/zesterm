@@ -218,6 +218,19 @@
         }
       ]
     },
+    "History": {
+      "description": "What this machine keeps of the commands its shells ran (ADR-020).",
+      "properties": {
+        "blocks": {
+          "default": true,
+          "description": "Write every finished command block — the command, its directory and\nbranch, the exit code, when it ran and which paired device typed it,\nnever its output — to this machine's block history, so ⌘K can find\n\"that ffmpeg command from March\" after the session and the daemon\nare gone. It stays on this machine and is never uploaded; a paired\ndevice that searches sees the rows in its answer. Shell history\nalready keeps the commands; this adds where they ran and how they\nended. Read once, when this machine's daemon starts — the daemon\noutlives the window, so restarting a window does not apply a change.",
+          "type": "boolean",
+          "x_zest_group": "History",
+          "x_zest_widget": "toggle"
+        }
+      },
+      "type": "object"
+    },
     "LaunchTarget": {
       "description": "Where a launch lands when zesterm is already running. The values are\nthe flag suffixes (`--new-window` ⇔ `\"window\"`), so the flag and the\nsetting need no table between them.",
       "oneOf": [
@@ -733,6 +746,13 @@
         "trail": "none"
       },
       "description": "Cursor shape and blink."
+    },
+    "history": {
+      "$ref": "#/$defs/History",
+      "default": {
+        "blocks": true
+      },
+      "description": "What this machine keeps of the commands its shells ran."
     },
     "motion": {
       "$ref": "#/$defs/Motion",
