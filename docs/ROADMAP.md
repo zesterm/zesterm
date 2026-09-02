@@ -87,7 +87,10 @@ the history behind them is in closed issues and PRs.
       window, from the palette): drag-out — a chip dragged past the strip's
       edge — once the strip has chip dragging at all, on the same
       `tear_off` path (one GPU device across windows landed with #505).
-      Known edges: closing the last
+      Fixed on the way: a window opened after a config edit was built from
+      the config the process *started* with — the template every later
+      window copies now follows a reload, as each open window already did
+      (#524). Known edges: closing the last
       window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
       `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
       size-only (no global coordinates), two windows on the Fleet screen run

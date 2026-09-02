@@ -104,6 +104,8 @@ impl Shared {
 
 /// What every window of this process is built from.
 pub struct WindowTemplate {
+    /// The configuration a new window starts from. Follows the file through
+    /// [`WindowTemplate::refresh`]; a window then reloads on its own.
     pub resolved: zest_config::Resolved,
     /// Flags, replayed on every reload so a `--size` is not lost to a save.
     pub cli_layer: toml::Table,
@@ -116,6 +118,55 @@ pub struct WindowTemplate {
     pub attach_addr: Option<String>,
     /// Start a fresh session rather than picking up an idle one.
     pub new_session: bool,
+}
+
+impl WindowTemplate {
+    /// Take a reload: the template a *later* window is built from follows
+    /// the file, exactly as each open window's settings do.
+    ///
+    /// This is the settings stored twice -- once here, once in every open
+    /// `App` -- and `App::reload_config` was the only writer that knew about
+    /// one of the homes (#219's lesson, in a different pair). A reload
+    /// refreshed the windows and not this, so a window opened *after* an
+    /// edit -- ⌘N, a cascade, a forwarded `zesterm --profile X` -- ran the
+    /// shell of, and resolved its profile against, the file as it was at
+    /// startup: a profile environment edited an hour earlier was simply
+    /// absent from the new window while a new tab in an old one carried it,
+    /// which read as the profile machinery being broken (#524).
+    ///
+    /// The same rule as `App::reload_config` for a save that does not parse:
+    /// the last good template stays. A file mid-edit is the common case, and
+    /// the error is the windows' to report -- each one's own reload logs it
+    /// and shows it in its chrome; a second report from here would add
+    /// nothing a user can act on.
+    pub fn refresh(&mut self, load: zest_config::Load) {
+        if !load.errors.is_empty() {
+            return;
+        }
+        self.resolved = load.resolved;
+    }
+
+    /// The template's share of a wakeup: a config change re-reads the file,
+    /// everything else leaves it alone. `read` is the re-read, injected so
+    /// the rule is tested with a load the test built rather than one the
+    /// machine's config directory happened to hold -- and so the frequent
+    /// wakeups (`Redraw` is every frame) can be shown to cost no read.
+    pub fn on_wakeup(&mut self, event: &Wakeup, read: impl FnOnce(&Self) -> zest_config::Load) {
+        if matches!(event, Wakeup::ConfigChanged) {
+            let load = read(self);
+            self.refresh(load);
+        }
+    }
+
+    /// Re-read the files, with the same layers every window's reload uses:
+    /// this profile's cascade and the command-line flags replayed on top.
+    fn read(&self) -> zest_config::Load {
+        zest_config::load(&zest_config::Options {
+            profile: self.profile.clone(),
+            workspace_dir: std::env::current_dir().ok(),
+            cli: Some(self.cli_layer.clone()),
+        })
+    }
 }
 
 /// What only the first window gets: the probes and `--screenshot` measure
@@ -668,6 +719,9 @@ impl ApplicationHandler<Wakeup> for Process {
                 }
             }
             Route::Broadcast => {
+                // The template first: it is what the next window is built
+                // from, and a window can be opened by the very next event.
+                self.template.on_wakeup(&event, WindowTemplate::read);
                 for w in &mut self.windows {
                     w.handle_wakeup(event);
                 }
@@ -776,6 +830,84 @@ mod tests {
 
     fn addr(n: u8) -> zest_proto::SessionAddr {
         zest_proto::SessionAddr { host: HostId::from_bytes([n; 32]), session: SessionId(u64::from(n)) }
+    }
+
+    fn template(settings: zest_config::Settings) -> WindowTemplate {
+        WindowTemplate {
+            resolved: zest_config::Resolved {
+                settings,
+                provenance: Default::default(),
+                unknown_keys: Vec::new(),
+            },
+            cli_layer: toml::Table::new(),
+            profile: None,
+            no_daemon: false,
+            attach_addr: None,
+            new_session: false,
+        }
+    }
+
+    fn load_of(settings: zest_config::Settings, error: Option<zest_config::ConfigError>) -> zest_config::Load {
+        zest_config::Load {
+            resolved: zest_config::Resolved {
+                settings,
+                provenance: Default::default(),
+                unknown_keys: Vec::new(),
+            },
+            errors: error.into_iter().map(Box::new).collect(),
+            migration: None,
+        }
+    }
+
+    #[test]
+    fn a_later_window_is_built_from_the_file_as_it_is_now() {
+        // #524: the template is a second copy of the settings every open
+        // window holds, and a reload refreshed the windows and not it -- so
+        // a window opened after an edit (a forwarded `--profile`, ⌘N) ran the
+        // shell, and resolved the profiles, of the file as it was at startup.
+        let mut t = template(zest_config::Settings::default());
+        let mut edited = zest_config::Settings::default();
+        edited.shell.command = "/bin/bash".into();
+        t.on_wakeup(&Wakeup::ConfigChanged, |_| load_of(edited, None));
+        assert_eq!(
+            t.resolved.settings.shell.command, "/bin/bash",
+            "a window opened after a config change must be built from the changed config, as a new tab in an open window already is"
+        );
+    }
+
+    #[test]
+    fn a_save_that_does_not_parse_keeps_the_last_good_template() {
+        // The same rule as `App::reload_config`: a file mid-edit is the
+        // common case, and a new window must not fall back to defaults
+        // because the user has an unclosed quote in the editor.
+        let mut good = zest_config::Settings::default();
+        good.shell.command = "/bin/bash".into();
+        let mut t = template(good);
+        let broken = zest_config::ConfigError::Read {
+            path: std::path::PathBuf::from("config.toml"),
+            source: std::io::Error::other("mid-edit"),
+        };
+        t.on_wakeup(&Wakeup::ConfigChanged, |_| load_of(zest_config::Settings::default(), Some(broken)));
+        assert_eq!(
+            t.resolved.settings.shell.command, "/bin/bash",
+            "a load that skipped a layer must leave the template as it was, not replace it with the partial result"
+        );
+    }
+
+    #[test]
+    fn only_a_config_change_reads_the_file() {
+        // `Redraw` is every frame and `TabsChanged` every keystroke's worth
+        // of title; a template that re-parsed the config on each would be a
+        // disk read per frame. The read is the closure, so calling it is
+        // the observable.
+        let mut t = template(zest_config::Settings::default());
+        for w in [Wakeup::Redraw, Wakeup::TabsChanged, Wakeup::Detached, Wakeup::AccountChanged] {
+            t.on_wakeup(&w, |_| panic!("{w:?} must not re-read the config file"));
+        }
+        assert_eq!(
+            t.resolved.settings.shell.command, "",
+            "a wakeup that is not a config change leaves the template as it was"
+        );
     }
 
     #[test]
