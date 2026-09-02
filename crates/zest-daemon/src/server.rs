@@ -177,6 +177,10 @@ pub struct Registry {
     /// What every session is standing in — branch, kube context, pins —
     /// probed lazily per listing and cached per cwd.
     context: std::sync::Arc<crate::context::ContextEngine>,
+    /// Where finished blocks outlive their session (ADR-020). `None` is
+    /// history off — the setting, `--ephemeral`, or a store that would not
+    /// open — and every test's default.
+    blocks: Option<Arc<crate::block_store::BlockStore>>,
 }
 
 impl Default for Registry {
@@ -186,6 +190,7 @@ impl Default for Registry {
         Self {
             sessions: Mutex::default(),
             next_id: Mutex::default(),
+            blocks: None,
             context: std::sync::Arc::new(crate::context::ContextEngine::new(Arc::new(move || {
                 for_context.touch_coalesced();
             }))),
@@ -293,6 +298,18 @@ impl Registry {
         Self::default()
     }
 
+    /// A registry whose sessions write their finished blocks to `store`.
+    #[must_use]
+    pub fn with_blocks(store: Option<Arc<crate::block_store::BlockStore>>) -> Self {
+        Self { blocks: store, ..Self::default() }
+    }
+
+    /// The block history, if this registry keeps one.
+    #[must_use]
+    pub fn blocks(&self) -> Option<&Arc<crate::block_store::BlockStore>> {
+        self.blocks.as_ref()
+    }
+
     /// Start a session and keep it.
     pub fn create(
         &self,
@@ -316,6 +333,7 @@ impl Registry {
                 pulse.touch_coalesced();
             },
             Some(std::sync::Arc::clone(&self.context)),
+            self.blocks.as_ref().map(|s| s.sink()),
         )?);
         self.sessions.lock().expect("registry lock").insert(id.0, Arc::clone(&session));
         self.touch();
@@ -1400,7 +1418,81 @@ impl Connection {
             }
 
             ClientMessage::SearchBlocks { query, limit } => {
-                vec![search_blocks(&self.registry, self.config.host, &query, limit)]
+                use std::sync::atomic::Ordering;
+
+                let host = self.config.host;
+                // No history: the live answer, inline (#527).
+                let Some(store) = self.registry.blocks().cloned() else {
+                    return vec![search_blocks(&self.registry, host, &query, limit)];
+                };
+                // With one, the store read goes to a worker for `GitDiff`'s
+                // reason — the serve loop holds this connection's lock across
+                // `on_bytes`, and even a millisecond read under it is a
+                // millisecond of the session's own input stalled. Over the
+                // cap, the live half answers now and says what it skipped:
+                // a partial answer the palette can show beats an empty one.
+                let claimed = self
+                    .deferred_running
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n < MAX_DEFERRED).then_some(n + 1)
+                    })
+                    .is_ok();
+                if !claimed {
+                    let mut live = search_blocks(&self.registry, host, &query, limit);
+                    if let HostMessage::BlockMatches { error, .. } = &mut live {
+                        *error = "history not searched: too many questions in flight; ask again".into();
+                    }
+                    return vec![live];
+                }
+                let needle = zest_proto::search::Needle::new(&query);
+                let (live, sessions) = live_matches(&self.registry, host, &needle);
+                let cap = zest_proto::search::clamp_limit(limit);
+                let cell = Arc::clone(&self.deferred);
+                let running = Arc::clone(&self.deferred_running);
+                let waker = self.waker.clone();
+                let asked = query.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("zest-daemon-block-search".into())
+                    .spawn(move || {
+                        let msg = match store.search(&needle, crate::block_store::SCAN_CAP) {
+                            Ok((stored, capped)) => {
+                                let (matches, truncated) =
+                                    crate::block_store::merge(live, stored, host, cap);
+                                HostMessage::BlockMatches {
+                                    query,
+                                    matches,
+                                    truncated: truncated || capped,
+                                    sessions,
+                                    error: String::new(),
+                                }
+                            }
+                            Err(e) => {
+                                let (matches, truncated) =
+                                    crate::block_store::merge(live, Vec::new(), host, cap);
+                                HostMessage::BlockMatches {
+                                    query,
+                                    matches,
+                                    truncated,
+                                    sessions,
+                                    error: format!("history not searched: {e}"),
+                                }
+                            }
+                        };
+                        cell.lock().expect("deferred lock").push(msg);
+                        running.fetch_sub(1, Ordering::Relaxed);
+                        if let Some(w) = &waker {
+                            w();
+                        }
+                    });
+                if let Err(e) = spawned {
+                    self.deferred_running.fetch_sub(1, Ordering::Relaxed);
+                    let mut live = search_blocks(&self.registry, host, &asked, limit);
+                    if let HostMessage::BlockMatches { error, .. } = &mut live {
+                        *error = format!("history not searched: no thread for it: {e}");
+                    }
+                    return vec![live];
+                }
+                Vec::new()
             }
 
             ClientMessage::CreateSession { command, cwd, cols, rows, env, profile } => {
@@ -1749,11 +1841,6 @@ impl Connection {
             // rides the wake the writer is already blocked on.
             ClientMessage::GitDiff { cwd } => {
                 use std::sync::atomic::Ordering;
-
-                /// Enough for a panel per pane; low enough that a client
-                /// asking faster than git answers cannot spawn threads
-                /// without bound.
-                const MAX_DEFERRED: usize = 4;
 
                 // Claimed with one atomic rather than a `load` and then a
                 // `fetch_add`. Only the reader thread reaches this today, so
@@ -2394,32 +2481,44 @@ fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os(key).filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
 }
 
-/// Answer [`ClientMessage::SearchBlocks`] (#527): every block on this host's
-/// live sessions whose command matches, newest first, clamped and honest
-/// about the clamp.
+/// Workers one connection may have out at once — a git diff or a history
+/// search. Enough for a panel per pane; low enough that a client asking
+/// faster than the workers answer cannot spawn threads without bound.
+const MAX_DEFERRED: usize = 4;
+
+/// The live half of a search answer: every matching block on this host's
+/// live sessions, each with the run it belongs to (the key a stored copy of
+/// it is deduplicated on), plus how many sessions were scanned.
+fn live_matches(
+    registry: &Registry,
+    host: HostId,
+    needle: &zest_proto::search::Needle,
+) -> (Vec<(crate::block_store::RunId, zest_proto::BlockMatch)>, u32) {
+    let sessions = registry.sessions();
+    let live = sessions
+        .iter()
+        .flat_map(|s| s.blocks_matching(host, needle).into_iter().map(move |m| (s.run, m)))
+        .collect();
+    (live, u32::try_from(sessions.len()).unwrap_or(u32::MAX))
+}
+
+/// Answer [`ClientMessage::SearchBlocks`] (#527) from live sessions alone:
+/// every block on them whose command matches, newest first, clamped and
+/// honest about the clamp.
 ///
 /// Inline, like `list_dir`, and unlike `GitDiff`'s worker: `Registry::list`
 /// already takes three terminal locks per session inline on every listing,
 /// and a block index is a small side table bounded by scrollback eviction.
 /// `GitDiff` defers because a subprocess has unbounded latency; nothing here
 /// does. Sessions on the alternate screen are searched too — a block index
-/// survives `vim`, and a command launched from one is still history.
+/// survives `vim`, and a command launched from one is still history. With a
+/// block history (ADR-020) the handler adds the stored half off a worker.
 pub fn search_blocks(registry: &Registry, host: HostId, query: &str, limit: u32) -> HostMessage {
-    let sessions = registry.sessions();
     let needle = zest_proto::search::Needle::new(query);
-    let mut matches: Vec<zest_proto::BlockMatch> =
-        sessions.iter().flat_map(|s| s.blocks_matching(host, &needle)).collect();
-    zest_proto::search::rank(&mut matches);
-    let cap = zest_proto::search::clamp_limit(limit);
-    let truncated = matches.len() > cap;
-    matches.truncate(cap);
-    HostMessage::BlockMatches {
-        query: query.to_string(),
-        matches,
-        truncated,
-        sessions: u32::try_from(sessions.len()).unwrap_or(u32::MAX),
-        error: String::new(),
-    }
+    let (live, sessions) = live_matches(registry, host, &needle);
+    let (matches, truncated) =
+        crate::block_store::merge(live, Vec::new(), host, zest_proto::search::clamp_limit(limit));
+    HostMessage::BlockMatches { query: query.to_string(), matches, truncated, sessions, error: String::new() }
 }
 
 pub fn list_dir(path: &str) -> HostMessage {
@@ -2620,17 +2719,162 @@ mod tests {
 
     fn conn_with(cfg: DaemonConfig) -> (Connection, Arc<Registry>) {
         let registry = Arc::new(Registry::new());
-        (
-            Connection::new(
-                cfg,
-                Arc::clone(&registry),
-                // Loopback, which is what these tests exercise: the handshake
-                // still runs, the trust store is not consulted.
-                crate::auth::Auth::Transport(test_authenticator()),
-                "test",
-            ),
+        (conn_over(cfg, Arc::clone(&registry)), registry)
+    }
+
+    /// A connection over a registry the test built itself — one with a
+    /// block history, or one that outlived a previous connection.
+    fn conn_over(cfg: DaemonConfig, registry: Arc<Registry>) -> Connection {
+        Connection::new(
+            cfg,
             registry,
+            // Loopback, which is what these tests exercise: the handshake
+            // still runs, the trust store is not consulted.
+            crate::auth::Auth::Transport(test_authenticator()),
+            "test",
         )
+    }
+
+    /// The next reply a worker settles into the mailbox, or a panic after
+    /// five seconds of nothing.
+    fn deferred_reply(c: &mut Connection) -> HostMessage {
+        for _ in 0..200 {
+            if let Some(msg) = c.take_deferred().into_iter().next() {
+                return msg;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("no worker answered");
+    }
+
+    /// A session that runs `make` (by echoing the markers), waited for until
+    /// the store holds it.
+    fn create_and_store(c: &mut Connection, peer: &mut Peer, store: &crate::block_store::BlockStore) {
+        peer.send(
+            c,
+            &ClientMessage::CreateSession {
+                command: search_session_command(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                profile: String::new(),
+            },
+        );
+        assert!(
+            wait_for(|| store.len().unwrap_or(0) >= 1),
+            "the finished block never reached the store"
+        );
+    }
+
+    /// The epic's sentence: history that outlives the session. The block is
+    /// written by the reader thread as the shell finishes it, and after
+    /// `CloseSession` the search still finds it — with no session to name,
+    /// which is how a client knows there is nothing to activate.
+    #[test]
+    fn a_finished_block_survives_its_session_being_closed() {
+        let store = crate::block_store::BlockStore::in_memory().expect("store");
+        let registry = Arc::new(Registry::with_blocks(Some(Arc::clone(&store))));
+        let mut c = conn_over(config(), Arc::clone(&registry));
+        let mut peer = authenticate(&mut c);
+        create_and_store(&mut c, &mut peer, &store);
+        let host = config().host;
+        let addr = registry.list(host)[0].addr;
+        peer.send(&mut c, &ClientMessage::CloseSession { session: addr });
+        assert!(wait_for(|| registry.list(host).is_empty()), "the session never closed");
+
+        let out = peer.send(&mut c, &ClientMessage::SearchBlocks { query: "make".into(), limit: 0 });
+        assert!(out.is_empty(), "with a history the answer comes off the worker: {out:?}");
+        let HostMessage::BlockMatches { matches, sessions, error, .. } = deferred_reply(&mut c) else {
+            panic!("not a search answer");
+        };
+        assert!(error.is_empty(), "{error}");
+        assert_eq!(sessions, 0, "no live session was scanned");
+        let hit = matches.iter().find(|m| m.command == "make").expect("the stored block");
+        assert_eq!(hit.session, None, "a stored block of a dead session names no session");
+        assert_eq!(hit.host, host);
+        assert_eq!(hit.state, zest_proto::delta::BlockState::Finished { exit_code: Some(3) });
+        assert!(hit.ended_ms.is_some());
+        assert!(!hit.command_truncated);
+    }
+
+    /// And history that outlives the daemon: a second registry over the
+    /// same file, as a restarted daemon would open, answers for a command
+    /// the first one ran.
+    #[test]
+    fn a_finished_block_survives_the_daemon_restarting() {
+        let path = std::env::temp_dir().join(format!("zest-blocks-{}.sqlite", std::process::id()));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let host = config().host;
+        {
+            let store = crate::block_store::BlockStore::open(&path).expect("open");
+            let registry = Arc::new(Registry::with_blocks(Some(Arc::clone(&store))));
+            let mut c = conn_over(config(), Arc::clone(&registry));
+            let mut peer = authenticate(&mut c);
+            create_and_store(&mut c, &mut peer, &store);
+            assert!(store.flush(std::time::Duration::from_secs(5)), "the writer settled");
+        }
+
+        let store = crate::block_store::BlockStore::open(&path).expect("reopen");
+        let registry = Arc::new(Registry::with_blocks(Some(store)));
+        let mut c = conn_over(config(), registry);
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(&mut c, &ClientMessage::SearchBlocks { query: "MAKE".into(), limit: 0 });
+        assert!(out.is_empty());
+        let HostMessage::BlockMatches { matches, error, .. } = deferred_reply(&mut c) else {
+            panic!("not a search answer");
+        };
+        assert!(error.is_empty(), "{error}");
+        let hit = matches.iter().find(|m| m.command == "make").expect("the block the previous daemon stored");
+        assert_eq!(hit.session, None);
+        assert_eq!(hit.host, host, "answered as this host's history");
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// A live session's finished block is in the store too; the answer
+    /// must carry it once, as the live row, because that is the one with a
+    /// session for `⇧⏎` and `output` to use.
+    #[test]
+    fn a_live_finished_block_is_reported_once_with_its_session_id() {
+        let store = crate::block_store::BlockStore::in_memory().expect("store");
+        let registry = Arc::new(Registry::with_blocks(Some(Arc::clone(&store))));
+        let mut c = conn_over(config(), Arc::clone(&registry));
+        let mut peer = authenticate(&mut c);
+        create_and_store(&mut c, &mut peer, &store);
+        let host = config().host;
+        let addr = registry.list(host)[0].addr;
+        peer.send(&mut c, &ClientMessage::SearchBlocks { query: "make".into(), limit: 0 });
+        let HostMessage::BlockMatches { matches, sessions, .. } = deferred_reply(&mut c) else {
+            panic!("not a search answer");
+        };
+        assert_eq!(sessions, 1);
+        let hits: Vec<_> = matches.iter().filter(|m| m.command == "make").collect();
+        assert_eq!(hits.len(), 1, "one block, one row: {matches:?}");
+        assert_eq!(hits[0].session, Some(addr.session), "the live row is the one kept");
+    }
+
+    /// Over the worker cap the live half answers now and says what it
+    /// skipped — a partial answer the palette can show, refusing by name
+    /// rather than queueing a search nobody is waiting for any more.
+    #[test]
+    fn history_is_not_searched_when_the_worker_cap_is_full() {
+        let store = crate::block_store::BlockStore::in_memory().expect("store");
+        let registry = Arc::new(Registry::with_blocks(Some(Arc::clone(&store))));
+        let mut c = conn_over(config(), Arc::clone(&registry));
+        let mut peer = authenticate(&mut c);
+        create_and_store(&mut c, &mut peer, &store);
+        c.deferred_running.store(MAX_DEFERRED, std::sync::atomic::Ordering::SeqCst);
+        let out = peer.send(&mut c, &ClientMessage::SearchBlocks { query: "make".into(), limit: 0 });
+        let Some(HostMessage::BlockMatches { matches, error, .. }) = out.into_iter().next() else {
+            panic!("over the cap the answer is inline");
+        };
+        assert!(error.contains("history not searched"), "the refusal names what it skipped: {error}");
+        assert!(matches.iter().any(|m| m.command == "make" && m.session.is_some()), "the live half still answers");
+        c.deferred_running.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// A pairing request submitted to this queue, with the decision captured.

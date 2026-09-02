@@ -18,6 +18,10 @@ path = "src/main.rs"
 # of them missing; the build cost is paid once per toolchain and buys the same
 # database everywhere.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# A run id per session for the block history (ADR-020): session ids restart
+# at one on every daemon start, so the store keys on a random one. The same
+# version zest-mesh already pulls for its nonces.
+getrandom = "0.4"
 zest-core.workspace = true
 zest-pty.workspace = true
 zest-proto.workspace = true
