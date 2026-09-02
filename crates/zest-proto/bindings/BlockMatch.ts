@@ -46,7 +46,14 @@ block: number,
  * The session's title at answer time, so a row can say *which* zsh when
  * a host has six. Empty when the session is gone or unnamed.
  */
-title: string, command: string, cwd: string, state: BlockState, 
+title: string, command: string, 
+/**
+ * The command was longer than the store keeps and was cut (ADR-020).
+ * History to read, not a thing to re-run: a client must not type the
+ * first four kilobytes of a pasted script as if they were the whole.
+ * Additive; a live block never sets it.
+ */
+command_truncated: boolean, cwd: string, state: BlockState, 
 /**
  * Wall clock at OSC 133;C, milliseconds since the Unix epoch — the
  * host's stamp, so "2m ago" on another machine means something against

@@ -5737,6 +5737,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "directories",
+ "getrandom 0.4.3",
  "rusqlite",
  "rustix 1.1.4",
  "serde",

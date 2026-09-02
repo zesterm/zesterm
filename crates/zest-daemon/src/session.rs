@@ -26,7 +26,7 @@ use zest_pty::{CommandSpec, PtySize, PtyTransport};
 use crate::DaemonError;
 
 /// Milliseconds since the Unix epoch — the block-timestamp clock.
-fn unix_ms() -> u64 {
+pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
@@ -106,6 +106,9 @@ fn clamp_size((cols, rows): (u16, u16)) -> (u16, u16) {
 /// A running shell, and everyone watching it.
 pub struct Session {
     pub id: SessionId,
+    /// This run of this session, for the block history (ADR-020): the key a
+    /// stored block belongs to, since `id` restarts at one per daemon start.
+    pub run: crate::block_store::RunId,
     terminal: Arc<Mutex<Terminal>>,
     pty: Arc<dyn PtyTransport + Send + Sync>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -172,7 +175,7 @@ impl Session {
         wake: impl Fn(SessionId) + Send + Sync + 'static,
         listing_changed: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, DaemonError> {
-        Self::spawn_with_context(id, cmd, size, scrollback, wake, listing_changed, None)
+        Self::spawn_with_context(id, cmd, size, scrollback, wake, listing_changed, None, None)
     }
 
     /// [`Self::spawn`], with the context engine that stamps each starting
@@ -188,6 +191,10 @@ impl Session {
         wake: impl Fn(SessionId) + Send + Sync + 'static,
         listing_changed: impl Fn() + Send + Sync + 'static,
         context: Option<std::sync::Arc<crate::context::ContextEngine>>,
+        // Where finished blocks go to outlive the session (ADR-020). `None`
+        // — every test's choice, and `history.blocks = false` — means the
+        // history is the grid's and dies with it.
+        sink: Option<crate::block_store::BlockSink>,
     ) -> Result<Self, DaemonError> {
         let mut pty = zest_pty::NativePty::spawn(cmd, size)
             .map_err(|e| DaemonError::Spawn(e.to_string()))?;
@@ -203,6 +210,7 @@ impl Session {
         let title = Arc::new(Mutex::new(String::new()));
         let facts_rev = Arc::new(AtomicU64::new(0));
         let last_writer: Arc<Mutex<Option<zest_proto::ClientId>>> = Arc::new(Mutex::new(None));
+        let run = crate::block_store::RunId::mint();
 
         let subscribers: Arc<Mutex<HashMap<u64, Subscriber>>> = Arc::default();
         // Shared because two things now report the child leaving: the reader
@@ -219,6 +227,7 @@ impl Session {
             let last_writer = Arc::clone(&last_writer);
             let subscribers = Arc::clone(&subscribers);
             let context = context.clone();
+            let sink = sink.clone();
             let mut reply = pty.writer();
 
             std::thread::Builder::new()
@@ -234,6 +243,12 @@ impl Session {
                     // that probed to nothing is asked exactly once rather
                     // than per read burst for as long as it runs.
                     let mut stamp_asked: Option<u32> = None;
+                    // The newest block already handed to the history (ADR-020).
+                    // Blocks finish in order — only the tail can be anything but
+                    // `Finished` — so walking back from the newest to this mark
+                    // visits exactly the ones that finished since the last pass,
+                    // however many a single chunk closed.
+                    let mut persisted_up_to: Option<u32> = None;
                     loop {
                         // `Err(_) => break` here treated a signal as the end of the
                         // stream, which closes a healthy peer or ends a live shell.
@@ -250,7 +265,7 @@ impl Session {
                         // can only ever be too new, never too old.
                         let author = last_writer.lock().ok().and_then(|w| *w);
 
-                        let (events, busy, alt, to_stamp) = {
+                        let (events, busy, alt, to_stamp, to_store) = {
                             let Ok(mut term) = terminal.lock() else { break };
                             // The parser has no clock (`no_std`); the reader
                             // is where wall time and bytes meet, so blocks
@@ -293,8 +308,36 @@ impl Session {
                                     venv,
                                 ))
                             });
-                            (term.take_events(), busy, alt, to_stamp)
+                            // Gathered here, written elsewhere: the store must
+                            // never sit under this lock (a parse chunk is the
+                            // keystroke budget of ADR-016) and never on this
+                            // thread at all. The one hole, accepted: a block
+                            // that finished and was evicted or erased inside
+                            // this same chunk is missed, which takes a flood
+                            // that closes a command and pushes its end past
+                            // the scrollback bound in one read.
+                            let to_store: Vec<crate::block_store::StoredBlock> = match &sink {
+                                None => Vec::new(),
+                                Some(_) => term
+                                    .blocks()
+                                    .blocks()
+                                    .iter()
+                                    .rev()
+                                    .take_while(|b| persisted_up_to.is_none_or(|w| b.id.0 > w))
+                                    .filter_map(|b| {
+                                        crate::block_store::StoredBlock::from_block(run, id, b)
+                                    })
+                                    .collect(),
+                            };
+                            (term.take_events(), busy, alt, to_stamp, to_store)
                         };
+
+                        if let Some(sink) = &sink {
+                            if let Some(newest) = to_store.iter().map(|b| b.id.0).max() {
+                                persisted_up_to = Some(persisted_up_to.map_or(newest, |w| w.max(newest)));
+                                sink.record(to_store);
+                            }
+                        }
 
                         if let (Some(engine), Some((block, cwd, host, venv))) =
                             (context.as_ref(), to_stamp)
@@ -414,6 +457,7 @@ impl Session {
 
         Ok(Self {
             id,
+            run,
             terminal,
             pty,
             writer: Arc::new(Mutex::new(writer)),
@@ -1132,6 +1176,7 @@ mod tests {
             seen: Mutex::new(None),
         });
         let s = Session {
+            run: crate::block_store::RunId(0),
             id: SessionId(1),
             terminal: Arc::clone(&terminal),
             pty: Arc::clone(&probe) as Arc<dyn PtyTransport + Send + Sync>,
@@ -1445,6 +1490,7 @@ mod tests {
             seen: Mutex::new(None),
         });
         let s = Session {
+            run: crate::block_store::RunId(0),
             id: SessionId(1),
             terminal: Arc::clone(&terminal),
             pty: Arc::clone(&probe) as Arc<dyn PtyTransport + Send + Sync>,

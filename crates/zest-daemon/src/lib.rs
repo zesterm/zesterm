@@ -40,7 +40,7 @@ pub mod context;
 pub mod enroll;
 pub mod files;
 pub mod gitcmd;
-pub mod history;
+pub mod block_store;
 pub mod lan;
 pub mod local;
 pub mod offer;

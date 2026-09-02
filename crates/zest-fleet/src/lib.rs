@@ -818,6 +818,7 @@ mod tests {
             block,
             title: String::new(),
             command: command.into(),
+            command_truncated: false,
             cwd: "/".into(),
             state: zest_proto::BlockState::Finished { exit_code: Some(0) },
             started_ms: Some(ended.saturating_sub(10)),

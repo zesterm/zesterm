@@ -539,7 +539,26 @@ fn main() {
         start_approver(&queue, &auth, audit);
     }
 
-    let registry = Arc::new(Registry::new());
+    // The block history (ADR-020). This machine's own setting decides, read
+    // once here because the daemon outlives every window; never under
+    // --ephemeral, whose key dies with the process and should leave nothing
+    // behind. A store that will not open is a warning, not a refusal to
+    // serve shells.
+    let history_on =
+        zest_config::load(&zest_config::Options::default()).resolved.settings.history.blocks;
+    let blocks = block_store_path(history_on, ephemeral, zest_config::paths::state_dir()).and_then(
+        |path| match zest_daemon::block_store::BlockStore::open(&path) {
+            Ok(store) => {
+                tracing::info!(path = %path.display(), "block history on");
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "no block history; serving without it");
+                None
+            }
+        },
+    );
+    let registry = Arc::new(Registry::with_blocks(blocks.clone()));
 
     // One gate for every public transport, because what it bounds -- threads
     // held by connections that have not proved themselves -- belongs to the
@@ -639,12 +658,18 @@ fn main() {
     let advertiser = Arc::new(std::sync::Mutex::new(advertiser));
     {
         let advertiser = Arc::clone(&advertiser);
+        let blocks = blocks.clone();
         if let Err(e) = ctrlc::set_handler(move || {
             if let Ok(mut slot) = advertiser.lock() {
                 if let Some(mut a) = slot.take() {
                     tracing::info!("withdrawing the advertisement before exiting");
                     a.stop();
                 }
+            }
+            // Bounded: each batch commits as the writer drains it, so what
+            // is at risk is only what is still queued — milliseconds.
+            if let Some(blocks) = &blocks {
+                blocks.flush(std::time::Duration::from_millis(500));
             }
             std::process::exit(0);
         }) {
@@ -1164,6 +1189,21 @@ fn machine_label() -> String {
 /// actually has — neither variable set — without mutating process-global state
 /// from a test that runs in parallel with others. With the variables set, the
 /// broken version passed too, so testing it any other way proves nothing.
+/// Where the block history lives, or `None` when there is to be none: the
+/// setting says so, the daemon is `--ephemeral`, or the platform has no
+/// state directory. Pure, so the three reasons are a test rather than a
+/// reading of `main`.
+fn block_store_path(
+    enabled: bool,
+    ephemeral: bool,
+    state_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if !enabled || ephemeral {
+        return None;
+    }
+    state_dir.map(|d| d.join("blocks.sqlite"))
+}
+
 fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
     for var in ["COMPUTERNAME", "HOSTNAME"] {
         if let Some(name) = env(var) {
@@ -1187,7 +1227,22 @@ fn machine_label_from(env: impl Fn(&str) -> Option<String>) -> String {
 
 #[cfg(test)]
 mod label_tests {
-    use super::machine_label_from;
+    use super::{block_store_path, machine_label_from};
+
+    /// `history.blocks = false` must mean no file, and so must `--ephemeral`
+    /// — a key that dies with the process leaves nothing behind — and a
+    /// platform with no state directory has nowhere to put one.
+    #[test]
+    fn the_block_history_is_off_by_the_setting_by_ephemeral_or_by_having_nowhere_to_go() {
+        let dir = Some(std::path::PathBuf::from("/state"));
+        assert_eq!(
+            block_store_path(true, false, dir.clone()),
+            Some(std::path::PathBuf::from("/state").join("blocks.sqlite"))
+        );
+        assert_eq!(block_store_path(false, false, dir.clone()), None, "the setting");
+        assert_eq!(block_store_path(true, true, dir), None, "--ephemeral");
+        assert_eq!(block_store_path(true, false, None), None, "nowhere to go");
+    }
 
     #[test]
     fn a_machine_knows_its_own_name_without_help_from_the_environment() {

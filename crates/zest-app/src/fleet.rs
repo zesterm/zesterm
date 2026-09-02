@@ -1725,6 +1725,7 @@ mod tests {
             block: 1,
             title: String::new(),
             command: command.into(),
+            command_truncated: false,
             cwd: "/".into(),
             state: zest_proto::BlockState::Finished { exit_code: Some(0) },
             started_ms: Some(1),

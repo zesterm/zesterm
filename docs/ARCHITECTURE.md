@@ -1986,3 +1986,105 @@ cannot change anything a paired device could not — and persistence is the one
 place where "could not" is doing less work than it looks like it is.** A
 capability that outlives the access that used it is worth a log line even when it
 is not worth a gate.
+
+## ADR-020 — What persists is the block, never the scrollback
+
+**Status:** accepted (#529, PR 2 of the fleet-search epic #526).
+
+Every *finished* command block — command, cwd, branch, exit code, start and
+end wall time, which paired device typed it — is written to
+`state_dir()/blocks.sqlite` on the host that ran it, and `SearchBlocks`
+answers from live sessions and that store together. Nothing else about a
+session survives the daemon: not the rows, not the output, not the grid. A
+search hit for a stored block carries `session: None`, which is how a client
+knows there is nothing to activate. This is where Warp sits and kitty,
+WezTerm and Ghostty do not, and it was chosen with the alternative fully
+built: `history.rs` stored evicted rows in SQLite, tested, with zero callers.
+
+### Why not rows
+
+Persisting scrollback looked like a free connector — the evicted-row struct
+was field-for-field the store's `Line`. Adversarial review found five reasons
+it is a trap, and every one is a property of *rows* that a block does not
+have:
+
+1. Rows are dropped on four paths (`scroll_screen_up`, reflow over the limit,
+   a height shrink, `bank_viewport_top`) and only one was captured, so a
+   store would hold holes the wire cannot name. A block is one record with no
+   "gap" state.
+2. Reflow renumbers `LineId`s from the oldest row still in memory, so a store
+   keyed on a physical line id is un-reindexable without an epoch. A block is
+   keyed on `(run, block_id)`, and ids never rewind within a run.
+3. ED 3 clears history and the wire says so (`history_clears`); serving
+   stored rows back undoes a clear every replica honoured. A block is a fact
+   about the past that an erase of the *screen* does not change.
+4. `SessionId` restarts at one per daemon start, so a store keyed on it hands
+   a fresh session a dead one's history. The store is keyed on a random
+   `RunId` minted at spawn, and a stored match carries `session: None`.
+5. The row capture rebuilt text by hand — a fourth copy of the wide-spacer
+   and combining-mark rule. A block's `command` is already a `String` the
+   parser produced.
+
+### What is never stored
+
+Output text — there is no column for it, which is the strongest form of the
+rule (and `blocks` over MCP carries none either, ADR-015). venv and kube. The
+environment. A block that never finishes: the wire has no honest state for
+"ran, outcome unknown, not running", and ⏎ would re-run a command whose last
+outcome was the shell dying under it. Anything from a daemon run under
+`--ephemeral`. A command longer than 4 KiB is cut and says so
+(`command_truncated`), and a client shows it without letting ⏎ re-run half a
+script.
+
+### Never on the pty reader's time
+
+The reader thread finds newly finished blocks under the terminal lock it
+already holds (a watermark of the newest id handed over; blocks finish in
+order, so a walk back from the tail to the mark is exactly the new ones),
+clones the few fields, releases the lock, and `try_send`s them to a writer
+thread that owns the database. Never `send`: an fsync under the terminal lock
+is the keystroke stall ADR-016 built a predicted-echo overlay to hide. A full
+queue drops the batch and says so once. WAL and `synchronous = NORMAL`, so a
+torn write is a rollback and a commit does not wait for the disk per command.
+One hole, accepted and named in the code: a block that finishes and is
+evicted or erased inside the same read chunk is missed.
+
+### Substring, not full-text
+
+FTS5 is compiled in — `libsqlite3-sys`'s `build.rs` passes
+`-DSQLITE_ENABLE_FTS5` on the bundled path, unconditionally — and is not used.
+The live search is a case-folded substring over the command line
+(`zest_proto::search::Needle`); a trigram index answers nothing for one- and
+two-character queries and ranks by bm25, so live and stored would be two
+truths. The store is bounded (100 000 rows, one year) and a recency-ordered
+scan of it costs milliseconds on the connection's deferred worker — the
+`GitDiff` path, because the serve loop holds the connection lock across
+`on_bytes`. SQL narrows with `LIKE` where that is a superset (an ASCII query)
+and the shared Rust predicate decides, so a stored hit and a live hit obey one
+rule. Revisit when a profile, not an instinct, says so.
+
+### The switch
+
+`history.blocks`, on by default, read once when this machine's daemon starts
+(`Invalidation::Restart` — the daemon's; a window restart applies nothing).
+Off means the file is not created. No redaction heuristic: the store holds
+what shell history already holds, plus cwd, branch, exit and author; a
+heuristic that catches `TOKEN=` implies a protection it does not give. Per-
+block consent and redaction (ADR-015's amendment) sit upstream in
+`zest-core`, and a masked block is a masked row. Nothing is uploaded; a row
+crosses the wire only inside a `BlockMatches` reply, over the sealed channel,
+to a paired device that asked.
+
+### Alternatives rejected
+
+- Persist raw scrollback: the five reasons above.
+- Store output beside the command: doubles the privacy surface for a search
+  that never returns output.
+- Key on `(started_ms, SessionId)`: collides across an `--ephemeral` daemon
+  and a real one, and puts a meaning into a key.
+- A `live: bool` beside a required session id on the wire: lets a client
+  activate a dead number, which is reason 4 again.
+- FTS5 trigram: two match truths, minimum-length holes, double the file.
+- Write from the pty reader thread: the stall above.
+- A `--no-history` daemon flag: one switch, in settings, is enough;
+  `shell_integration`'s own doc already regrets being a flag.

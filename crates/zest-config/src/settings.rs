@@ -44,6 +44,8 @@ pub struct Settings {
     pub motion: Motion,
     /// The prompt's context chips.
     pub prompt: Prompt,
+    /// What this machine keeps of the commands its shells ran.
+    pub history: History,
     /// Named overrides, selected at launch.
     ///
     /// A profile is the whole settings tree again, partially specified. The
@@ -71,6 +73,7 @@ impl Default for Settings {
             cursor: Cursor::default(),
             motion: Motion::default(),
             prompt: Prompt::default(),
+            history: History::default(),
             profiles: std::collections::BTreeMap::new(),
         }
     }
@@ -763,6 +766,29 @@ impl Default for Prompt {
             widgets: ["cwd", "git", "venv", "exit"].map(String::from).to_vec(),
             compact_ps1: true,
         }
+    }
+}
+
+/// What this machine keeps of the commands its shells ran (ADR-020).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct History {
+    /// Write every finished command block — the command, its directory and
+    /// branch, the exit code, when it ran and which paired device typed it,
+    /// never its output — to this machine's block history, so ⌘K can find
+    /// "that ffmpeg command from March" after the session and the daemon
+    /// are gone. It stays on this machine and is never uploaded; a paired
+    /// device that searches sees the rows in its answer. Shell history
+    /// already keeps the commands; this adds where they ran and how they
+    /// ended. Read once, when this machine's daemon starts — the daemon
+    /// outlives the window, so restarting a window does not apply a change.
+    #[schemars(extend("x_zest_group" = "History", "x_zest_widget" = "toggle"))]
+    pub blocks: bool,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self { blocks: true }
     }
 }
 

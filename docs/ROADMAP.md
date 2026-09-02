@@ -27,7 +27,7 @@ is reported rather than gated.
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
 | `zest-cloud` | ✅ `TlsDuplex`, one connection as two independently owned halves, a one-request HTTP POST over it, `Endpoint` — consumed by `--enroll` and by `--relay`'s per-pipe dial-back |
-| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with, the account client every device shares — `fetch_hosts` and the one relay ladder, moved down out of the app so a second client can reach them; and it answers for its own **configuration** — `GetConfig`/`SetConfig`, so a client reads effective values with the layer that wrote each one and changes them through a path that validates first (ADR-019) |
+| `zest-daemon` | ✅ session ownership *and* lifecycle, protocol loop, loopback / LAN / WebSocket / relay transports, real `Seq`/`Ack`, scrollback, socket locking, authentication, pairing, publishes its own profiles, reports what a child exited with, the account client every device shares — `fetch_hosts` and the one relay ladder, moved down out of the app so a second client can reach them; and it answers for its own **configuration** — `GetConfig`/`SetConfig`, so a client reads effective values with the layer that wrote each one and changes them through a path that validates first (ADR-019); and it keeps a **durable block history** — every finished command, never its output, on the host that ran it, searched together with the live sessions (ADR-020) |
 | `zest-mcp` | ✅ reads, drives and runs terminals over MCP on stdio; `run` correlates a command in the user's own shell and `run_isolated` carries the unforgeable exit code; `screen` and `blocks` wait instead of the caller sleeping; `input` takes named keys and a paste, each its own keystroke; `sessions` asks the host rather than serving a cache, so a title, cwd and `alt_screen` describe the session now; reaches **every machine in the fleet** — mDNS plus the account directory, one connection per host dialled on first use, and a machine nothing can reach is listed with the reason rather than hidden; and it can **configure zesterm** — `config` reads a machine's effective settings with the layer that wrote each one, `set_config` changes one and reports what it costs, `edit_profile` handles the launch profiles, each reaching any machine in the fleet. A value of the wrong type is refused rather than written, which matters more than it sounds: the cascade falls back to `Settings::default()` on a type error, so the `sed` an agent would otherwise reach for can silently reset every setting a person has; and **`search_blocks`** — the fleet's command history newest first, `hosts_searched` counting the machines that answered, never output text (#527) |
 
 ### What works end to end today
@@ -424,8 +424,18 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       — `astral`, `combining-marks`, `scroll-flood` — replacing the synthetic
       fixtures, with a census test in `conformance.rs` so none of the three
       can silently reopen.
-- [ ] SQLite scrollback. Scrollback is in memory and bounded; a session that
-      outlives its window does not yet outlive the daemon.
+- [x] **Durable block history** (ADR-020, #529). Every finished block —
+      command, cwd, branch, exit, times, author, never output — is written
+      to `state_dir()/blocks.sqlite` on the host that ran it, off the pty
+      reader's thread, and `SearchBlocks` answers from live sessions and the
+      store together with `session: None` for a block only the store
+      remembers. `history.blocks` (on by default, read at daemon start;
+      `--ephemeral` never writes) is the one switch. What this line used to
+      promise — SQLite *scrollback* — was built, tested and never called,
+      and ADR-020 records the five reasons rows are a trap where blocks are
+      not. Scrollback itself stays in memory and bounded on purpose, and a
+      session still does not outlive the daemon: there is no pty
+      re-adoption.
 - [ ] **Local echo prediction** (mosh's other trick; #442, ADR-016). The
       engine landed first: `zest-proto::predict` and its TypeScript port
       reconcile guesses from a delta's own rows and cursor, held to one rule
@@ -633,11 +643,10 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       is the one newest-first, dedupe-by-id rule the palette and `zest-mcp`'s
       `search_blocks` share. `BlockMatch` is not `BlockPayload`: no line ids,
       an optional session, plain nulls. Two halves still open in the epic:
-- [ ] **A durable block store** (ADR-020, PR 2 of #526): every finished block
-      — command, cwd, branch, exit, times, author, never output — written to
-      `state_dir()/blocks.sqlite` on the host that ran it, `history.blocks`
-      to switch it off, and `SearchBlocks` answering live ∪ stored with
-      `session: None` for a block only the store remembers.
+- [x] **A durable block store** (ADR-020, #529, PR 2 of #526) — see
+      Protocol & daemon. A stored command longer than 4 KiB is cut and says
+      so (`command_truncated`), and the palette shows it without letting ⏎
+      re-run half a script.
 - [ ] **The browser palette** (PR 3 of #526): `block_matches` would be the
       first reply-only tag the web client models; one long-lived search
       connection on loopback, the per-machine watches on the hosted path.

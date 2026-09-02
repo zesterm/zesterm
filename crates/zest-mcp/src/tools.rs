@@ -2336,6 +2336,8 @@ fn block_match_json(
         "title": m.title,
         "block_id": m.block,
         "command": m.command,
+        // A stored command the host cut (ADR-020): read it, do not re-run it.
+        "command_truncated": m.command_truncated,
         "cwd": m.cwd,
         "state": state,
         // `block_json`'s pair, verbatim: the source names who reported the
@@ -2807,6 +2809,7 @@ mod tests {
             block: 3,
             title: "zsh".into(),
             command: "cargo build".into(),
+            command_truncated: false,
             cwd: "/home/a/p".into(),
             state: BlockState::Finished { exit_code: Some(101) },
             started_ms: Some(1),

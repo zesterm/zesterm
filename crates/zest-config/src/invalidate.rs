@@ -142,6 +142,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     ("prompt.widgets", Invalidation::Free),
     // Read once at spawn, by the shell, on the host that runs it.
     ("prompt.compact_ps1", Invalidation::Restart),
+    // Read once when this machine's daemon starts (ADR-020); `Restart` here
+    // means the daemon's, which is the process a window does not restart.
+    ("history.blocks", Invalidation::Restart),
 ];
 
 /// Which keys changed between two settings trees.
@@ -206,6 +209,7 @@ fn is_group(path: &str) -> bool {
             | "cursor"
             | "motion"
             | "prompt"
+            | "history"
     )
 }
 
@@ -234,6 +238,15 @@ pub fn class_of(key: &str) -> Invalidation {
 
 #[cfg(test)]
 mod tests {
+
+    /// `history.blocks` is read once, when the daemon starts, so the class
+    /// is `Restart` — and the UI must say the daemon's, not the window's.
+    #[test]
+    fn history_blocks_needs_the_daemon_restarted() {
+        let class = super::KEYS.iter().find(|(k, _)| *k == "history.blocks").map(|(_, c)| *c);
+        assert_eq!(class, Some(super::Invalidation::Restart));
+        assert!(super::is_group("history"), "a group nobody walks is a setting nobody can change");
+    }
     #[test]
     fn both_opacities_reconfigure_the_surface() {
         // `window.chrome_opacity` below 1 is what makes the surface

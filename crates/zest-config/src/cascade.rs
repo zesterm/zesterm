@@ -163,6 +163,7 @@ fn is_mergeable(path: &str) -> bool {
             | "cursor"
             | "motion"
             | "prompt"
+            | "history"
     )
 }
 
