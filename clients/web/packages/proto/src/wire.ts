@@ -366,6 +366,44 @@ export function parseBlockPayload(v: unknown): BlockPayload {
   };
 }
 
+/**
+ * Defaults, never throws, for a field this reply may carry from a newer or
+ * an older host. `state` degrades to `finished` with no code — the never-a-
+ * green-tick answer — where `parseBlockPayload` throws, because a throw
+ * here ends the connection rather than a frame.
+ */
+export function parseBlockMatch(v: unknown): BlockMatch {
+  const o = obj(v, 'BlockMatch');
+  const optNum = (key: string): number | null =>
+    o[key] === null || o[key] === undefined ? null : num(o[key], `BlockMatch.${key}`);
+  const optStr = (key: string): string =>
+    o[key] === null || o[key] === undefined ? '' : str(o[key], `BlockMatch.${key}`);
+  let state: BlockState;
+  try {
+    state = parseBlockState(o['state']);
+  } catch {
+    state = { state: 'finished', exit_code: null };
+  }
+  return {
+    host: str(o['host'], 'BlockMatch.host'),
+    session: optNum('session'),
+    block: num(o['block'], 'BlockMatch.block'),
+    title: optStr('title'),
+    command: optStr('command'),
+    command_truncated:
+      o['command_truncated'] === undefined
+        ? false
+        : bool(o['command_truncated'], 'BlockMatch.command_truncated'),
+    cwd: optStr('cwd'),
+    state,
+    started_ms: optNum('started_ms'),
+    ended_ms: optNum('ended_ms'),
+    context:
+      o['context'] === undefined || o['context'] === null ? null : parseBlockContext(o['context']),
+    author: o['author'] === undefined || o['author'] === null ? null : str(o['author'], 'BlockMatch.author'),
+  };
+}
+
 export function parseDelta(v: unknown): Delta {
   const o = obj(v, 'Delta');
   return {
@@ -659,6 +697,53 @@ export interface ErrorMessage {
 }
 
 /**
+ * One command block the host's search matched (#527) — live, or one only
+ * its store remembers (ADR-020).
+ *
+ * The first reply-only tag this client models. Every option is a plain
+ * `null` on the wire — the message never rides a delta — and every reader
+ * here defaults rather than throws: a throw in `parseHostMessage` ends the
+ * fleet connection carrying every other machine's listing.
+ */
+export interface BlockMatch {
+  readonly host: string;
+  /**
+   * `null` for a block whose session is gone and which only a store
+   * remembers: nothing to open. Ids restart at one on every daemon start,
+   * so a dead session's number would name a live stranger.
+   */
+  readonly session: number | null;
+  readonly block: number;
+  readonly title: string;
+  readonly command: string;
+  /** The host cut a stored command at 4 KiB: read it, never re-run it as whole. */
+  readonly command_truncated: boolean;
+  readonly cwd: string;
+  readonly state: BlockState;
+  readonly started_ms: number | null;
+  readonly ended_ms: number | null;
+  readonly context: BlockContextPayload | null;
+  /** 64 lowercase hex, or `null` when the daemon recorded nobody. */
+  readonly author: string | null;
+}
+
+/**
+ * The answer to `search_blocks`. `query` echoes the question — the only
+ * correlation there is; a reply for a query the palette has typed past is
+ * dropped by comparing it. A refusal is this message with `error` set, never
+ * an `error` message (that is what an *old* daemon says).
+ */
+export interface BlockMatchesMessage {
+  readonly t: 'block_matches';
+  readonly query: string;
+  readonly matches: readonly BlockMatch[];
+  readonly truncated: boolean;
+  /** Live sessions scanned; `0` with no matches is "nothing to search". */
+  readonly sessions: number;
+  readonly error: string;
+}
+
+/**
  * A message this client does not model, kept rather than thrown.
  *
  * The daemon may be newer, and `zest-proto`'s own test
@@ -685,6 +770,7 @@ export type HostMessage =
   | Attention
   | ProgressMessage
   | ErrorMessage
+  | BlockMatchesMessage
   | UnknownMessage;
 
 /**
@@ -712,6 +798,7 @@ export const isExited = modeled<Exited>('exited');
 export const isAttention = modeled<Attention>('attention');
 export const isProgress = modeled<ProgressMessage>('progress');
 export const isErrorMessage = modeled<ErrorMessage>('error');
+export const isBlockMatches = modeled<BlockMatchesMessage>('block_matches');
 
 /**
  * An unknown cause reads as `bell` rather than throwing.
@@ -879,6 +966,19 @@ export function parseHostMessage(v: unknown): HostMessage {
             ? null
             : parseSessionAddr(o['session']),
         message: str(o['message'], 'error.message'),
+      };
+    case 'block_matches':
+      return {
+        t,
+        query: str(o['query'], 'block_matches.query'),
+        matches:
+          o['matches'] === undefined || o['matches'] === null
+            ? []
+            : arr(o['matches'], 'block_matches.matches').map(parseBlockMatch),
+        truncated: o['truncated'] === undefined ? false : bool(o['truncated'], 'block_matches.truncated'),
+        sessions: o['sessions'] === undefined ? 0 : num(o['sessions'], 'block_matches.sessions'),
+        // `skip_serializing_if = "String::is_empty"`: absent is the success case.
+        error: o['error'] === undefined ? '' : str(o['error'], 'block_matches.error'),
       };
     default:
       return { t, raw: o };

@@ -39,6 +39,7 @@ const CANONICAL: Record<string, ClientMessage> = {
   enroll: { t: 'enroll', code: 'GOLDCODE' },
   request_keyframe: { t: 'request_keyframe', session: SESSION },
   list_sessions: { t: 'list_sessions' },
+  search_blocks: { t: 'search_blocks', query: 'cargo', limit: 300 },
   create_session: { t: 'create_session', command: 'htop', cwd: '/tmp', cols: 300, rows: 80 },
   // Left without `observe` on purpose: the field is optional on this side, and
   // this is what pins that omitting it still encodes the `false` the host

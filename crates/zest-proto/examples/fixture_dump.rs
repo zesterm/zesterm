@@ -266,7 +266,8 @@ fn main() -> std::process::ExitCode {
         coverage.assert_the_corpus_is_worth_replaying();
         write_bits(&fixtures_dir().join("bits.json"));
         write_client_messages(&fixtures_dir().join("client-messages.json"));
-        written += 2;
+        write_host_messages(&fixtures_dir().join("host-messages.json"));
+        written += 3;
     }
 
     println!("wrote {written} files to {}", fixtures_dir().display());
@@ -866,6 +867,8 @@ fn write_client_messages(path: &Path) {
         ),
         ("request_keyframe", ClientMessage::RequestKeyframe { session: addr }),
         ("list_sessions", ClientMessage::ListSessions),
+        // Past u8, so the u16 encoding of the limit is pinned (#527).
+        ("search_blocks", ClientMessage::SearchBlocks { query: "cargo".into(), limit: 300 }),
         (
             "create_session",
             ClientMessage::CreateSession {
@@ -917,6 +920,100 @@ fn write_client_messages(path: &Path) {
                 .map(|(name, m)| Entry {
                     name,
                     wire: hex(&zest_proto::frame::encode(&m).expect("a client message frames")),
+                })
+                .collect(),
+        },
+    );
+}
+
+/// Reply-only host messages the TypeScript decoder is held to, frame by
+/// frame (#530).
+///
+/// The recordings pin every message a *session* produces; a reply to a
+/// question the browser asked rides no recording, and until this existed the
+/// spelling of its options — `null` on the wire, or no key at all — was
+/// asserted by a test that typed the JSON it then decoded, which agrees with
+/// itself and not with `rmp_serde`. The values pick the corners: a live row
+/// with every option filled and stamps past u32, a stored row with every
+/// option `None`, and a refusal.
+fn write_host_messages(path: &Path) {
+    #[derive(Serialize)]
+    struct Golden {
+        schema: u32,
+        protocol: u16,
+        messages: Vec<Entry>,
+    }
+    #[derive(Serialize)]
+    struct Entry {
+        name: &'static str,
+        wire: String,
+    }
+
+    let live = zest_proto::BlockMatch {
+        host: FIXTURE_HOST,
+        session: Some(SessionId(7)),
+        block: 3,
+        title: "zsh".into(),
+        command: "cargo build --workspace".into(),
+        command_truncated: false,
+        cwd: "/home/a/p".into(),
+        state: zest_proto::BlockState::Finished { exit_code: Some(101) },
+        started_ms: Some(1_756_800_000_000),
+        ended_ms: Some(1_756_800_004_000),
+        context: Some(zest_proto::delta::BlockContextPayload {
+            branch: "main".into(),
+            venv: String::new(),
+            kube: String::new(),
+        }),
+        author: Some(ClientId::from_bytes([0xab; 32])),
+    };
+    let stored = zest_proto::BlockMatch {
+        host: FIXTURE_HOST,
+        session: None,
+        block: 9,
+        title: String::new(),
+        command: "cargo test".into(),
+        command_truncated: true,
+        cwd: "/home/a/p".into(),
+        state: zest_proto::BlockState::Finished { exit_code: None },
+        started_ms: None,
+        ended_ms: None,
+        context: None,
+        author: None,
+    };
+    let messages: Vec<(&'static str, HostMessage)> = vec![
+        (
+            "block_matches",
+            HostMessage::BlockMatches {
+                query: "cargo".into(),
+                matches: vec![live, stored],
+                truncated: true,
+                sessions: 2,
+                error: String::new(),
+            },
+        ),
+        (
+            "block_matches_refused",
+            HostMessage::BlockMatches {
+                query: "cargo".into(),
+                matches: Vec::new(),
+                truncated: false,
+                sessions: 0,
+                error: "history not searched: too many questions in flight; ask again".into(),
+            },
+        ),
+    ];
+
+    write(
+        path,
+        &Golden {
+            schema: FIXTURE_SCHEMA,
+            protocol: PROTOCOL_VERSION,
+            messages: messages
+                .into_iter()
+                .map(|(name, m)| Entry {
+                    name,
+                    wire: hex(&zest_proto::frame::encode(&m).expect("a host message frames")),
                 })
                 .collect(),
         },

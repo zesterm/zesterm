@@ -69,6 +69,8 @@ export {
   type Scrollback,
   type Exited,
   type ErrorMessage,
+  type BlockMatch,
+  type BlockMatchesMessage,
   type UnknownMessage,
   type HostMessage,
   WireError,
@@ -84,6 +86,7 @@ export {
   parseHostProfile,
   parseHostOffer,
   parseBlockPayload,
+  parseBlockMatch,
   isKeyframe,
   isUpdate,
   isWelcome,
@@ -95,6 +98,7 @@ export {
   isScrollback,
   isExited,
   isErrorMessage,
+  isBlockMatches,
 } from './wire.ts';
 export { type Cell, BLANK, expandRow, rowText } from './cells.ts';
 export { GridView, type KeyframeState, NO_LINE } from './grid-view.ts';
