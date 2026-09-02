@@ -118,9 +118,9 @@ watch_signals: boolean,
  */
 agent: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "search_blocks", 
 /**
- * Case-folded substring over the command line
- * ([`search::command_matches`]). Empty means "the most recent
- * `limit` blocks", which is what an opening palette asks.
+ * Case-folded substring over the command line ([`search::Needle`]).
+ * Empty means "the most recent `limit` blocks", which is what an
+ * opening palette asks.
  */
 query: string, 
 /**
