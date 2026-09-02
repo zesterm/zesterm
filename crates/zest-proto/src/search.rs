@@ -51,6 +51,12 @@ pub struct BlockMatch {
     #[serde(default)]
     pub title: String,
     pub command: String,
+    /// The command was longer than the store keeps and was cut (ADR-020).
+    /// History to read, not a thing to re-run: a client must not type the
+    /// first four kilobytes of a pasted script as if they were the whole.
+    /// Additive; a live block never sets it.
+    #[serde(default)]
+    pub command_truncated: bool,
     pub cwd: String,
     pub state: BlockState,
     /// Wall clock at OSC 133;C, milliseconds since the Unix epoch — the
@@ -117,6 +123,13 @@ impl Needle {
         Self { folded: query.to_lowercase() }
     }
 
+    /// The query as folded, for a store that narrows in SQL before asking
+    /// [`Self::matches`] to decide.
+    #[must_use]
+    pub fn folded(&self) -> &str {
+        &self.folded
+    }
+
     /// Does `command` match?
     #[must_use]
     pub fn matches(&self, command: &str) -> bool {
@@ -161,6 +174,7 @@ impl BlockMatch {
             block: b.id.0,
             title: title.to_string(),
             command: b.command.clone(),
+            command_truncated: false,
             cwd: b.cwd.clone(),
             state: match b.state {
                 zest_core::BlockState::Prompt => BlockState::Prompt,
@@ -192,6 +206,7 @@ mod tests {
             block: id,
             title: String::new(),
             command: format!("cmd {id}"),
+            command_truncated: false,
             cwd: "/".into(),
             state: match ended {
                 Some(_) => BlockState::Finished { exit_code: Some(0) },

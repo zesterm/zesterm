@@ -9108,8 +9108,17 @@ impl App {
                     .collect::<Vec<_>>()
                     .join(" \u{b7} ");
                 let ok = !matches!(m.state, zest_proto::BlockState::Finished { exit_code: Some(c) } if c != 0);
-                rows.push(PickerRow::Block { command: command.clone(), provenance, ok });
-                actions.push(PickerAction::RunBlock { command });
+                // A command the store cut (ADR-020) is history to read, not
+                // a thing to re-run: the row shows the cut, and Enter does
+                // nothing on it rather than typing the first four kilobytes
+                // of a pasted script.
+                if m.command_truncated {
+                    rows.push(PickerRow::Block { command: format!("{command}\u{2026}"), provenance, ok });
+                    actions.push(PickerAction::None);
+                } else {
+                    rows.push(PickerRow::Block { command: command.clone(), provenance, ok });
+                    actions.push(PickerAction::RunBlock { command });
+                }
             }
         }
 

@@ -2098,6 +2098,7 @@ mod tests {
                     block: 7,
                     title: "zsh".into(),
                     command: "cargo build --workspace".into(),
+                    command_truncated: false,
                     cwd: "/home/a/p".into(),
                     state: BlockState::Finished { exit_code: Some(101) },
                     // Past u32 on purpose: epoch millis are, and a width that
@@ -2120,6 +2121,7 @@ mod tests {
                     block: 2,
                     title: String::new(),
                     command: "cargo test".into(),
+                    command_truncated: true,
                     cwd: "/home/a/p".into(),
                     state: BlockState::Finished { exit_code: None },
                     started_ms: None,
