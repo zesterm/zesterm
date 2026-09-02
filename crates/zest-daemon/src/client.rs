@@ -67,6 +67,7 @@ fn discarded(waiting_for: &str, msg: &HostMessage) {
         HostMessage::GitDiffResult { .. } => "GitDiffResult",
         HostMessage::ConfigState { .. } => "ConfigState",
         HostMessage::ConfigWritten { .. } => "ConfigWritten",
+        HostMessage::BlockMatches { .. } => "BlockMatches",
     };
     tracing::warn!(
         message = kind,
