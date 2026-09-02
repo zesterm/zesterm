@@ -21,7 +21,8 @@
 //! `mesh_probe` does for the CLI. Nothing else in the process ever makes
 //! `Presence::Unreachable` appear.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,7 @@ use winit::event_loop::EventLoopProxy;
 use zest_mesh::discovery::mdns::MdnsDiscovery;
 use zest_mesh::discovery::{Discovery, Presence};
 use zest_mesh::identity::ClientIdentity;
-use zest_proto::HostId;
+use zest_proto::{frame, BlockMatch, ClientMessage, HostId, HostMessage};
 
 use zest_daemon::client::DaemonClient;
 use crate::remote::Dialer;
@@ -57,6 +58,17 @@ const REWATCH_MAX: Duration = Duration::from_secs(10);
 /// nothing new for discovery to say. Fifteen seconds, against a reconcile that
 /// is a map comparison when there is nothing to do.
 const SUPERVISE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Most blocks one host returns to the palette per query. The merge caps
+/// again after every host has answered, so this bounds one answer's size
+/// rather than the list's.
+pub const PALETTE_LIMIT: u32 = 32;
+
+/// How many questions a watcher's outbound lane holds before a `try_send`
+/// fails (#527). Small on purpose: a writer stalled on a dead relay socket
+/// must not queue a keystroke per frame, and a superseded query is worthless
+/// anyway — the palette only ever wants the newest one answered.
+const LANE_DEPTH: usize = 4;
 
 /// How often the account listing is re-read while signed in. A minute,
 /// jittered ±25% so several windows do not poll the control plane in step;
@@ -231,6 +243,69 @@ fn apply_listing(
     true
 }
 
+/// Park one host's answer to the palette's block search, unless it is late.
+///
+/// Late in either of two ways, and both are dropped rather than parked: the
+/// watcher was retired (the `apply_listing` race, for matches), or the
+/// palette has typed on since — the echoed `query` is the correlation, and
+/// an answer to a question nobody is asking any more must not overwrite the
+/// one they are. Pure over the state for the reason `apply_listing` is.
+fn receive_matches(
+    state: &mut State,
+    host: HostId,
+    retired: bool,
+    query: &str,
+    matches: Vec<BlockMatch>,
+) -> bool {
+    if retired {
+        return false;
+    }
+    let Some(search) = state.search.as_mut() else { return false };
+    if search.query != query {
+        return false;
+    }
+    search.answers.insert(host, matches);
+    true
+}
+
+/// Ask every host with a live lane the palette's question, and remember
+/// which ones the question actually reached.
+///
+/// A `try_send` that fails is not "asked": the lane is full because that
+/// host's writer is stalled, and counting it would leave the query row
+/// saying `2 of 3 hosts searched` for a host that will never answer. The
+/// question replaces any earlier one wholesale — the palette wants one
+/// answer set, for the query it shows now.
+fn ask_lanes(state: &mut State, query: &str) {
+    let msg = ClientMessage::SearchBlocks { query: query.to_string(), limit: PALETTE_LIMIT };
+    let mut search = BlockSearch { query: query.to_string(), ..Default::default() };
+    for (host, lane) in &state.links {
+        if lane.try_send(msg.clone()).is_ok() {
+            search.asked.insert(*host);
+        }
+    }
+    state.search = Some(search);
+}
+
+/// The palette's block search in flight: what was asked, whom it reached,
+/// and who has answered (#527).
+#[derive(Default)]
+struct BlockSearch {
+    query: String,
+    /// Hosts the question actually reached — a full lane is not asked.
+    asked: BTreeSet<HostId>,
+    answers: HashMap<HostId, Vec<BlockMatch>>,
+}
+
+/// A snapshot of [`BlockSearch`] for the picker: the query the answers are
+/// for, how many hosts were asked, and every answer so far.
+#[derive(Debug, Clone, Default)]
+pub struct BlockSearchView {
+    pub query: String,
+    pub asked: usize,
+    pub answered: Vec<(HostId, Vec<BlockMatch>)>,
+}
+
 /// One push from the daemon's approval queue, forwarded to the app.
 ///
 /// Decoded here so the app's modal state never sees a wire type: `Requested`
@@ -278,6 +353,15 @@ struct State {
     /// the same machine, and re-dialling it because its display name changed
     /// would drop a live session list for a cosmetic edit.
     watchers: HashMap<HostId, Arc<AtomicBool>>,
+    /// One outbound lane per live watcher, keyed by host (#527). A
+    /// watcher's reader parks in `read`; this is the half that can still
+    /// speak, so the palette's question reaches a host without a fresh
+    /// dial — which over the relay is a TLS handshake and a ticket per
+    /// keystroke. Registered by the watcher itself once its listing is in,
+    /// removed by whichever of the watcher and the supervisor goes first.
+    links: HashMap<HostId, crossbeam_channel::Sender<ClientMessage>>,
+    /// The palette's block search in flight, if any.
+    search: Option<BlockSearch>,
 }
 
 struct Inner {
@@ -546,9 +630,11 @@ impl FleetModel {
         inner.mark_changed();
 
         // Block on pushes until the connection dies; every push is the whole
-        // current truth for this host.
-        loop {
-            match client.next_message()? {
+        // current truth for this host. The window's own watcher is never
+        // retired, so its stop flag is never set.
+        let never = AtomicBool::new(false);
+        Self::serve_watch(inner, host, client, &never, |message| {
+            match message {
                 zest_proto::HostMessage::Sessions { sessions, offer, .. } => {
                     let mut state = inner.state.lock();
                     state.sessions.insert(host, SessionsState::Fresh(sessions));
@@ -582,9 +668,13 @@ impl FleetModel {
                         }
                     });
                 }
+                zest_proto::HostMessage::BlockMatches { query, matches, .. } => {
+                    Self::receive(inner, host, &never, &query, matches);
+                }
                 _ => {}
             }
-        }
+            true
+        })
     }
 
 
@@ -661,6 +751,13 @@ impl FleetModel {
                 // and showing it is worse than showing nothing.
                 state.sessions.remove(host);
                 state.offers.remove(host);
+                // And no lane: the watcher may sit parked in `read` for as
+                // long as the far socket stays open, and a question sent down
+                // its lane would count as asked and never be answered.
+                state.links.remove(host);
+                if let Some(search) = state.search.as_mut() {
+                    search.asked.remove(host);
+                }
             }
         }
         if !plan.stop.is_empty() {
@@ -861,15 +958,189 @@ impl FleetModel {
             return Ok(());
         }
 
-        loop {
-            // Only the listing matters here; a remote host's other pushes
-            // (its approval queue) are never subscribed to.
-            let message = client.next_message()?;
+        // The listing, and the palette's search answers; a remote host's
+        // other pushes (its approval queue) are never subscribed to.
+        Self::serve_watch(inner, host, client, stop, |message| match message {
+            zest_proto::HostMessage::Sessions { sessions, offer, .. } => {
+                Self::publish(inner, host, stop, sessions, offer)
+            }
+            zest_proto::HostMessage::BlockMatches { query, matches, .. } => {
+                Self::receive(inner, host, stop, &query, matches);
+                true
+            }
+            _ => true,
+        })
+    }
+
+    /// Ask every connected host for the blocks matching `query` (#527).
+    ///
+    /// Sent on every changed keystroke, undebounced: a frame is a few
+    /// hundred bytes, a daemon's scan is microseconds, the relay round trips
+    /// are paid in parallel, and an answer to a superseded query is dropped
+    /// by its echo. A timer would add its whole delay to every keystroke to
+    /// save nothing anyone could measure; [`LANE_DEPTH`] is the backstop for
+    /// a stalled link.
+    pub fn search_blocks(&self, query: &str) {
+        ask_lanes(&mut self.inner.state.lock(), query);
+    }
+
+    /// The block search as it stands: the query, how many hosts it reached,
+    /// and every answer parked so far. Cloned out, like `snapshot`.
+    #[must_use]
+    pub fn block_matches(&self) -> BlockSearchView {
+        let state = self.inner.state.lock();
+        state.search.as_ref().map_or_else(BlockSearchView::default, |s| BlockSearchView {
+            query: s.query.clone(),
+            asked: s.asked.len(),
+            answered: s.answers.iter().map(|(h, m)| (*h, m.clone())).collect(),
+        })
+    }
+
+    /// Park one host's search answer, unless its watcher has been retired
+    /// — `publish`'s rule, for matches, and the same lock.
+    fn receive(
+        inner: &Arc<Inner>,
+        host: HostId,
+        stop: &AtomicBool,
+        query: &str,
+        matches: Vec<BlockMatch>,
+    ) {
+        let mut state = inner.state.lock();
+        let stored =
+            receive_matches(&mut state, host, stop.load(Ordering::Acquire), query, matches);
+        drop(state);
+        if stored {
+            inner.mark_changed();
+        }
+    }
+
+    /// The rest of a watcher's life, once its listing is in: the connection
+    /// taken apart into a reader (this thread) and a writer on a lane other
+    /// threads can send down (#527).
+    ///
+    /// Until the split, a watcher owned its whole `DaemonClient` and parked
+    /// in `next_message`, so nothing could ask the host anything — the
+    /// pairing decision dials afresh for exactly that reason, which is fine
+    /// once per decision and not once per keystroke. The shape is
+    /// `RemoteSession`'s: split the sealed channel into its two directions
+    /// (separate keys, separate counters, no lock between the threads), carry
+    /// the frames the handshake already lifted off the socket (#54), and
+    /// drain those *before* the first blocking read.
+    ///
+    /// `on_message` returns whether to keep serving; `false` ends the
+    /// connection cleanly, which is how a retired watcher stops.
+    fn serve_watch(
+        inner: &Arc<Inner>,
+        host: HostId,
+        client: DaemonClient,
+        stop: &AtomicBool,
+        mut on_message: impl FnMut(HostMessage) -> bool,
+    ) -> Result<(), crate::remote::RemoteError> {
+        let halves = client.into_halves();
+        let (mut reader, writer, mut frames) = (halves.read, halves.write, halves.frames);
+        let (sealer, mut opener) = match halves.channel {
+            Some(c) => {
+                let (s, o) = c.split();
+                (Some(s), Some(o))
+            }
+            None => (None, None),
+        };
+        let (tx, rx) = crossbeam_channel::bounded::<ClientMessage>(LANE_DEPTH);
+        std::thread::Builder::new()
+            .name(format!("zest-fleet-writer-{}", host.short()))
+            .spawn(move || {
+                let mut sink: Option<Box<dyn Write + Send>> = Some(writer);
+                let mut sealer = sealer;
+                // Ends when every sender is gone: the lane in `links` and the
+                // reader's own clone, whichever is dropped last.
+                while let Ok(msg) = rx.recv() {
+                    crate::remote::write_msg(&mut sink, sealer.as_mut(), &msg);
+                    if sink.is_none() {
+                        // The reader is the supervisor and will see the same
+                        // break; nothing more can be written.
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| crate::remote::RemoteError::Io(e.to_string()))?;
+
+        // Registered under the state lock, after the stop check — `publish`'s
+        // rule: a watcher retired while it dialled must not leave a lane the
+        // supervisor has already decided nobody holds.
+        let lane = tx.clone();
+        {
+            let mut state = inner.state.lock();
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
-            if let zest_proto::HostMessage::Sessions { sessions, offer, .. } = message {
-                if !Self::publish(inner, host, stop, sessions, offer) {
+            state.links.insert(host, tx);
+        }
+
+        let served = Self::read_frames(&mut reader, &mut frames, opener.as_mut(), stop, &mut on_message);
+
+        // Only this connection's own lane: the supervisor may already have
+        // removed it, and a redial (which runs after this returns) will
+        // register its own.
+        let mut state = inner.state.lock();
+        if state.links.get(&host).is_some_and(|l| l.same_channel(&lane)) {
+            state.links.remove(&host);
+        }
+        // A question this host can no longer answer is not outstanding: the
+        // query row must not wait on it.
+        if let Some(search) = state.search.as_mut() {
+            search.asked.remove(&host);
+        }
+        drop(state);
+        drop(lane);
+        served
+    }
+
+    /// Read, open and decode frames until the link dies or the caller says
+    /// stop. The frame handling is `RemoteSession`'s reader in miniature —
+    /// see its comments for why a frame that will not open ends the
+    /// connection and why an undecodable one does not.
+    fn read_frames(
+        reader: &mut Box<dyn Read + Send>,
+        frames: &mut zest_proto::FrameReader,
+        mut opener: Option<&mut zest_mesh::secure::Opener>,
+        stop: &AtomicBool,
+        on_message: &mut impl FnMut(HostMessage) -> bool,
+    ) -> Result<(), crate::remote::RemoteError> {
+        use crate::remote::RemoteError;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut drain_carried = frames.pending() > 0;
+        loop {
+            if drain_carried {
+                drain_carried = false;
+            } else {
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => return Err(RemoteError::Io("the host closed the connection".into())),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(RemoteError::Io(e.to_string())),
+                    Ok(n) => n,
+                };
+                frames.feed(&buf[..n]);
+            }
+            loop {
+                let body = match frames.next_frame() {
+                    Ok(Some(b)) => b,
+                    Ok(None) => break,
+                    Err(e) => return Err(RemoteError::Io(format!("framing is lost: {e}"))),
+                };
+                let body = match opener.as_deref_mut() {
+                    Some(o) => o
+                        .open(&body)
+                        .map_err(|e| RemoteError::Io(format!("a sealed frame did not open: {e}")))?,
+                    None => body,
+                };
+                if stop.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                // A message this build cannot parse is a newer host, not a
+                // broken one; a watcher subscribes to pushes it already
+                // understands, so skipping is the whole degradation.
+                let Ok(msg) = frame::decode::<HostMessage>(&body) else { continue };
+                if !on_message(msg) {
                     return Ok(());
                 }
             }
@@ -1399,6 +1670,78 @@ mod tests {
             jittered_from(base, 0),
             jittered_from(base, 999),
             "if every salt lands on one value there is no jitter and every window polls in step"
+        );
+    }
+
+    fn a_match(host: HostId, command: &str) -> BlockMatch {
+        BlockMatch {
+            host,
+            session: Some(zest_proto::SessionId(1)),
+            block: 1,
+            title: String::new(),
+            command: command.into(),
+            cwd: "/".into(),
+            state: zest_proto::BlockState::Finished { exit_code: Some(0) },
+            started_ms: Some(1),
+            ended_ms: Some(2),
+            context: None,
+            author: None,
+        }
+    }
+
+    /// The echoed query is the only correlation there is. A slow host
+    /// answering `ca` after the palette has typed `cargo` must not put the
+    /// broader answer where the narrower one belongs.
+    #[test]
+    fn a_stale_answer_is_dropped_by_its_echo() {
+        let host = HostId::from_bytes([3; 32]);
+        let mut state = State::default();
+        let (lane, _rx) = crossbeam_channel::bounded(LANE_DEPTH);
+        state.links.insert(host, lane);
+        ask_lanes(&mut state, "ca");
+        ask_lanes(&mut state, "cargo");
+        assert!(
+            !receive_matches(&mut state, host, false, "ca", vec![a_match(host, "cat x")]),
+            "an answer to the earlier question is late, not wrong, and goes nowhere"
+        );
+        assert!(receive_matches(&mut state, host, false, "cargo", vec![a_match(host, "cargo b")]));
+        let search = state.search.as_ref().expect("a search is in flight");
+        assert_eq!(search.answers[&host][0].command, "cargo b");
+    }
+
+    /// `a_retired_watcher_cannot_put_a_listing_back`, for answers: the
+    /// supervisor's clear and a late reply race, and the flag read under the
+    /// lock is what decides it.
+    #[test]
+    fn a_retired_watcher_cannot_park_an_answer() {
+        let host = HostId::from_bytes([3; 32]);
+        let mut state = State {
+            search: Some(BlockSearch { query: "x".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(!receive_matches(&mut state, host, true, "x", vec![a_match(host, "x")]));
+        assert!(state.search.as_ref().is_some_and(|s| s.answers.is_empty()));
+    }
+
+    /// The query row says how many hosts were asked, so a host the question
+    /// never reached must not be one of them — otherwise `2 of 3 hosts
+    /// searched` waits on a host that is not going to answer.
+    #[test]
+    fn a_lane_that_is_full_does_not_count_as_asked() {
+        let stalled = HostId::from_bytes([1; 32]);
+        let live = HostId::from_bytes([2; 32]);
+        let mut state = State::default();
+        let (full, _keep) = crossbeam_channel::bounded(1);
+        full.send(ClientMessage::ListSessions).expect("fill the lane");
+        state.links.insert(stalled, full);
+        let (free, rx) = crossbeam_channel::bounded(LANE_DEPTH);
+        state.links.insert(live, free);
+        ask_lanes(&mut state, "make");
+        let search = state.search.as_ref().expect("a search is in flight");
+        assert_eq!(search.asked.iter().copied().collect::<Vec<_>>(), [live]);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientMessage::SearchBlocks { query, limit }) if query == "make" && limit == PALETTE_LIMIT),
+            "the live host got the question, with the palette's own limit"
         );
     }
 }

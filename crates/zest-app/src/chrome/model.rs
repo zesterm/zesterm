@@ -222,6 +222,21 @@ pub struct Caret {
     pub selection: Option<(usize, usize)>,
 }
 
+/// How far the palette's fleet-wide block search has got (#527).
+///
+/// `answered` is the number the row prints: a host that has not answered
+/// has not been searched, whatever the fleet listing knows about it. Until
+/// this existed the row counted every known fleet row while the blocks came
+/// from attached tabs — the number lying beside the list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostsSearched {
+    pub answered: usize,
+    /// Hosts the question reached. While `answered < asked` the row says
+    /// `2 of 3 hosts searched`, so a slow relay reads as pending rather
+    /// than as a fleet that is smaller than it is.
+    pub asked: usize,
+}
+
 /// The ⌘K palette, when open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PickerModel {
@@ -237,8 +252,9 @@ pub struct PickerModel {
     /// Bring the selection into view this pass — keyboard only, so wheel
     /// scrolling never snaps back.
     pub ensure_visible: bool,
-    /// How many hosts the query ran over — the query row's right-hand fact.
-    pub hosts_searched: usize,
+    /// The query row's right-hand fact: how many hosts have answered, over
+    /// how many were asked.
+    pub hosts_searched: HostsSearched,
     /// The blink cycle's on half, from the animation clock.
     pub caret_on: bool,
 }

@@ -344,6 +344,21 @@ Modal over the window. Scrim `rgba(5,7,13,.66)` + 3px backdrop blur; panel top-a
 - **Groups, in order:** Blocks, Sessions, Hosts, Actions. Blocks first is the point — the palette is primarily a history of what ran anywhere in the fleet.
 - **Footer:** `9px 16px`, top border `#1b2338`, fill `#0f1526`, 10.5px `ui.faint` with key caps in `ui.dim` mono — `↑↓ navigate`, `⏎ run here`, `⇧⏎ run on host…`, right-aligned `esc dismiss`.
 
+**Where the blocks come from (#527).** Every machine the window holds a
+connection to — its own daemon and every routable host the fleet watches —
+answers the query for the sessions it owns (`SearchBlocks`/`BlockMatches`,
+asked again on every keystroke). The rows are those answers merged newest
+first, one row per `(host, session, block)`. Until a host has answered, the
+blocks this window's own tabs already hold for it stand in, and yield the
+moment it speaks; an in-process shell has no daemon and is read directly.
+`N hosts searched` counts hosts that have *answered* — while some are still
+pending it reads `2 of 3 hosts searched`, so a slow relay is pending rather
+than a fleet that is smaller than it is. The host label is resolved by id,
+never by name (two machines can share one). Provenance ages read `now`,
+`2m ago`, `12h ago`, `yesterday`, `3d ago`. Six rows on an empty query, a
+scrolling list once something is typed. Blocks of sessions that have ended
+are the next step (a durable block store on the host that ran them).
+
 ### 7. Fleet
 
 **Purpose:** the directory — which machines exist, are they up, how are we reaching them.
@@ -782,7 +797,8 @@ twin's Ctrl+Shift form, so `⌘⇧F` *is* Ctrl+Shift+F — `⌘F`'s own Windows
 spelling — and `⌘G`, the Mac's find-next since 1984, is spent by Open file…
 (itself displaced from `⌘O` the same way). **⏎ / ⇧⏎ inside the bar** step
 forwards and backwards, wrapping at both ends, and the `‹ ›` buttons do the
-same. This also rules `⌘⇧F` out as a future "search the fleet" chord.
+same. This also rules `⌘⇧F` out as a fleet-search chord — and none is
+needed: searching the fleet's history *is* the ⌘K palette (§6).
 
 **Rules the bar keeps:**
 

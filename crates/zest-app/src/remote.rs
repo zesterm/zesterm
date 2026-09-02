@@ -893,7 +893,7 @@ fn connect_daemon(
 }
 
 /// Write one message to the current sink, dropping it if the link is gone.
-fn write_msg(
+pub(crate) fn write_msg(
     sink: &mut Option<Box<dyn Write + Send>>,
     sealer: Option<&mut Sealer>,
     msg: &ClientMessage,

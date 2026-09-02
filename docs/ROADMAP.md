@@ -22,7 +22,7 @@ is reported rather than gated.
 | `zest-render-wgpu` | ✅ pipelines, atlas, offscreen resolve, selection |
 | `zest-config` | ✅ cascade, provenance, profiles, migrations, hot reload, JSON Schema — **every declared setting is consumed** (a test keeps `NOT_YET_WIRED` empty); every mutator replaces the file rather than truncating it, so a crash mid-save cannot cost somebody every setting they have; the did-you-mean for an unknown key lives here rather than in the app, so a refusal over the wire and a row in the settings tab name the same key for the same typo |
 | `zest-input` | ✅ keys + SGR mouse + selection + IME + Kitty CSI u (flags 1, 2, 8), Rust and TypeScript — ⬜ Kitty flags 4/16, keypad |
-| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; a tab moves to a window of its own from the palette; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, Settings and Profiles among them (#494), a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir) — ⬜ Snap Layouts, polish |
+| `zest-app` | ✅ window, tabs (top strip / left sidebar) behind `SessionSource`, **attached to its own daemon**, fleet picker (⌘K), **split panes — any number, on any host** (⌘D splits on the window's host, ⌘H splits through the picker onto a machine or an existing session, ⌘U/⌘J move the keyboard; #436), restore-on-launch, **N windows in one process** (⌘N / Ctrl+Shift+N opens another on the same host; each has its own strip; every window comes back where it stood; a tab moves to a window of its own from the palette; ADR-018) — runs on Windows *and* macOS (Metal, transparent titlebar), springs + smooth scroll + reduce_motion, cursor shapes (config *and* DECSCUSR) with a spring trail, **tabs that say what is happening in them** — close and detach in both positions, Settings and Profiles among them (#494), a busy ring from OSC 133 *or* OSC 9;4, and an attention dot from BEL / OSC 9 / OSC 777 that names no program, imported colour schemes as first-class themes (the gallery's import card pastes any of the 4 formats into the user theme dir), **⌘K searches the fleet's blocks** — every reachable daemon answers for its live sessions and `N hosts searched` counts the ones that answered (#527) — ⬜ Snap Layouts, polish |
 | `zest-proto` | ✅ protocol 3, encoder, `Applier` into a real `Terminal`, `GridView` for TS clients, framing, sealing, cell-for-cell conformance, chaos-resync, command blocks |
 | `zest-mesh` | ✅ Ed25519 identity, keystore, mDNS discovery, layered fleet, pairing + trust store, sealed channel |
 | `zest-fleet` | ✅ what a machine in the fleet is, how the two sources are merged into one row, and the one rule that picks how to reach it — pure, so every client shares the decision rather than a copy of it |
@@ -620,8 +620,24 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       down payment on it. → #491.
 - [ ] Per-block consent and redaction, in `zest-core`, masking the delta so
       every client sees one masked truth — ADR-015's amendment records why a
-      prompt-boundary filter is rejected. Plus fleet-wide block search and the
-      agent pane.
+      prompt-boundary filter is rejected. Plus the agent pane.
+- [x] **Fleet-wide block search, live** (#527, epic #526). `SearchBlocks` /
+      `BlockMatches` is a reply-only pair on the `ListDir` pattern: a daemon
+      answers for the sessions it owns, inline, one terminal lock each; the
+      app asks every host it holds a watcher connection to — the watchers
+      are split into a reader and an outbound lane for exactly this, since a
+      client parked in `read` could ask nothing — and `zest_fleet::merge_matches`
+      is the one newest-first, dedupe-by-id rule the palette and `zest-mcp`'s
+      `search_blocks` share. `BlockMatch` is not `BlockPayload`: no line ids,
+      an optional session, plain nulls. Two halves still open in the epic:
+- [ ] **A durable block store** (ADR-020, PR 2 of #526): every finished block
+      — command, cwd, branch, exit, times, author, never output — written to
+      `state_dir()/blocks.sqlite` on the host that ran it, `history.blocks`
+      to switch it off, and `SearchBlocks` answering live ∪ stored with
+      `session: None` for a block only the store remembers.
+- [ ] **The browser palette** (PR 3 of #526): `block_matches` would be the
+      first reply-only tag the web client models; one long-lived search
+      connection on loopback, the per-machine watches on the hosted path.
 
 **Deliberately not built:** no chat sidebar; no agent loop of our own
 (harnesses improve monthly and a terminal shipping an inferior one ages badly —
