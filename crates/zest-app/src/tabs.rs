@@ -353,6 +353,12 @@ pub struct Tab {
     /// would hand a pane somebody else's environment. Unexpanded, exactly as
     /// it crossed the wire — the host resolves the placeholders, and a pane on
     /// the same host resolves them the same way.
+    ///
+    /// **What crossed the wire, whole** — the machine's `shell.env` and the
+    /// profile's entries together, not the profile's half alone. A split reads
+    /// this verbatim, so keeping only half would mean re-deriving the other
+    /// from settings as they are *now*, and a pane whose environment differs
+    /// from its tab because a setting changed in between is not a split.
     pub launch_env: Vec<(String, String)>,
     /// Bytes waiting for this tab's session to exist (#324) — see
     /// [`Tab::with_pending_input`].

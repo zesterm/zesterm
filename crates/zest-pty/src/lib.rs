@@ -87,7 +87,15 @@ impl CommandSpec {
     /// command blocks, which is what every terminal did until now. It is logged
     /// rather than silent, because "why do I have no blocks" needs an answer
     /// somewhere.
-    pub fn enable_shell_integration(&mut self, dir: &std::path::Path) {
+    ///
+    /// **Returns the variables it injected**, for [`Self::layer_env`]'s
+    /// collision warning. Reported rather than measured: the caller used to
+    /// take `env.len()` beforehand and diff afterwards, and one that took the
+    /// mark a line too late got an empty list and silently lost the warning —
+    /// which is what happened on the in-process spawn path (#496). A value
+    /// that cannot be taken at the wrong moment removes the mistake instead of
+    /// documenting it.
+    pub fn enable_shell_integration(&mut self, dir: &std::path::Path) -> Vec<String> {
         // A command line can already carry the hook, because PowerShell's
         // injection point *is* the command line and a command line travels: the
         // app hands one to the daemon, and a user may have written their own.
@@ -95,7 +103,7 @@ impl CommandSpec {
         // as an empty block between each real one.
         if shell_integration::already_injected(&self.command_line) {
             tracing::debug!(command = %self.command_line, "shell integration is already loaded");
-            return;
+            return Vec::new();
         }
         let Some(shell) = shell_integration::Shell::detect(&self.command_line) else {
             // `info`, not `debug`. "Why does the status bar say 0 blocks" needs
@@ -110,7 +118,7 @@ impl CommandSpec {
                  (a WSL profile gets them when the command names the inner shell: \
                  `wsl.exe -d <distro> -- bash`)"
             );
-            return;
+            return Vec::new();
         };
         match shell_integration::install(shell, &self.command_line, dir) {
             Ok(injection) if injection.env.is_empty() && injection.args.is_empty() => {
@@ -119,11 +127,14 @@ impl CommandSpec {
                 // "injected" as well would contradict it two lines later, in the
                 // log someone is reading precisely because their blocks are
                 // missing.
+                Vec::new()
             }
             Ok(injection) => {
+                let keys: Vec<String> = injection.env.iter().map(|(k, _)| k.clone()).collect();
                 self.env.extend(injection.env);
                 self.command_line.push_str(&injection.args);
                 tracing::debug!(shell = shell.name(), "shell integration injected");
+                keys
             }
             Err(e) => {
                 tracing::warn!(
@@ -131,6 +142,7 @@ impl CommandSpec {
                     error = %e,
                     "could not write the shell integration shim; continuing without command blocks"
                 );
+                Vec::new()
             }
         }
     }
@@ -196,15 +208,6 @@ impl CommandSpec {
         out
     }
 
-    /// The keys [`Self::enable_shell_integration`] added, given the length
-    /// [`Self::env`] had before it ran.
-    ///
-    /// A length rather than a set because the injection is always a suffix,
-    /// and because the caller has to take the mark *before* injecting anyway.
-    #[must_use]
-    pub fn injected_since(&self, mark: usize) -> Vec<String> {
-        self.env[mark.min(self.env.len())..].iter().map(|(k, _)| k.clone()).collect()
-    }
 }
 
 /// Which shell a Windows box gets when the user has not chosen one.
@@ -615,6 +618,49 @@ mod tests {
     }
 
     #[test]
+    fn the_hook_reports_exactly_the_variables_it_injected() {
+        // The contract that replaced "take a mark before, diff after" (#496).
+        // A caller that took the mark one line too late got an empty list and
+        // silently lost `layer_env`'s collision warning -- so a profile
+        // setting `ZDOTDIR` lost every command block with nothing logged. The
+        // list is reported now, because a value cannot be taken at the wrong
+        // moment.
+        let dir = std::env::temp_dir().join(format!("zesterm-si-keys-{}", std::process::id()));
+        let mut spec =
+            CommandSpec { command_line: "cmd.exe".into(), cwd: None, env: Vec::new() };
+        assert!(
+            spec.enable_shell_integration(&dir).is_empty(),
+            "a shell with no hook injects nothing and must say so"
+        );
+
+        // And a shell that *is* hooked reports the keys it added, matching
+        // what actually landed in `env` -- the two must not be able to
+        // disagree, because the warning is only as good as this list.
+        let mut spec = CommandSpec {
+            command_line: if cfg!(windows) { "pwsh".into() } else { "zsh".into() },
+            cwd: None,
+            env: Vec::new(),
+        };
+        let injected = spec.enable_shell_integration(&dir);
+        for key in &injected {
+            assert!(
+                spec.env.iter().any(|(k, _)| k == key),
+                "reported `{key}` as injected but it is not in the spec's environment"
+            );
+        }
+        if !injected.is_empty() {
+            assert_eq!(
+                injected.len(),
+                spec.env.len(),
+                "every entry the hook added must be reported: {:?} vs {:?}",
+                injected,
+                spec.env
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn layered_env_goes_last_and_reports_what_it_shadowed() {
         // The rule both spawn sites now share (#488). It lived in zest-app as
         // `apply_shell_settings` and was therefore reachable only from the
@@ -627,10 +673,8 @@ mod tests {
         };
         // Stand in for what `enable_shell_integration` appends: the mark is
         // taken before, the keys are whatever landed after it.
-        let mark = spec.env.len();
         spec.env.push(("ZDOTDIR".into(), "/from/integration".into()));
-        let injected = spec.injected_since(mark);
-        assert_eq!(injected, vec!["ZDOTDIR".to_string()], "only the suffix counts as injected");
+        let injected = vec!["ZDOTDIR".to_string()];
 
         spec.layer_env(
             [
@@ -658,17 +702,6 @@ mod tests {
             "screen-256color",
             "overriding TERM is a real thing people do, and both Alacritty and WezTerm allow it"
         );
-    }
-
-    #[test]
-    fn injected_since_survives_a_mark_past_the_end() {
-        // `injected_since` is handed a length the caller took earlier, and a
-        // caller that reordered its own code could hand it a stale one. A
-        // panic there would take a session down over bookkeeping, which the
-        // never-crash rule does not allow -- and the honest answer for "what
-        // was appended after the end" is nothing.
-        let spec = CommandSpec { command_line: "sh".into(), cwd: None, env: Vec::new() };
-        assert!(spec.injected_since(9).is_empty());
     }
 
     /// The order that decides whether a Windows user gets command blocks at all.

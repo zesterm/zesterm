@@ -1413,14 +1413,13 @@ impl Connection {
                 // After `command_line` is settled, because which shell this is
                 // decides what gets injected -- and a client may have asked for
                 // something that is not a shell at all.
-                let injected_from = spec.env.len();
+                let mut injected = Vec::new();
                 if self.config.shell_integration {
-                    spec.enable_shell_integration(&shell_integration_dir());
+                    injected = spec.enable_shell_integration(&shell_integration_dir());
                     if settings.prompt.compact_ps1 {
                         spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
                     }
                 }
-                let injected = spec.injected_since(injected_from);
                 // This machine's `shell.env` first, then whatever the launch
                 // carried, so the more specific of the two wins -- the order
                 // `apply_shell_settings` states app-side, now obeyed on the

@@ -3879,17 +3879,22 @@ impl App {
                     // Remote either way: the far host runs its own default.
                     HostRoute::Tcp(_) | HostRoute::Relay { .. } => String::new(),
                 };
-                    // This machine's `shell.env` only when the shell runs
-                    // here: it is a machine's own setting, and a remote
-                    // daemon applies its own (#488).
-                let env: &[(String, String)] =
-                    if route.is_local() { &self.config.shell_env } else { &[] };
                 // A pane shares its tab's identity until panes carry their own
                 // profile, and an identity that is a colour but not an
                 // environment is only half of one: splitting a tab running one
                 // account's CLI would hand the new pane a different account.
-                // Verbatim from the tab, never re-resolved from the name --
-                // see `Tab::launch_env`.
+                //
+                // The tab's own launch environment, **verbatim**: not the
+                // profile's half re-combined with whatever `shell.env` says
+                // now, which would give a pane a different environment from
+                // the tab it split the moment that setting changed. The tab
+                // carries this for exactly this use (`Tab::launch_env`), and
+                // re-deriving it here would be the second copy that drifts.
+                //
+                // A tab with no launch environment (an ordinary ⌘T shell)
+                // yields an empty vector, and the host applies its own
+                // `shell.env` as it does for any launch — so the plain case
+                // is unchanged.
                 let (tab_env, tab_profile) = self
                     .tabs
                     .active()
@@ -3899,8 +3904,7 @@ impl App {
                         (t.launch_env.clone(), name)
                     })
                     .unwrap_or_default();
-                let env: Vec<(String, String)> =
-                    env.iter().cloned().chain(tab_env.iter().cloned()).collect();
+                let env: Vec<(String, String)> = tab_env;
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -3939,7 +3943,7 @@ impl App {
                 let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
                 match Session::spawn(
-                    &self.build_spec(None),
+                    &self.build_spec(None).0,
                     PtySize::new(cols, rows),
                     self.config.scrollback,
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
@@ -9578,7 +9582,14 @@ impl App {
     /// overwrites it afterwards is a caller that hooked the wrong shell (a
     /// profile-launched WSL tab got a zsh's `ZDOTDIR`, and a pwsh profile had
     /// its appended `-Command` thrown away).
-    fn build_spec(&self, command: Option<&str>) -> CommandSpec {
+    ///
+    /// Returns the spec **and** the variables shell integration injected: the
+    /// in-process spawn layers a profile's environment after this returns, and
+    /// it needs the same collision warning `apply_shell_settings` gets. It used
+    /// to recompute the list from `spec.env.len()` at that point, which is a
+    /// mark taken after the thing it measures — always empty, so a profile
+    /// setting `ZDOTDIR` lost its command blocks in silence (#496).
+    fn build_spec(&self, command: Option<&str>) -> (CommandSpec, Vec<String>) {
         let mut spec = CommandSpec::default_shell();
         if let Some(command) = command {
             spec.command_line = command.to_string();
@@ -9593,9 +9604,9 @@ impl App {
         // have to be applied last to actually win. Whatever it added is the
         // tail, which is how `apply_shell_settings` knows which collisions are
         // worth warning about.
-        let injected_from = spec.env.len();
+        let mut injected = Vec::new();
         if let Some(dir) = zest_config::paths::config_dir() {
-            spec.enable_shell_integration(&dir.join("shell-integration"));
+            injected = spec.enable_shell_integration(&dir.join("shell-integration"));
         }
         // The daemon's spawn makes the same read (#426); an in-process
         // session diverging from a daemon-backed one over which prompt it
@@ -9603,9 +9614,8 @@ impl App {
         if self.settings.prompt.compact_ps1 {
             spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
         }
-        let injected = spec.injected_since(injected_from);
         apply_shell_settings(&mut spec, &self.config, &injected);
-        spec
+        (spec, injected)
     }
 
     /// The grid size a tab should be told right now.
@@ -10061,7 +10071,12 @@ impl App {
                         // (#188); a refused duplicate detaches on drop.
                         let tab = Tab::daemon(session, local, (cols, rows))
                             .with_identity(identity)
-                            .with_launch_env(env.clone());
+                            // What actually crossed the wire, not just the
+                            // profile's half: a split reuses this verbatim,
+                            // and re-deriving the machine's half at split time
+                            // would give a pane a different environment from
+                            // its tab the moment `shell.env` changed.
+                            .with_launch_env(launch_env.clone());
                         if let Some(dup) = self.tabs.adopt(tab, true) {
                             tracing::info!(addr = %dup.addr, "session already open; activating its tab");
                             drop(dup);
@@ -10079,7 +10094,7 @@ impl App {
             _ => {
                 let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
-                let mut spec = self.build_spec(command.as_deref());
+                let (mut spec, injected) = self.build_spec(command.as_deref());
                 // The profile's starting_directory, resolved by the machine
                 // that spawns — here, this one (§12: the daemon path sends
                 // it over the wire instead).
@@ -10102,7 +10117,6 @@ impl App {
                     home: crate::launch::home_dir(),
                     env: spec.effective_env(),
                 };
-                let injected = spec.injected_since(spec.env.len());
                 spec.layer_env(
                     env.iter().map(|(k, v)| (k.clone(), zest_config::profiles::expand(v, &ctx))),
                     &injected,
@@ -10118,7 +10132,10 @@ impl App {
                         self.tabs.push(
                             Tab::in_process(session, addr, (cols, rows))
                                 .with_identity(identity)
-                                .with_launch_env(env.clone()),
+                                // The in-process twin of the daemon branch:
+                                // the spec's own entries, so a split of this
+                                // tab reuses exactly what this shell got.
+                                .with_launch_env(spec.env.to_vec()),
                         );
                     }
                     Err(e) => {
@@ -12528,7 +12545,7 @@ impl App {
         let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
-        let spec = self.build_spec(None);
+        let (spec, _) = self.build_spec(None);
         // TERM, COLORTERM and the TERM_PROGRAM pair come from
         // `zest_pty::terminal_env`, which `default_shell` already applied --
         // deliberately in one place, because a child that learns the wrong
