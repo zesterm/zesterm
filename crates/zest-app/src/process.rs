@@ -136,7 +136,9 @@ impl WindowTemplate {
     ///
     /// The same rule as `App::reload_config` for a save that does not parse:
     /// the last good template stays. A file mid-edit is the common case, and
-    /// the windows' own reload has already logged the error once.
+    /// the error is the windows' to report -- each one's own reload logs it
+    /// and shows it in its chrome; a second report from here would add
+    /// nothing a user can act on.
     pub fn refresh(&mut self, load: zest_config::Load) {
         if !load.errors.is_empty() {
             return;
@@ -144,15 +146,26 @@ impl WindowTemplate {
         self.resolved = load.resolved;
     }
 
+    /// The template's share of a wakeup: a config change re-reads the file,
+    /// everything else leaves it alone. `read` is the re-read, injected so
+    /// the rule is tested with a load the test built rather than one the
+    /// machine's config directory happened to hold -- and so the frequent
+    /// wakeups (`Redraw` is every frame) can be shown to cost no read.
+    pub fn on_wakeup(&mut self, event: &Wakeup, read: impl FnOnce(&Self) -> zest_config::Load) {
+        if matches!(event, Wakeup::ConfigChanged) {
+            let load = read(self);
+            self.refresh(load);
+        }
+    }
+
     /// Re-read the files, with the same layers every window's reload uses:
     /// this profile's cascade and the command-line flags replayed on top.
-    fn reload(&mut self) {
-        let load = zest_config::load(&zest_config::Options {
+    fn read(&self) -> zest_config::Load {
+        zest_config::load(&zest_config::Options {
             profile: self.profile.clone(),
             workspace_dir: std::env::current_dir().ok(),
             cli: Some(self.cli_layer.clone()),
-        });
-        self.refresh(load);
+        })
     }
 }
 
@@ -708,9 +721,7 @@ impl ApplicationHandler<Wakeup> for Process {
             Route::Broadcast => {
                 // The template first: it is what the next window is built
                 // from, and a window can be opened by the very next event.
-                if matches!(event, Wakeup::ConfigChanged) {
-                    self.template.reload();
-                }
+                self.template.on_wakeup(&event, WindowTemplate::read);
                 for w in &mut self.windows {
                     w.handle_wakeup(event);
                 }
@@ -857,7 +868,7 @@ mod tests {
         let mut t = template(zest_config::Settings::default());
         let mut edited = zest_config::Settings::default();
         edited.shell.command = "/bin/bash".into();
-        t.refresh(load_of(edited, None));
+        t.on_wakeup(&Wakeup::ConfigChanged, |_| load_of(edited, None));
         assert_eq!(
             t.resolved.settings.shell.command, "/bin/bash",
             "a window opened after a config change must be built from the changed config, as a new tab in an open window already is"
@@ -876,10 +887,26 @@ mod tests {
             path: std::path::PathBuf::from("config.toml"),
             source: std::io::Error::other("mid-edit"),
         };
-        t.refresh(load_of(zest_config::Settings::default(), Some(broken)));
+        t.on_wakeup(&Wakeup::ConfigChanged, |_| load_of(zest_config::Settings::default(), Some(broken)));
         assert_eq!(
             t.resolved.settings.shell.command, "/bin/bash",
             "a load that skipped a layer must leave the template as it was, not replace it with the partial result"
+        );
+    }
+
+    #[test]
+    fn only_a_config_change_reads_the_file() {
+        // `Redraw` is every frame and `TabsChanged` every keystroke's worth
+        // of title; a template that re-parsed the config on each would be a
+        // disk read per frame. The read is the closure, so calling it is
+        // the observable.
+        let mut t = template(zest_config::Settings::default());
+        for w in [Wakeup::Redraw, Wakeup::TabsChanged, Wakeup::Detached, Wakeup::AccountChanged] {
+            t.on_wakeup(&w, |_| panic!("{w:?} must not re-read the config file"));
+        }
+        assert_eq!(
+            t.resolved.settings.shell.command, "",
+            "a wakeup that is not a config change leaves the template as it was"
         );
     }
 
