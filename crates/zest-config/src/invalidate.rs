@@ -86,7 +86,9 @@ pub const KEYS: &[(&str, Invalidation)] = &[
     // Same reason: grid-fitting changes the bitmap, not how it is composited.
     ("appearance.text_hinting", Invalidation::AtlasBump),
     ("window.opacity", Invalidation::SurfaceRebuild),
-    ("window.chrome_opacity", Invalidation::Free),
+    // Not `Free`: below 1 it is what makes the *surface* translucent, so a
+    // change here reconfigures the swapchain exactly as `window.opacity` does.
+    ("window.chrome_opacity", Invalidation::SurfaceRebuild),
     ("window.backdrop", Invalidation::SurfaceRebuild),
     // Free, unlike the two above: a picture reconfigures no surface and
     // changes no alpha mode. Re-reading the *file* is not an invalidation
@@ -232,6 +234,23 @@ pub fn class_of(key: &str) -> Invalidation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn both_opacities_reconfigure_the_surface() {
+        // `window.chrome_opacity` below 1 is what makes the surface
+        // translucent when `window.opacity` is 1, so it costs exactly what its
+        // neighbour costs. Classed `Free` it repainted the chrome with the new
+        // alpha onto a surface that could not show anything through it, and
+        // only a relaunch fixed that -- the bug `App::apply_transparency` was
+        // written after, one setting later.
+        for key in ["window.opacity", "window.chrome_opacity"] {
+            let (_, class) = super::KEYS
+                .iter()
+                .find(|(k, _)| *k == key)
+                .expect("the key is in the table");
+            assert_eq!(*class, super::Invalidation::SurfaceRebuild, "{key}");
+        }
+    }
+
     use super::*;
     use crate::settings::Backdrop;
 

@@ -112,8 +112,14 @@ fn text(c: Rgba8) -> LinearRgba {
 
 impl ChromeColors {
     #[must_use]
-    pub fn new(ui: &UiTokens, effects: &ThemeEffects, chrome_opacity: f32) -> Self {
+    pub fn new(
+        ui: &UiTokens,
+        effects: &ThemeEffects,
+        chrome_opacity: f32,
+        window_opacity: f32,
+    ) -> Self {
         let chrome_opacity = chrome_opacity.clamp(0.0, 1.0);
+        let window_opacity = window_opacity.clamp(0.0, 1.0);
         // Which fills carry the chrome opacity is a design decision, not a
         // blanket rule: translucency belongs to the big background surfaces
         // — the title bar, the sidebar, the active tab's pane fill. The
@@ -125,8 +131,13 @@ impl ChromeColors {
             strip_bg: fill(zest_theme::derived::titlebar_fill(ui), chrome_opacity),
             line: text(ui.line),
             hairline_soft: text(zest_theme::derived::soft_hairline(ui)),
-            bg: fill(ui.bg, chrome_opacity),
-            tab_active_bg: fill(ui.bg, chrome_opacity),
+            // `window.opacity`, not the chrome's: these two *are* the terminal
+            // surface, and the active tab's whole job is to read as part of
+            // the pane below it. Under `chrome_opacity` a glass strip over a
+            // solid grid would cut a see-through notch into it, which is the
+            // design's intent inverted.
+            bg: fill(ui.bg, window_opacity),
+            tab_active_bg: fill(ui.bg, window_opacity),
             tab_hover_bg: text(ui.sel_soft),
             // Not a block header's any more, despite the name — #465 made the
             // header a row of text on the grid, and the rule this alpha used to
@@ -184,7 +195,7 @@ mod tests {
 
     fn colors() -> ChromeColors {
         let theme = zest_theme::builtin::obsidian();
-        ChromeColors::new(&theme.ui, &theme.effects, 0.5)
+        ChromeColors::new(&theme.ui, &theme.effects, 0.5, 1.0)
     }
 
     #[test]

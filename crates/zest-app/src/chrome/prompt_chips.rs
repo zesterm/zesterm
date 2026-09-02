@@ -199,7 +199,7 @@ mod tests {
 
     fn colors() -> ChromeColors {
         let theme = zest_theme::builtin::obsidian();
-        ChromeColors::new(&theme.ui, &theme.effects, 1.0)
+        ChromeColors::new(&theme.ui, &theme.effects, 1.0, 1.0)
     }
 
     /// Arithmetic measure: 6px per character at 11px, scaled linearly.

@@ -117,6 +117,8 @@ fn clear_color(c: LinearRgba) -> wgpu::Color {
 
 pub struct Renderer {
     rect_pipeline: wgpu::RenderPipeline,
+    /// `rect_pipeline` with the blend disabled, for [`Scene::surface_rects`].
+    surface_rect_pipeline: wgpu::RenderPipeline,
     glyph_pipeline: wgpu::RenderPipeline,
     decor_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
@@ -156,6 +158,7 @@ pub struct Renderer {
     size: (u32, u32),
 
     rects: GrowBuffer,
+    surface_rects: GrowBuffer,
     glyphs: GrowBuffer,
     decors: GrowBuffer,
     image_instances: GrowBuffer,
@@ -306,6 +309,18 @@ impl Renderer {
             Some(PREMULTIPLIED_OVER),
             cache,
         );
+        // Same shader, same vertex layout, same globals -- only the blend
+        // differs, so it is the rect pipeline written rather than composited.
+        let surface_rect_pipeline = make_pipeline(
+            device,
+            "zest surface rect",
+            &grid_shader,
+            ("vs_rect", "fs_rect"),
+            &[&globals_layout],
+            rect_vertex_layout(),
+            None,
+            cache,
+        );
         let glyph_pipeline = make_pipeline(
             device,
             "zest glyph",
@@ -396,6 +411,7 @@ impl Renderer {
 
         let mut me = Self {
             rect_pipeline,
+            surface_rect_pipeline,
             glyph_pipeline,
             decor_pipeline,
             resolve_pipeline,
@@ -420,6 +436,7 @@ impl Renderer {
             offscreen_view: None,
             size: (0, 0),
             rects: GrowBuffer::new("zest rects"),
+            surface_rects: GrowBuffer::new("zest surface rects"),
             glyphs: GrowBuffer::new("zest glyphs"),
             decors: GrowBuffer::new("zest decors"),
             image_instances: GrowBuffer::new("zest images"),
@@ -576,6 +593,7 @@ impl Renderer {
             }),
         );
         self.rects.upload(device, queue, bytemuck::cast_slice(&scene.rects));
+        self.surface_rects.upload(device, queue, bytemuck::cast_slice(&scene.surface_rects));
         self.glyphs.upload(device, queue, bytemuck::cast_slice(&scene.glyphs));
         self.decors.upload(device, queue, bytemuck::cast_slice(&scene.decors));
         self.image_instances.upload(device, queue, bytemuck::cast_slice(&scene.images));
@@ -635,6 +653,18 @@ impl Renderer {
                     pass.set_bind_group(1, group, &[]);
                     pass.draw(0..4, i as u32..i as u32 + 1);
                 }
+            }
+
+            // The chrome bars next, and with the blend off: each writes the
+            // window surface where it sits rather than compositing onto it.
+            // Before the grid, not because they overlap it -- they occupy the
+            // insets and cannot -- but because a replace draw that ever did
+            // would erase rather than cover, and "first" is the order in which
+            // that mistake is harmless.
+            if !scene.surface_rects.is_empty() {
+                pass.set_pipeline(&self.surface_rect_pipeline);
+                pass.set_vertex_buffer(0, self.surface_rects.slice());
+                pass.draw(0..4, 0..scene.surface_rects.len() as u32);
             }
 
             // The documented order, honoured with split instance ranges: the
@@ -889,10 +919,10 @@ fn make_pipeline(
             entry_point: Some(entry_points.1),
             targets: &[Some(wgpu::ColorTargetState {
                 format: OFFSCREEN_FORMAT,
-                // `None` means replace, and exactly one pipeline wants it: the
-                // background picture writes the finished window background, so
-                // blending it over the clear would apply the window opacity a
-                // second time.
+                // `None` means replace, and two pipelines want it, for the
+                // same reason: the background picture and a chrome bar each
+                // write a *finished* window surface, so blending either over
+                // the clear would apply the window opacity a second time.
                 blend,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -1205,6 +1235,53 @@ mod tests {
         let px = crate::read_rgba(&device, &queue, &texture, IMAGE_PROBE, IMAGE_PROBE, format);
         let i = image_probe_centre();
         assert!(px[i + 2] > 240 && px[i] < 16, "wanted the untouched backdrop, got {:?}", &px[i..i + 4]);
+    }
+
+    #[test]
+    fn a_surface_rect_owns_its_alpha_over_an_opaque_clear() {
+        // The whole of the chrome-opacity fix. The clear is the window
+        // background at `window.opacity` -- opaque here, which is the ordinary
+        // case -- and the tab strip is drawn on top of it. Blended, alpha 0.3
+        // over an opaque destination comes back at 1.0 and the strip can only
+        // tint toward the window background; written, it is the alpha the
+        // setting asked for, and whatever is behind the window shows through.
+        let full = [0.0, 0.0, PROBE as f32, PROBE as f32];
+        let glass = RectInstance::filled(full, LinearRgba::from_srgb(255, 0, 0, 0.3), full);
+
+        let Some((device, queue)) = headless() else { return };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = Renderer::new(&device, format, zest_font::TextAntialias::Grayscale);
+        renderer.resize(&device, PROBE, PROBE);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zest surface probe"),
+            size: wgpu::Extent3d { width: PROBE, height: PROBE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+
+        for (surface, rects, want, why) in [
+            (vec![glass], Vec::new(), 0.3_f32, "a surface rect writes its own alpha"),
+            (Vec::new(), vec![glass], 1.0_f32, "a blended one cannot: this is the bug"),
+        ] {
+            let scene = Scene {
+                surface_rects: surface,
+                rects,
+                backdrop: LinearRgba::opaque(0, 0, 255),
+                ..Default::default()
+            };
+            let mut encoder = device.create_command_encoder(&Default::default());
+            renderer.render(&device, &queue, &mut encoder, &view, &scene);
+            queue.submit([encoder.finish()]);
+            let px = crate::read_rgba(&device, &queue, &texture, PROBE, PROBE, format);
+            let i = ((PROBE / 2 * PROBE + PROBE / 2) * 4) as usize;
+            let got = f32::from(px[i + 3]) / 255.0;
+            assert!((got - want).abs() < 0.01, "{why}: wanted {want}, got {got}");
+        }
     }
 
     /// Render `rects` over a black backdrop into a `size`-square target.

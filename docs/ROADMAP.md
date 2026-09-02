@@ -67,6 +67,21 @@ the history behind them is in closed issues and PRs.
       from `WM_NCMOUSEMOVE`.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
+- [x] **`window.chrome_opacity` is an opacity, not a tint** (#522, phase 1 of
+      #521). A chrome bar now *writes* the window surface where it sits
+      (`Scene::surface_rects`, the blend disabled) instead of compositing onto
+      a backdrop `window.opacity` had already made opaque — so glass chrome
+      over a solid grid, and the reverse, are both expressible, and either
+      opacity below 1 is what makes the surface translucent
+      (`Config::translucent_surface`, read by all three deciders). Measured on
+      the built binary: titlebar α 76 with the grid at 255, and 255 over 128
+      for the inverse; before, the same settings gave 255/255 and 166/128.
+      Windows Terminal documents the first as impossible for itself ("not
+      currently possible to have an unblurred transparent background for the
+      Terminal and a Mica background for the tab row simultaneously") — we
+      composite our own chrome, so it is ours to have. Phase 2 (#521) is the
+      configure story: an *effective/inert* chip in the generated field row,
+      so a setting that does nothing yet says why.
 - [ ] Multi-window, the rest of #489 after #490 (the windows), #497 (a
       second launch opens in the running one) and #501 (a tab moved to a new
       window, from the palette): drag-out — a chip dragged past the strip's
