@@ -322,6 +322,7 @@ impl ToolSet {
         match name {
             "hosts" => self.hosts(),
             "sessions" => self.sessions(args),
+            "search_blocks" => self.search_blocks(args),
             "screen" => self.on_session(args, |t, c, addr| t.screen(c, addr, args)),
             "blocks" => self.on_session(args, |t, c, addr| t.blocks(c, addr, args)),
             "output" => {
@@ -774,6 +775,65 @@ impl ToolSet {
             }
         }
         Ok(json!({ "sessions": out, "unreadable": unreadable }))
+    }
+
+    /// Which command blocks match, on one machine or on every machine already
+    /// connected (#527).
+    ///
+    /// Omitting `host` never dials, for [`Self::sessions`]'s reason. The
+    /// per-host answers are merged by `zest_fleet::merge_matches` — the same
+    /// rule the ⌘K palette applies — so an agent and a person searching the
+    /// same fleet see the same order. Never output text (ADR-015): `output`
+    /// takes a hit's `session` and `block_id` for that.
+    fn search_blocks(&mut self, args: &Value) -> Result<Value, ToolError> {
+        let query = opt_str(args, "query")?.unwrap_or("").to_string();
+        let limit = opt_u32(args, "limit")?.unwrap_or(0);
+        let asked = match opt_str(args, "host")? {
+            Some(a) if !a.trim().is_empty() => Some(self.resolver.host(a.trim())?),
+            _ => None,
+        };
+        let hosts: Vec<HostId> = match asked {
+            Some(h) => {
+                self.conn_for(h)?;
+                vec![h]
+            }
+            None => self.conns.keys().copied().collect(),
+        };
+
+        let mut answers = Vec::new();
+        let mut unreadable = Vec::new();
+        let mut truncated = false;
+        let mut sessions_searched: u64 = 0;
+        for host in hosts {
+            let Some(conn) = self.conns.get(&host).map(Arc::clone) else { continue };
+            match conn.search_blocks(&query, limit) {
+                Ok((matches, cut, sessions)) => {
+                    truncated |= cut;
+                    sessions_searched += u64::from(sessions);
+                    answers.push((host, matches));
+                }
+                Err(e) => unreadable.push(json!({ "host": host.short(), "why": e.to_string() })),
+            }
+        }
+        let hosts_searched = answers.len();
+        let cap = zest_proto::search::clamp_limit(limit);
+        let merged = zest_fleet::merge_matches(&answers, &[], cap);
+        let total: usize = answers.iter().map(|(_, m)| m.len()).sum();
+        let me = self.conns.values().next().map(|c| c.client_id());
+        let matches: Vec<Value> = merged
+            .iter()
+            .map(|m| {
+                let session = m.session.map(|s| Resolver::format(SessionAddr::new(m.host, s)));
+                block_match_json(m, session, me)
+            })
+            .collect();
+        Ok(json!({
+            "matches": matches,
+            "hosts_searched": hosts_searched,
+            "sessions_searched": sessions_searched,
+            "truncated": truncated || total > cap,
+            "unreadable": unreadable,
+        }))
     }
 
     /// The screen, optionally after waiting for it to move.
@@ -2257,6 +2317,43 @@ fn block_json(b: &BlockPayload, me: Option<zest_proto::ClientId>) -> Value {
     v
 }
 
+/// A search hit shaped for a tool result — `block_json`'s conventions, minus
+/// the line ids a hit does not carry, plus the session it belongs to (`null`
+/// for a block only a store remembers) and the host it ran on.
+fn block_match_json(
+    m: &zest_proto::BlockMatch,
+    session: Option<String>,
+    me: Option<zest_proto::ClientId>,
+) -> Value {
+    let (state, exit) = match m.state {
+        BlockState::Prompt => ("prompt", None),
+        BlockState::Running => ("running", None),
+        BlockState::Finished { exit_code } => ("finished", Some(exit_code)),
+    };
+    let mut v = json!({
+        "session": session,
+        "host": m.host.short(),
+        "title": m.title,
+        "block_id": m.block,
+        "command": m.command,
+        "cwd": m.cwd,
+        "state": state,
+        "exit_code": exit.flatten(),
+        "exit_code_source": exit.map(|_| ExitSource::ShellMarker),
+        "started_ms": m.started_ms,
+        "ended_ms": m.ended_ms,
+        "context": m.context,
+    });
+    // Present or absent as a pair, `block_json`'s rule.
+    if let Some(author) = m.author {
+        let who = if Some(author) == me { "you".to_string() } else { author.short() };
+        let obj = v.as_object_mut().expect("json! built an object");
+        obj.insert("author".into(), json!(who));
+        obj.insert("author_source".into(), json!(AuthorSource::DaemonWitness));
+    }
+    v
+}
+
 fn session_arg(args: &Value, r: &Resolver) -> Result<SessionAddr, ToolError> {
     let s = args
         .get("session")
@@ -2697,6 +2794,54 @@ mod tests {
         );
         assert_eq!(v["state"], "finished");
         assert_eq!(v["block_id"], 4);
+    }
+
+    fn a_hit(author: Option<zest_proto::ClientId>) -> zest_proto::BlockMatch {
+        zest_proto::BlockMatch {
+            host: HostId::from_bytes([0x2e; 32]),
+            session: Some(zest_proto::SessionId(7)),
+            block: 3,
+            title: "zsh".into(),
+            command: "cargo build".into(),
+            cwd: "/home/a/p".into(),
+            state: BlockState::Finished { exit_code: Some(101) },
+            started_ms: Some(1),
+            ended_ms: Some(2),
+            context: None,
+            author,
+        }
+    }
+
+    /// The single most useful question a model asks of shared history is
+    /// whether it ran this itself; the answer is the same word `blocks`
+    /// uses, with the same provenance beside it.
+    #[test]
+    fn a_search_hit_names_its_author_as_you_when_it_is_ours() {
+        let me = zest_proto::ClientId::from_bytes([0x11; 32]);
+        let them = zest_proto::ClientId::from_bytes([0x22; 32]);
+        let mine = block_match_json(&a_hit(Some(me)), Some("2e2e2e2e:7".into()), Some(me));
+        assert_eq!(mine["author"], "you");
+        assert_eq!(mine["author_source"], "daemon_witness");
+        let theirs = block_match_json(&a_hit(Some(them)), None, Some(me));
+        assert_eq!(theirs["author"], them.short());
+        assert!(theirs["session"].is_null(), "a block only a store remembers names no session");
+        let nobody = block_match_json(&a_hit(None), None, Some(me));
+        assert!(nobody.get("author").is_none() && nobody.get("author_source").is_none());
+        assert_eq!(nobody["exit_code"], 101);
+        assert_eq!(nobody["exit_code_source"], "shell_marker");
+    }
+
+    /// ADR-015: `blocks` carries no output text, and a fleet-wide search
+    /// carries less — fifty commands of history across six machines must not
+    /// cost six build logs. Asserted on the keys, so a field added later has
+    /// to argue with this test.
+    #[test]
+    fn a_search_hit_carries_no_output_text() {
+        let v = block_match_json(&a_hit(None), None, None);
+        let keys: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
+        for forbidden in ["output", "rows", "text", "lines", "output_line", "end_line", "prompt_line"] {
+            assert!(!keys.contains(&forbidden), "a search hit must not carry `{forbidden}`: {keys:?}");
+        }
     }
 
     /// A finished block, for the author tests below.
