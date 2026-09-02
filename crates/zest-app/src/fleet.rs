@@ -268,6 +268,21 @@ fn receive_matches(
     true
 }
 
+/// A host answered the search with its generic could-not-understand
+/// `Error`: a daemon predating `SearchBlocks` (the `Enroll` bargain, which
+/// is how every reply-only pair degrades). Terminal for that host: it leaves
+/// `asked` so the query row can settle, and it is not asked again for as
+/// long as this lane lives — a redial may reach an upgraded daemon, and the
+/// lane's exit clears the mark. Without this the row said `2 of 3 hosts
+/// searched` for ever, waiting on a machine that had already answered.
+fn decline_search(state: &mut State, host: HostId, retired: bool) -> bool {
+    if retired {
+        return false;
+    }
+    state.declined.insert(host);
+    state.search.as_mut().is_some_and(|s| s.asked.remove(&host))
+}
+
 /// Ask every host with a live lane the palette's question, and remember
 /// which ones the question actually reached.
 ///
@@ -280,6 +295,9 @@ fn ask_lanes(state: &mut State, query: &str) {
     let msg = ClientMessage::SearchBlocks { query: query.to_string(), limit: PALETTE_LIMIT };
     let mut search = BlockSearch { query: query.to_string(), ..Default::default() };
     for (host, lane) in &state.links {
+        if state.declined.contains(host) {
+            continue;
+        }
         if lane.try_send(msg.clone()).is_ok() {
             search.asked.insert(*host);
         }
@@ -362,6 +380,9 @@ struct State {
     links: HashMap<HostId, crossbeam_channel::Sender<ClientMessage>>,
     /// The palette's block search in flight, if any.
     search: Option<BlockSearch>,
+    /// Hosts whose daemon answered a search with "could not understand":
+    /// too old to be asked, until their lane is replaced.
+    declined: BTreeSet<HostId>,
 }
 
 struct Inner {
@@ -671,6 +692,12 @@ impl FleetModel {
                 zest_proto::HostMessage::BlockMatches { query, matches, .. } => {
                     Self::receive(inner, host, &never, &query, matches);
                 }
+                // The search is the only question this connection asks
+                // once it is streaming, so a sessionless `Error` is that
+                // question not being understood.
+                zest_proto::HostMessage::Error { session: None, message } => {
+                    Self::refuse(inner, host, &never, &message);
+                }
                 _ => {}
             }
             true
@@ -968,6 +995,10 @@ impl FleetModel {
                 Self::receive(inner, host, stop, &query, matches);
                 true
             }
+            zest_proto::HostMessage::Error { session: None, message } => {
+                Self::refuse(inner, host, stop, &message);
+                true
+            }
             _ => true,
         })
     }
@@ -1010,6 +1041,19 @@ impl FleetModel {
             receive_matches(&mut state, host, stop.load(Ordering::Acquire), query, matches);
         drop(state);
         if stored {
+            inner.mark_changed();
+        }
+    }
+
+    /// A host declined the search as a message it does not know — see
+    /// [`decline_search`]. Under the state lock with the stop flag, like
+    /// every other write from a watcher.
+    fn refuse(inner: &Arc<Inner>, host: HostId, stop: &AtomicBool, message: &str) {
+        tracing::debug!(host = %host.short(), message, "this daemon cannot search blocks");
+        let mut state = inner.state.lock();
+        let settled = decline_search(&mut state, host, stop.load(Ordering::Acquire));
+        drop(state);
+        if settled {
             inner.mark_changed();
         }
     }
@@ -1090,6 +1134,7 @@ impl FleetModel {
         if let Some(search) = state.search.as_mut() {
             search.asked.remove(&host);
         }
+        state.declined.remove(&host);
         drop(state);
         drop(lane);
         served
@@ -1721,6 +1766,37 @@ mod tests {
         };
         assert!(!receive_matches(&mut state, host, true, "x", vec![a_match(host, "x")]));
         assert!(state.search.as_ref().is_some_and(|s| s.answers.is_empty()));
+    }
+
+    /// A daemon predating `SearchBlocks` answers it with the generic
+    /// could-not-understand `Error`, which is an answer: it must leave the
+    /// pending count rather than hold `2 of 3 hosts searched` on screen for
+    /// ever, and it must not be asked again on the next keystroke.
+    #[test]
+    fn a_daemon_too_old_to_search_settles_the_count_and_is_not_asked_again() {
+        let old = HostId::from_bytes([1; 32]);
+        let new = HostId::from_bytes([2; 32]);
+        let mut state = State::default();
+        let (lane_old, rx_old) = crossbeam_channel::bounded(LANE_DEPTH);
+        let (lane_new, _rx_new) = crossbeam_channel::bounded(LANE_DEPTH);
+        state.links.insert(old, lane_old);
+        state.links.insert(new, lane_new);
+        ask_lanes(&mut state, "make");
+        assert_eq!(state.search.as_ref().map(|s| s.asked.len()), Some(2), "both were asked");
+
+        assert!(decline_search(&mut state, old, false), "the refusal moved the count");
+        assert_eq!(
+            state.search.as_ref().map(|s| s.asked.iter().copied().collect::<Vec<_>>()),
+            Some(vec![new]),
+            "the old daemon is no longer pending"
+        );
+
+        let _ = rx_old.try_recv();
+        ask_lanes(&mut state, "make -j");
+        assert!(rx_old.try_recv().is_err(), "a daemon that said it cannot is not asked again");
+        assert_eq!(state.search.as_ref().map(|s| s.asked.len()), Some(1));
+
+        assert!(!decline_search(&mut state, new, true), "a retired watcher's refusal is dropped like its listing");
     }
 
     /// The query row says how many hosts were asked, so a host the question
