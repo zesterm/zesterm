@@ -318,22 +318,28 @@ impl BlockStore {
              started_ms, ended_ms, author FROM block ORDER BY ended_ms DESC, block_id DESC LIMIT ?2"
         };
         let mut stmt = db.prepare_cached(sql)?;
-        let cap_i = i64::try_from(cap).unwrap_or(i64::MAX);
+        // One row past the cap, so "capped" means a row *exists* beyond it:
+        // a store holding exactly `cap` rows is fully searched and must not
+        // say otherwise.
+        let fetch = i64::try_from(cap.saturating_add(1)).unwrap_or(i64::MAX);
         let rows = if narrow {
-            stmt.query_map(params![pattern, cap_i], row_to_block)?
+            stmt.query_map(params![pattern, fetch], row_to_block)?
         } else {
-            stmt.query_map(params![Option::<String>::None, cap_i], row_to_block)?
+            stmt.query_map(params![Option::<String>::None, fetch], row_to_block)?
         };
         let mut scanned = 0usize;
         let mut out = Vec::new();
         for row in rows {
             let b = row?;
             scanned += 1;
+            if scanned > cap {
+                break;
+            }
             if needle.matches(&b.command) {
                 out.push(b);
             }
         }
-        Ok((out, scanned >= cap))
+        Ok((out, scanned > cap))
     }
 
     /// Wait until everything queued so far is on disk, or `timeout` passes.
@@ -663,6 +669,29 @@ mod tests {
             assert!(!columns.iter().any(|c| c == forbidden), "no `{forbidden}` column: {columns:?}");
         }
         assert!(columns.iter().any(|c| c == "command"));
+    }
+
+    /// "Older history went unsearched" must mean a row exists past the cap,
+    /// not that the scan happened to fill it: a store holding exactly `cap`
+    /// rows is fully searched, and a zero cap searched nothing at all.
+    #[test]
+    fn the_scan_is_capped_only_when_a_row_lies_beyond_the_cap() {
+        let store = BlockStore::in_memory().expect("open");
+        store.sink().record((0..3).map(|i| stored(1, i, "ls", 100 + u64::from(i))).collect());
+        settled(&store);
+        let (hits, capped) = store.search(&Needle::new(""), 3).expect("search");
+        assert_eq!(hits.len(), 3);
+        assert!(!capped, "exactly the cap is fully searched");
+        let (hits, capped) = store.search(&Needle::new(""), 2).expect("search");
+        assert_eq!(hits.len(), 2);
+        assert!(capped, "one row lies beyond a cap of two");
+        let (hits, capped) = store.search(&Needle::new("ls"), 0).expect("search");
+        assert!(hits.is_empty());
+        assert!(capped, "a zero cap searched nothing, and there is something");
+        let (hits, capped) = store.search(&Needle::new("zzz"), 2).expect("search");
+        assert!(hits.is_empty() && !capped, "an ASCII query the SQL narrowed to nothing scanned nothing");
+        let (hits, capped) = store.search(&Needle::new("日"), 2).expect("search");
+        assert!(hits.is_empty() && capped, "unnarrowed, capped is about rows scanned, not rows matched");
     }
 
     /// `LIKE` folds ASCII only, so it is a superset only for an ASCII query;
