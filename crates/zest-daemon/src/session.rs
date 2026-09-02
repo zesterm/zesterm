@@ -914,7 +914,7 @@ impl Session {
     /// of an empty Enter (#193). A running block *is*: the palette labels it
     /// `running`, and "what is building on the Mac right now" is a search.
     #[must_use]
-    pub fn blocks_matching(&self, host: HostId, query: &str) -> Vec<BlockMatch> {
+    pub fn blocks_matching(&self, host: HostId, query: &zest_proto::search::Needle) -> Vec<BlockMatch> {
         let title = self.title();
         let Ok(term) = self.terminal.lock() else { return Vec::new() };
         term.blocks()
@@ -922,7 +922,7 @@ impl Session {
             .iter()
             .filter(|b| !matches!(b.state, zest_core::BlockState::Prompt))
             .filter(|b| !b.command.trim().is_empty())
-            .filter(|b| zest_proto::search::command_matches(&b.command, query))
+            .filter(|b| query.matches(&b.command))
             .map(|b| BlockMatch::from_block(host, Some(self.id), &title, b))
             .collect()
     }

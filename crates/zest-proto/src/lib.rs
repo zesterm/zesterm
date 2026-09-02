@@ -265,9 +265,9 @@ pub enum ClientMessage {
     /// attached client receives every block in a keyframe, and this returns
     /// strictly less: never output text (ADR-015).
     SearchBlocks {
-        /// Case-folded substring over the command line
-        /// ([`search::command_matches`]). Empty means "the most recent
-        /// `limit` blocks", which is what an opening palette asks.
+        /// Case-folded substring over the command line ([`search::Needle`]).
+        /// Empty means "the most recent `limit` blocks", which is what an
+        /// opening palette asks.
         query: String,
         /// Most matches wanted. Zero means the host's default; above the
         /// host's cap it is the cap, and `truncated` says so — a caller's

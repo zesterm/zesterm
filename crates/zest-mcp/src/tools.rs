@@ -2338,6 +2338,10 @@ fn block_match_json(
         "command": m.command,
         "cwd": m.cwd,
         "state": state,
+        // `block_json`'s pair, verbatim: the source names who reported the
+        // *outcome* — the shell's D marker — and a marker with no number is
+        // still the shell's word that the command finished. A hit and a
+        // block must not spell the same fact two ways.
         "exit_code": exit.flatten(),
         "exit_code_source": exit.map(|_| ExitSource::ShellMarker),
         "started_ms": m.started_ms,

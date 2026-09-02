@@ -2406,8 +2406,9 @@ fn home_dir() -> Option<std::path::PathBuf> {
 /// survives `vim`, and a command launched from one is still history.
 pub fn search_blocks(registry: &Registry, host: HostId, query: &str, limit: u32) -> HostMessage {
     let sessions = registry.sessions();
+    let needle = zest_proto::search::Needle::new(query);
     let mut matches: Vec<zest_proto::BlockMatch> =
-        sessions.iter().flat_map(|s| s.blocks_matching(host, query)).collect();
+        sessions.iter().flat_map(|s| s.blocks_matching(host, &needle)).collect();
     zest_proto::search::rank(&mut matches);
     let cap = zest_proto::search::clamp_limit(limit);
     let truncated = matches.len() > cap;

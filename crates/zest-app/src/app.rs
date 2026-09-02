@@ -9040,6 +9040,7 @@ impl App {
             Some(v) if v.query == query => v.answered.clone(),
             _ => Vec::new(),
         };
+        let needle = zest_proto::search::Needle::new(&query);
         let mut seed = Vec::new();
         let mut in_process = false;
         for tab in self.tabs.iter() {
@@ -9054,7 +9055,7 @@ impl App {
                     .iter()
                     .filter(|b| !matches!(b.state, zest_core::BlockState::Prompt))
                     .filter(|b| !b.command.trim().is_empty())
-                    .filter(|b| zest_proto::search::command_matches(&b.command, &query))
+                    .filter(|b| needle.matches(&b.command))
                     .map(|b| {
                         zest_proto::BlockMatch::from_block(
                             tab.addr.host,

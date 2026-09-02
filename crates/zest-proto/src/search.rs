@@ -87,7 +87,7 @@ pub fn clamp_limit(asked: u32) -> usize {
     n as usize
 }
 
-/// Does `command` match `query`?
+/// A query, folded once, ready to be asked of every block in a fleet.
 ///
 /// Case-insensitive substring over the command line, and nothing else: the
 /// rule the palette already applies to every row it filters, so a block a
@@ -101,12 +101,30 @@ pub fn clamp_limit(asked: u32) -> usize {
 /// Over `command` only. Matching on `cwd` would surface every `ls` ever run
 /// in a directory called `src`; the Sessions group already answers for
 /// directories.
-#[must_use]
-pub fn command_matches(command: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
+///
+/// A type rather than a `fn(command, query)`, so the query is folded once
+/// per search and not once per block: the predicate runs over every block
+/// of every session on every keystroke, and a free function would invite
+/// each caller to re-fold inside the loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Needle {
+    folded: String,
+}
+
+impl Needle {
+    #[must_use]
+    pub fn new(query: &str) -> Self {
+        Self { folded: query.to_lowercase() }
     }
-    command.to_lowercase().contains(&query.to_lowercase())
+
+    /// Does `command` match?
+    #[must_use]
+    pub fn matches(&self, command: &str) -> bool {
+        if self.folded.is_empty() {
+            return true;
+        }
+        command.to_lowercase().contains(&self.folded)
+    }
 }
 
 /// When a block happened, for ordering: its end if it has one, its start
@@ -191,12 +209,13 @@ mod tests {
     /// own filter, or the reverse.
     #[test]
     fn an_empty_query_matches_every_command_and_case_never_matters() {
-        assert!(command_matches("cargo build", ""), "an opening palette asks for everything");
-        assert!(command_matches("Cargo Build --release", "cargo b"));
-        assert!(command_matches("cargo build", "CARGO"), "the query folds too");
-        assert!(!command_matches("cargo build", "cargo t"));
-        assert!(command_matches("ls src", "src"), "substring, not word");
-        assert!(!command_matches("", "x"));
+        let hit = |command: &str, query: &str| Needle::new(query).matches(command);
+        assert!(hit("cargo build", ""), "an opening palette asks for everything");
+        assert!(hit("Cargo Build --release", "cargo b"));
+        assert!(hit("cargo build", "CARGO"), "the query folds too");
+        assert!(!hit("cargo build", "cargo t"));
+        assert!(hit("ls src", "src"), "substring, not word");
+        assert!(!hit("", "x"));
     }
 
     /// The daemon, the fleet merge and the tool must all agree on order, or

@@ -439,8 +439,16 @@ impl Conn {
             lock.lock().expect("state").block_matches_gen
         };
         self.send(ClientMessage::SearchBlocks { query: query.to_string(), limit });
-        let reply =
-            self.wait_for(|s| (s.block_matches_gen != seen).then(|| s.block_matches.clone()).flatten())?;
+        // The counter says an answer landed; the echo says it is *this*
+        // question's. A search that hit its deadline leaves its reply in
+        // flight, and the next call would otherwise take that reply for its
+        // own the moment it arrived.
+        let reply = self.wait_for(|s| {
+            (s.block_matches_gen != seen)
+                .then(|| s.block_matches.clone())
+                .flatten()
+                .filter(|m| matches!(m, HostMessage::BlockMatches { query: q, .. } if q == query))
+        })?;
         match reply {
             HostMessage::BlockMatches { error, .. } if !error.is_empty() => Err(ConnError::Refused(error)),
             HostMessage::BlockMatches { matches, truncated, sessions, .. } => {
