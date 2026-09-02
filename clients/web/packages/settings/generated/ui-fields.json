@@ -687,7 +687,7 @@
     "key": "window.chrome_opacity",
     "group": "Window",
     "widget": "slider",
-    "description": "Chrome opacity, independent of the grid's.",
+    "description": "The tab strip, sidebar and header's own opacity, against whatever is\nbehind the window.\n\nIndependent of `opacity` in both directions: a glass titlebar over a\nsolid grid, or the reverse. Below 1 the window surface becomes\ntranslucent whatever `opacity` says, which is also what makes\n`backdrop` visible — a material can only show through pixels the\nsurface leaves transparent.",
     "range": [
       0.0,
       1.0

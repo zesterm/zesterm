@@ -377,7 +377,14 @@ pub struct Window {
     #[schemars(range(min = 0.0, max = 1.0))]
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "slider"))]
     pub opacity: f32,
-    /// Chrome opacity, independent of the grid's.
+    /// The tab strip, sidebar and header's own opacity, against whatever is
+    /// behind the window.
+    ///
+    /// Independent of `opacity` in both directions: a glass titlebar over a
+    /// solid grid, or the reverse. Below 1 the window surface becomes
+    /// translucent whatever `opacity` says, which is also what makes
+    /// `backdrop` visible — a material can only show through pixels the
+    /// surface leaves transparent.
     #[schemars(range(min = 0.0, max = 1.0))]
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "slider"))]
     pub chrome_opacity: f32,

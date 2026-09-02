@@ -467,6 +467,9 @@ pub struct Preedit<'a> {
 /// render signature does not change when they arrive.
 #[derive(Debug, Default)]
 pub struct Chrome {
+    /// Bars that *own* their pixels: the tab strip, the sidebar, the header
+    /// band. See [`Scene::surface_rects`] for why they are not in `rects`.
+    pub surface_rects: Vec<RectInstance>,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     /// Index into `rects`/`glyphs` where the *overlay* layer (picker,
@@ -481,6 +484,22 @@ pub struct Chrome {
 /// Everything to draw this frame.
 #[derive(Debug, Default)]
 pub struct Scene {
+    /// Chrome bars, drawn with the blend *disabled* — each writes its own
+    /// colour and its own alpha over whatever the clear left.
+    ///
+    /// A chrome bar is a surface, not a layer over the window. Blended, a
+    /// strip at `window.chrome_opacity = 0.3` composites over a backdrop the
+    /// window opacity already made opaque, so it can only tint toward the
+    /// window background and can never be more transparent than the grid —
+    /// which is the one thing two opacity settings exist to express. Written,
+    /// it is glass onto whatever is behind the window.
+    ///
+    /// Drawn before every rect and glyph — after the background pictures,
+    /// which are a pane's own surface and cannot reach the insets — and they
+    /// may not overlap a viewport: replace erases rather than composites. The
+    /// chrome bars occupy the insets, which is exactly the region no viewport
+    /// reaches.
+    pub surface_rects: Vec<RectInstance>,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub decors: Vec<DecorInstance>,
@@ -520,6 +539,7 @@ impl Scene {
     /// Reuse the allocations. Called every frame; allocating fresh vectors for
     /// 30k instances per frame would show up in the profile.
     pub fn clear(&mut self) {
+        self.surface_rects.clear();
         self.rects.clear();
         self.glyphs.clear();
         self.decors.clear();
@@ -570,6 +590,7 @@ impl Scene {
         self.overlay_rects_at = self.chrome_rects_at + chrome.overlay_rects_at.min(chrome.rects.len());
         self.overlay_glyphs_at =
             self.chrome_glyphs_at + chrome.overlay_glyphs_at.min(chrome.glyphs.len());
+        self.surface_rects.extend_from_slice(&chrome.surface_rects);
         self.rects.extend_from_slice(&chrome.rects);
         self.glyphs.extend_from_slice(&chrome.glyphs);
     }
@@ -1707,6 +1728,8 @@ mod tests {
             // The second chrome rect and glyph belong to the overlay layer.
             overlay_rects_at: 1,
             overlay_glyphs_at: 1,
+            // Outside the split: a bar is drawn before every other instance.
+            surface_rects: vec![RectInstance::filled([4.0; 4], LinearRgba([0.0; 4]), [4.0; 4])],
         };
         scene.append_chrome(&chrome);
         assert_eq!(scene.chrome_rects_at, 2, "chrome rects start after the grid's");

@@ -51,7 +51,11 @@ pub const PROFILE_SETTINGS_KEYS: &[&str] = &[
     "typography.families",
     "typography.size_pt",
     "window.opacity",
-    "window.backdrop",
+    // No `window.backdrop`: a backdrop is one platform effect view behind the
+    // whole surface, so it cannot be per-pane even in principle --
+    // `ProfileIdentity` does not carry it and `platform::set_backdrop` reads
+    // the window's own config. Offered here it was a row that did nothing for
+    // every profile opened as a tab. `--profile` still sets it process-wide.
     "window.background_image",
     "window.background_fit",
     "window.background_dim",
@@ -709,6 +713,20 @@ mod tests {
             "a profile must be able to set settings the editor does not offer"
         );
         assert!(r.unknown_keys.is_empty(), "and it is a known key, not a tolerated typo");
+    }
+
+    #[test]
+    fn the_allowlist_offers_only_what_a_pane_can_override() {
+        // A backdrop is one platform effect view behind the whole *surface*,
+        // so it cannot be per-pane even in principle: `ProfileIdentity` does
+        // not carry it and the app sets it from the window's own config. On
+        // the list it was a row that did nothing for every profile opened as a
+        // tab -- a setting that silently does nothing, which is the class this
+        // repo hunts. `--profile` still sets it process-wide.
+        assert!(
+            !PROFILE_SETTINGS_KEYS.contains(&"window.backdrop"),
+            "window.backdrop is a window attribute; the editor must not offer it per profile"
+        );
     }
 
     #[test]

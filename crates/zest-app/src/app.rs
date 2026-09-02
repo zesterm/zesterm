@@ -170,6 +170,26 @@ pub struct Config {
     pub shell_env: Vec<(String, String)>,
 }
 
+impl Config {
+    /// Whether this window's surface has to carry per-pixel alpha.
+    ///
+    /// One function because *four* places decide it — `with_transparent` and
+    /// the swapchain's `want_transparency`, both in [`App::open_window`],
+    /// [`App::apply_transparency`] on a reload, and [`App::antialias_for`] —
+    /// and a copy of `opacity < 1.0` per site is how the second opacity gets
+    /// added to some of them and forgotten in the rest. Written as three, the
+    /// count was itself wrong by one, and that one was the swapchain: a first
+    /// launch with only `chrome_opacity` below 1 came up opaque.
+    ///
+    /// *Either* opacity below 1 needs it: chrome and grid each own their
+    /// pixels' alpha now, so a glass titlebar over a solid grid is a
+    /// translucent surface even though `window.opacity` is 1.
+    #[must_use]
+    pub fn translucent_surface(&self) -> bool {
+        self.opacity < 1.0 || self.chrome_opacity < 1.0
+    }
+}
+
 impl From<&zest_config::Settings> for Config {
     /// Project the settings tree onto what the app actually runs on.
     ///
@@ -594,7 +614,7 @@ mod block_band_tests {
 
     fn colors() -> ChromeColors {
         let theme = zest_theme::builtin::obsidian();
-        ChromeColors::new(&theme.ui, &theme.effects, 1.0)
+        ChromeColors::new(&theme.ui, &theme.effects, 1.0, 1.0)
     }
 
     /// One block per state: printed output and succeeded, failed, printed
@@ -668,7 +688,7 @@ mod block_band_tests {
         // Asserted as a composite in sRGB, because "visible" is a fact about
         // what reaches the screen, not about the alpha that produced it.
         for theme in zest_theme::builtin::all() {
-            let c = ChromeColors::new(&theme.ui, &theme.effects, 1.0);
+            let c = ChromeColors::new(&theme.ui, &theme.effects, 1.0, 1.0);
             for (state, name) in
                 [(c.success, "success"), (c.danger, "danger"), (c.warn, "warn"), (c.text_faint, "faint")]
             {
@@ -2363,7 +2383,8 @@ impl App {
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
         let palette = to_core_palette(&resolved);
-        let chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, config.chrome_opacity);
+        let chrome_colors =
+            ChromeColors::new(&theme.ui, &theme.effects, config.chrome_opacity, config.opacity);
         let text_tuning = resolve_text_tuning(&config);
         let selection_bg = zest_core::Rgb::new(
             resolved.selection_bg.r,
@@ -6511,6 +6532,7 @@ impl App {
                     // wears it for real (issue #175).
                     connecting: tab.dead || tab.connecting,
                     link,
+                    opacity: tab.identity.as_ref().and_then(|i| i.opacity),
                 }
             })
             .collect();
@@ -6547,6 +6569,9 @@ impl App {
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
+                // An app tab is a place, not a shell on a host: no pane, so
+                // nothing to match.
+                opacity: None,
             });
         }
         if self.tabs.settings_open() {
@@ -6566,6 +6591,9 @@ impl App {
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
+                // An app tab is a place, not a shell on a host: no pane, so
+                // nothing to match.
+                opacity: None,
             });
         }
 
@@ -11193,6 +11221,10 @@ impl App {
             .as_ref()
             .map_or((0, 0), |l| (l.overlay_rects_at, l.overlay_texts_at));
         if let Some(layout) = self.chrome_layout.as_ref() {
+            // Outside the base/overlay split on purpose: a surface is drawn
+            // before every other instance, so it has no overlay half to sort
+            // into.
+            chrome.surface_rects.extend_from_slice(&layout.surface_rects);
             chrome.rects.extend_from_slice(&layout.rects[..overlay_rects]);
             for run in &layout.texts[..overlay_texts] {
                 zest_render_wgpu::emit_ui_run(
@@ -11850,7 +11882,12 @@ impl App {
         let theme = crate::themes::get(self.effective_theme())
             .unwrap_or_else(zest_theme::builtin::obsidian);
         let resolved = zest_theme::resolve(&theme);
-        self.chrome_colors = ChromeColors::new(&theme.ui, &theme.effects, self.config.chrome_opacity);
+        self.chrome_colors = ChromeColors::new(
+            &theme.ui,
+            &theme.effects,
+            self.config.chrome_opacity,
+            self.config.opacity,
+        );
         self.text_tuning = resolve_text_tuning(&self.config);
         self.mark_chrome_dirty();
         self.palette = to_core_palette(&resolved);
@@ -11952,7 +11989,10 @@ impl App {
     /// Subpixel coverage is three alphas per pixel, and compositing that
     /// against a *translucent* destination is undefined — the compositor holds
     /// one alpha and cannot divide by three. So a translucent window forces
-    /// grayscale, regardless of the setting. On Windows this costs almost
+    /// grayscale, regardless of the setting — and *either* opacity makes it
+    /// translucent ([`Config::translucent_surface`]). The atlas holds one mask
+    /// format for the whole window, so translucent chrome over an opaque grid
+    /// still has to pick, and only grayscale is defined for both. On Windows this costs almost
     /// nothing in practice: DX12 reports only `Opaque` (ADR-003), so opacity is
     /// already forced to 1 there and the two fallbacks agree rather than fight.
     ///
@@ -11972,7 +12012,7 @@ impl App {
     /// renderer can actually do, so that turning the grid down to grayscale
     /// does not drag the window's own furniture with it.
     fn antialias_for(config: &Config) -> zest_font::TextAntialias {
-        if config.opacity < 1.0 {
+        if config.translucent_surface() {
             return zest_font::TextAntialias::Grayscale;
         }
         zest_font::TextAntialias::Subpixel
@@ -12008,7 +12048,7 @@ impl App {
         Some(SizedFromCells { width: w, height: h, scale, fonts: Box::new(fonts) })
     }
 
-    /// Make the window and its swapchain agree with `window.opacity`.
+    /// Make the window and its swapchain agree with the opacity settings.
     ///
     /// Three things decide whether a translucent window is actually
     /// translucent, and all three were settled once at startup and never asked
@@ -12037,7 +12077,7 @@ impl App {
     /// in sync with `invalidate::KEYS`, and this cannot fall out of step
     /// because it compares the thing it actually acts on.
     fn apply_transparency(&mut self) {
-        let want = self.config.opacity < 1.0;
+        let want = self.config.translucent_surface();
         let Some(w) = self.window.as_ref() else { return };
         if self.gpu.as_ref().is_some_and(|g| g.transparent == want) {
             return;
@@ -12050,7 +12090,8 @@ impl App {
         if cfg!(all(unix, not(target_os = "macos"))) {
             tracing::info!(
                 "window transparency is fixed at creation on X11; \
-                 window.opacity applies on the next launch here"
+                 window.opacity and window.chrome_opacity apply on the \
+                 next launch here"
             );
         }
         w.set_transparent(want);
@@ -12177,7 +12218,7 @@ impl App {
             // `drawn_caption` and the system frame being decided separately
             // -- which is how the window came to wear two of them (#472).
             .with_decorations(self.config.chrome.decorations())
-            .with_transparent(self.config.opacity < 1.0)
+            .with_transparent(self.config.translucent_surface())
             .with_visible(false);
         let mut attrs = platform::identify(attrs);
         attrs = match (self.screenshot.as_ref(), plan.geometry.inner_size, early.as_ref()) {
@@ -12437,7 +12478,7 @@ impl App {
         // shared adapter cannot present to — a window on another GPU — gets
         // a private device through the old path, so the ladder still ends in
         // a window rather than a panic.
-        let want_transparency = self.config.opacity < 1.0;
+        let want_transparency = self.config.translucent_surface();
         let antialias = self.effective_antialias();
         let gpu = match self.shared.gpu.get() {
             Some(host) => host.surface_for(&window, None, want_transparency, clear, antialias),
@@ -16958,6 +16999,39 @@ mod tuning_tests {
             zest_font::TextAntialias::Grayscale,
             "but a translucent window must force grayscale anyway"
         );
+
+        // The second opacity is the same gate. The atlas holds one mask format
+        // for the whole window, so glass chrome over a solid grid still has to
+        // pick, and only grayscale is defined against a translucent
+        // destination.
+        let mut s = zest_config::Settings::default();
+        s.appearance.text_antialias = zest_config::TextAntialias::Subpixel;
+        s.window.chrome_opacity = 0.3;
+        assert_eq!(
+            super::App::antialias_for(&Config::from(&s)),
+            zest_font::TextAntialias::Grayscale,
+            "a translucent *chrome* makes the surface translucent too"
+        );
+    }
+
+    #[test]
+    fn either_opacity_makes_the_surface_translucent() {
+        // Four callers ask this -- `with_transparent` and the swapchain's
+        // `want_transparency`, both in `open_window`, `apply_transparency` on
+        // a reload, and `antialias_for` -- and the way the second opacity gets
+        // forgotten is each spelling `opacity < 1.0` for itself. `chrome_opacity` below 1 is what makes `window.backdrop`
+        // visible at `opacity = 1`: a material can only show through pixels the
+        // surface leaves transparent.
+        let surface = |opacity: f32, chrome: f32| {
+            let mut s = zest_config::Settings::default();
+            s.window.opacity = opacity;
+            s.window.chrome_opacity = chrome;
+            Config::from(&s).translucent_surface()
+        };
+        assert!(!surface(1.0, 1.0), "both solid: an opaque surface, as before");
+        assert!(surface(0.8, 1.0), "a translucent grid");
+        assert!(surface(1.0, 0.3), "a glass titlebar over a solid grid -- #522");
+        assert!(surface(0.8, 0.3), "both");
     }
 
     #[test]

@@ -43,6 +43,13 @@ pub struct TextRun {
 /// The finished chrome for one frame.
 #[derive(Debug, Default)]
 pub struct ChromeLayout {
+    /// The bars that *are* the window surface where they sit — the tab strip,
+    /// the vertical layout's header, the sidebar. Drawn with the blend off
+    /// (`Scene::surface_rects`), so `window.chrome_opacity` is an alpha onto
+    /// whatever is behind the window rather than a tint toward the window's
+    /// own background. Everything drawn *on* a bar — its hairline, the chips,
+    /// their text — stays in `rects` and composites normally.
+    pub surface_rects: Vec<RectInstance>,
     pub rects: Vec<RectInstance>,
     pub texts: Vec<TextRun>,
     pub hit: ChromeHitMap,
@@ -2612,7 +2619,7 @@ fn horizontal(
 
     let sh = m.strip_height * s;
     let strip = [0.0, 0.0, m.width, sh];
-    out.rects.push(RectInstance::filled(strip, colors.strip_bg, no_clip));
+    out.surface_rects.push(RectInstance::filled(strip, colors.strip_bg, no_clip));
     out.rects.push(RectInstance::filled(
         [0.0, sh - HAIRLINE * s, m.width, HAIRLINE * s],
         colors.line,
@@ -2757,8 +2764,11 @@ fn horizontal(
         // What is actually behind the chip's glyph tile, which the progress
         // ring's bite has to match to read as a gap rather than a notch.
         // Three answers, and the same three the fills below produce.
+        // The pane this chip continues, which a profile can make more or less
+        // solid than the window (`ProfileIdentity::opacity`).
+        let active_fill = tab.opacity.map_or(colors.tab_active_bg, |o| colors.pane_fill(o));
         let chip_bg = if active {
-            colors.tab_active_bg
+            active_fill
         } else if hovered {
             colors.tab_hover_bg
         } else {
@@ -2792,7 +2802,7 @@ fn horizontal(
                         chip[2] - 2.0 * HAIRLINE * s,
                         chip[3] - HAIRLINE * s,
                     ],
-                    colors.tab_active_bg,
+                    active_fill,
                     clip,
                 )
             });
@@ -3092,7 +3102,7 @@ fn vertical(
     let header_h =
         model.controls.native_leading.map_or(HEADER_H * s, |t| t[1].max(HEADER_H * s));
     let bar = [0.0, 0.0, m.width, header_h];
-    out.rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
+    out.surface_rects.push(RectInstance::filled(bar, colors.strip_bg, no_clip));
     out.rects.push(RectInstance::filled(
         [0.0, header_h - HAIRLINE * s, m.width, HAIRLINE * s],
         colors.line,
@@ -3210,7 +3220,7 @@ fn vertical(
     // The sidebar, below the header, full remaining height.
     let sw = m.sidebar_width * s;
     let sidebar = [0.0, header_h, sw, (m.height - header_h).max(0.0)];
-    out.rects.push(RectInstance::filled(sidebar, colors.strip_bg, no_clip));
+    out.surface_rects.push(RectInstance::filled(sidebar, colors.strip_bg, no_clip));
     out.rects.push(RectInstance::filled(
         [sw - HAIRLINE * s, header_h, HAIRLINE * s, sidebar[3]],
         colors.line,
@@ -3727,12 +3737,102 @@ mod tests {
             age: "2m".into(),
             connecting: false,
             link: LinkKind::Loopback,
+            opacity: None,
         }
     }
 
     fn colors() -> ChromeColors {
         let theme = zest_theme::builtin::obsidian();
-        ChromeColors::new(&theme.ui, &theme.effects, 1.0)
+        ChromeColors::new(&theme.ui, &theme.effects, 1.0, 1.0)
+    }
+
+    /// Chrome at `chrome_opacity`, grid at `window_opacity`.
+    fn colors_at(chrome_opacity: f32, window_opacity: f32) -> ChromeColors {
+        let theme = zest_theme::builtin::obsidian();
+        ChromeColors::new(&theme.ui, &theme.effects, chrome_opacity, window_opacity)
+    }
+
+    #[test]
+    fn a_bar_is_a_surface_and_what_sits_on_it_is_not() {
+        // #522 in one assertion. A chrome bar has to *write* the window
+        // surface where it sits, or `window.chrome_opacity` composites over a
+        // backdrop `window.opacity` already made opaque: a tint toward the
+        // window background, never glass onto the desktop. What is drawn *on*
+        // the bar — its hairline, the chips, their text — must keep blending,
+        // or each would erase the bar under it.
+        let c = colors_at(0.3, 1.0);
+        let m = metrics(1200.0, 800.0, 1.0);
+        let tabs = vec![tab(1, TabOrigin::Local, TabPresence::Online)];
+
+        let top = layout(&model(tabs.clone(), TabsPosition::Top), &c, &m, &mut measure);
+        assert_eq!(top.surface_rects.len(), 1, "the strip, and only the strip");
+        assert_eq!(top.surface_rects[0].rect, [0.0, 0.0, 1200.0, 38.0], "the whole strip");
+        assert!(
+            (top.surface_rects[0].fill.0[3] - 0.3).abs() < 1e-6,
+            "the strip carries chrome_opacity verbatim, got {:?}",
+            top.surface_rects[0].fill
+        );
+        assert!(
+            top.rects.iter().any(|r| r.rect[3] < 2.0),
+            "the hairline still blends over the strip"
+        );
+
+        let left = layout(&model(tabs, TabsPosition::Left), &c, &m, &mut measure);
+        assert_eq!(left.surface_rects.len(), 2, "the header and the sidebar");
+        assert!(
+            left.surface_rects.iter().all(|r| (r.fill.0[3] - 0.3).abs() < 1e-6),
+            "both carry chrome_opacity"
+        );
+        // The vertical layout's own version of the bug: a sidebar left in
+        // `rects` reads as glass in a screenshot and is not.
+        assert!(
+            left.surface_rects.iter().any(|r| r.rect[3] > 700.0),
+            "the sidebar runs the remaining height"
+        );
+    }
+
+    #[test]
+    fn the_active_tab_follows_the_pane_it_continues() {
+        // A glass strip over a solid grid must not cut a see-through notch in
+        // it: the active chip *is* the pane, drawn a few pixels higher (design
+        // §1). Its fill therefore takes `window.opacity`, not the chrome's.
+        let c = colors_at(0.3, 1.0);
+        assert!(
+            (c.tab_active_bg.0[3] - 1.0).abs() < 1e-6,
+            "the active tab is as solid as the pane below it, got {:?}",
+            c.tab_active_bg
+        );
+        let c = colors_at(1.0, 0.5);
+        assert!(
+            (c.tab_active_bg.0[3] - 0.5).abs() < 1e-6,
+            "and as translucent, when that is what the pane is"
+        );
+    }
+
+    #[test]
+    fn a_profile_tab_matches_its_own_pane_not_the_window() {
+        // `pane_opacity` lets a profile override `window.opacity` for its own
+        // pane, so the chip that reads as the top of that pane has to follow
+        // it too: a solid tab over a see-through pane names the wrong pane.
+        let c = colors_at(0.3, 1.0);
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+        t.opacity = Some(0.5);
+        let l = layout(&model(vec![t], TabsPosition::Top), &c, &m, &mut measure);
+
+        // The chip's fill is the only rect carrying the pane's own alpha:
+        // the strip is a surface, the border and rule are structure.
+        assert!(
+            l.rects.iter().any(|r| (r.fill.0[3] - 0.5).abs() < 1e-6),
+            "the active chip takes the profile's opacity, not the window's 1.0"
+        );
+        // And the arithmetic is the premultiplied surface halved, not a
+        // second resolve that could drift from `ui.bg`.
+        let half = c.pane_fill(0.5);
+        assert!(
+            (half.0[0] - c.bg_opaque.0[0] * 0.5).abs() < 1e-6,
+            "pane_fill scales the finished colour"
+        );
     }
 
     fn metrics(width: f32, height: f32, scale: f32) -> ChromeMetrics {
