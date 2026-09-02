@@ -357,7 +357,16 @@ than a fleet that is smaller than it is. The host label is resolved by id,
 never by name (two machines can share one). Provenance ages read `now`,
 `2m ago`, `12h ago`, `yesterday`, `3d ago`. Six rows on an empty query, a
 scrolling list once something is typed. Blocks of sessions that have ended
-are the next step (a durable block store on the host that ran them).
+come from the host's durable block history (ADR-020): such a row names no
+session, so ⏎ runs it here and there is nothing to activate; a command the
+host cut at 4 KiB is shown with its cut and runs nowhere.
+
+The browser's palette is the same picture (#530): every machine the shell
+holds a connection to answers, `searching N hosts…` while any is pending and
+`N hosts searched` once all have answered, a stored block's ⏎ types into the
+active tab through the terminal's own prompt gate. It still omits
+`⇧⏎ run on host…` — no host chooser exists there yet — and its ages read
+`5s ago`, `2m ago`, `3d ago` (no `yesterday` yet).
 
 ### 7. Fleet
 
