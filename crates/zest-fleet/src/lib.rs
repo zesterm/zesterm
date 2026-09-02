@@ -31,7 +31,7 @@
 //! accident.
 
 use zest_mesh::discovery::Presence;
-use zest_proto::{HostId, SessionInfo};
+use zest_proto::{BlockMatch, HostId, SessionInfo};
 
 /// What is known about one host's session list.
 #[derive(Debug, Clone, Default)]
@@ -296,6 +296,39 @@ pub fn merge_account(out: &mut Vec<FleetHost>, account: Option<&[AccountEntry]>)
             });
         }
     }
+}
+
+/// The fleet's blocks: every host's answer to one query, and — for hosts
+/// that have *not* answered yet — what the window's own attached replicas
+/// already hold. Newest first, one row per `(host, session, block)`, at most
+/// `cap` (#527).
+///
+/// A seed row yields to its host's own answer. An attached tab's replica and
+/// the daemon name the same block by the same id, and once the daemon has
+/// spoken the replica is a second copy of one fact — including a block the
+/// daemon no longer lists, which the replica holds stale. Seeds exist so the
+/// palette has rows in the round trip before the first answer lands, and
+/// for sessions no daemon answers for at all (an in-process shell).
+///
+/// The cap applies after the merge, not per host: two hosts each answering
+/// `cap` rows is `cap` rows on screen, the newest of both.
+#[must_use]
+pub fn merge_matches(
+    answers: &[(HostId, Vec<BlockMatch>)],
+    seed: &[BlockMatch],
+    cap: usize,
+) -> Vec<BlockMatch> {
+    let answered: std::collections::BTreeSet<HostId> = answers.iter().map(|(h, _)| *h).collect();
+    let mut out: Vec<BlockMatch> = answers.iter().flat_map(|(_, m)| m.iter().cloned()).collect();
+    out.extend(seed.iter().filter(|m| !answered.contains(&m.host)).cloned());
+    zest_proto::search::rank(&mut out);
+    // Keyed on the host *id*, never its label: two machines in one fleet can
+    // share a name (#304), and a dedupe on the label would fold one
+    // machine's history into the other's.
+    let mut seen = std::collections::BTreeSet::new();
+    out.retain(|m| seen.insert((m.host, m.session, m.block)));
+    out.truncate(cap);
+    out
 }
 
 /// Ready-made hosts for tests — this crate's and every consumer's.
@@ -778,5 +811,98 @@ mod tests {
         );
     }
 
+    fn hit(host: HostId, session: u64, block: u32, ended: u64, command: &str) -> BlockMatch {
+        BlockMatch {
+            host,
+            session: Some(zest_proto::SessionId(session)),
+            block,
+            title: String::new(),
+            command: command.into(),
+            cwd: "/".into(),
+            state: zest_proto::BlockState::Finished { exit_code: Some(0) },
+            started_ms: Some(ended.saturating_sub(10)),
+            ended_ms: Some(ended),
+            context: None,
+            author: None,
+        }
+    }
 
+    /// The palette promises one list, newest first, whatever machine a block
+    /// ran on — a per-host order would put every block of the first host
+    /// above every block of the second.
+    #[test]
+    fn merged_blocks_are_newest_first_across_hosts() {
+        let a = HostId::from_bytes([1; 32]);
+        let b = HostId::from_bytes([2; 32]);
+        let answers = vec![
+            (a, vec![hit(a, 1, 1, 100, "old on a"), hit(a, 1, 2, 300, "new on a")]),
+            (b, vec![hit(b, 1, 1, 200, "mid on b")]),
+        ];
+        let out = merge_matches(&answers, &[], 10);
+        assert_eq!(
+            out.iter().map(|m| m.command.as_str()).collect::<Vec<_>>(),
+            ["new on a", "mid on b", "old on a"]
+        );
+    }
+
+    /// An attached tab's replica and the tab's daemon describe the same
+    /// block by the same id; showing it twice is the palette contradicting
+    /// itself.
+    #[test]
+    fn the_same_block_seen_from_a_replica_and_from_its_daemon_is_one_row() {
+        let a = HostId::from_bytes([1; 32]);
+        let answers = vec![(a, vec![hit(a, 1, 7, 100, "make")])];
+        let seed = [hit(a, 1, 7, 100, "make")];
+        let out = merge_matches(&answers, &seed, 10);
+        assert_eq!(out.len(), 1, "one block, one row: {out:?}");
+    }
+
+    /// The replica may hold a block the daemon has since evicted or a
+    /// session that was closed; once the daemon has answered, its answer is
+    /// the truth for that host and the seed is a stale copy.
+    #[test]
+    fn a_seed_row_yields_to_its_hosts_own_answer_even_when_the_answer_omits_it() {
+        let a = HostId::from_bytes([1; 32]);
+        let b = HostId::from_bytes([2; 32]);
+        let answers = vec![(a, vec![hit(a, 1, 2, 200, "kept")])];
+        let seed = [hit(a, 1, 1, 100, "evicted on a"), hit(b, 3, 1, 150, "unanswered b")];
+        let out = merge_matches(&answers, &seed, 10);
+        assert_eq!(
+            out.iter().map(|m| m.command.as_str()).collect::<Vec<_>>(),
+            ["kept", "unanswered b"],
+            "a's seed goes because a answered; b's stays because b has not"
+        );
+    }
+
+    /// Two hosts each answering `cap` rows must not become `2 × cap` rows —
+    /// the cap is what the palette can show, not what a host may send.
+    #[test]
+    fn the_cap_applies_after_the_merge_not_per_host() {
+        let a = HostId::from_bytes([1; 32]);
+        let b = HostId::from_bytes([2; 32]);
+        let answers = vec![
+            (a, (0..5).map(|i| hit(a, 1, i, 100 + u64::from(i) * 2, "a")).collect()),
+            (b, (0..5).map(|i| hit(b, 1, i, 101 + u64::from(i) * 2, "b")).collect()),
+        ];
+        let out = merge_matches(&answers, &[], 4);
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            out.iter().map(|m| m.ended_ms.unwrap()).collect::<Vec<_>>(),
+            [109, 108, 107, 106],
+            "the newest four of both hosts together"
+        );
+    }
+
+    /// The fixture fleet's two `mac`s (#304): a dedupe keyed on the label
+    /// would fold one machine's history into the other's. Same session
+    /// number, same block id, two hosts — two rows.
+    #[test]
+    fn two_hosts_with_one_label_stay_two_hosts() {
+        let fleet = fixture::fleet();
+        let (m1, m2) = (fleet[1].host, fleet[2].host);
+        assert_eq!(fleet[1].label, fleet[2].label, "the fixture's duplicate label is load-bearing");
+        let answers = vec![(m1, vec![hit(m1, 1, 1, 100, "ls")]), (m2, vec![hit(m2, 1, 1, 100, "ls")])];
+        let out = merge_matches(&answers, &[], 10);
+        assert_eq!(out.len(), 2, "one block per machine, however the machines are named");
+    }
 }
