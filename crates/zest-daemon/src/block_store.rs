@@ -314,7 +314,7 @@ impl BlockStore {
              ORDER BY ended_ms DESC, block_id DESC LIMIT ?2"
         } else {
             "SELECT run_id, block_id, session_id, command, command_truncated, cwd, branch, exit_code, \
-             started_ms, ended_ms, author FROM block ORDER BY ended_ms DESC, block_id DESC LIMIT ?2"
+             started_ms, ended_ms, author FROM block ORDER BY ended_ms DESC, block_id DESC LIMIT ?1"
         };
         let mut stmt = db.prepare_cached(sql)?;
         // One row past the cap, so "capped" means a row *exists* beyond it:
@@ -324,7 +324,7 @@ impl BlockStore {
         let rows = if narrow {
             stmt.query_map(params![pattern, fetch], row_to_block)?
         } else {
-            stmt.query_map(params![Option::<String>::None, fetch], row_to_block)?
+            stmt.query_map(params![fetch], row_to_block)?
         };
         let mut scanned = 0usize;
         let mut out = Vec::new();
