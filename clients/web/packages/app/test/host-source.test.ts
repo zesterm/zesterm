@@ -16,7 +16,7 @@ import type { ClientSigner } from '@zesterm/auth';
 import type { DirectoryView, HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { DirectorySource, DirectoryStatus } from '../src/directory-source.ts';
-import { liveHostSource, localHostSource } from '../src/host-source.ts';
+import { liveHostSource, localHostSource, type SearchLink } from '../src/host-source.ts';
 import type { LiveDirectory } from '../src/live-directory.ts';
 
 const HOST = 'ab'.repeat(32);
@@ -236,6 +236,8 @@ function fakeLive(
   const created: { hostId: string; size: { cols: number; rows: number } }[] = [];
   return {
     created,
+    searchBlocks: () => 0,
+    blockSearch: () => ({ query: '', hits: [], hostsAsked: 0, hostsAnswered: 0 }),
     snapshots: () =>
       snapshots.map((s) => ({
         host: { id: s.id, label: s.label },
@@ -478,4 +480,54 @@ test('the loopback pane can dial the sessions it lists too', () => {
   for (const e of source.sessions()) {
     assert.notEqual(source.dialFor(e.host), null, `session ${e.session} must be clickable`);
   }
+});
+
+/** The loopback search connection, as a test sees it. */
+class FakeSearchLink implements SearchLink {
+  connects = 0;
+  closes = 0;
+  connected = false;
+  readonly searches: Array<{ query: string; limit: number }> = [];
+  connect(): void {
+    this.connects += 1;
+  }
+  close(): void {
+    this.closes += 1;
+  }
+  searchBlocks(query: string, limit: number): boolean {
+    if (!this.connected) return false;
+    this.searches.push({ query, limit });
+    return true;
+  }
+}
+
+test('the loopback search opens nothing until the directory is ready, then one connection for every query', () => {
+  const opened: FakeSearchLink[] = [];
+  const open = () => {
+    const link = new FakeSearchLink();
+    opened.push(link);
+    return link;
+  };
+
+  const notReady = localHostSource(reading({ kind: 'pending' }), SIGNER, null, open);
+  assert.equal(notReady.searchBlocks('x'), 0, 'nothing to ask yet');
+  assert.equal(opened.length, 0, 'and nothing was dialled to find that out');
+
+  const source = localHostSource(reading({ kind: 'ready', view: VIEW }), SIGNER, null, open);
+  assert.equal(source.searchBlocks('ca'), 0, 'asked before the handshake: the frame did not go out');
+  assert.equal(opened.length, 1, 'the connection is opened on the first question');
+  assert.equal(opened[0]?.connects, 1);
+
+  opened[0]!.connected = true;
+  assert.equal(source.searchBlocks('cargo'), 1, 'and counts once it is up');
+  assert.equal(source.searchBlocks('cargo b'), 1);
+  assert.equal(opened.length, 1, 'one connection across many queries — never a handshake per keystroke');
+  assert.deepEqual(
+    opened[0]?.searches.map((s) => s.query),
+    ['cargo', 'cargo b'],
+  );
+  assert.equal(source.blockSearch().hostsAsked, 1);
+
+  source.close();
+  assert.equal(opened[0]?.closes, 1, 'the shell’s unmount closes what the source opened');
 });

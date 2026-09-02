@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import type { BlockPayload } from '@zesterm/proto';
 import type { SessionEntry } from '@zesterm/control';
 
+import type { BlockHit, BlockSearchView } from '../src/block-search.ts';
 import {
   blockItems,
   hostItems,
-  hostsSearchedCount,
   runTargetOf,
   sessionItems,
   type AttachedTabBlocks,
@@ -31,7 +31,29 @@ function block(over: Partial<BlockPayload> & { id: number }): BlockPayload {
 }
 
 function attached(over: Partial<AttachedTabBlocks>): AttachedTabBlocks {
-  return { tabId: 'h1:1', hostId: 'h1', hostLabel: 'studio', blocks: [], ...over };
+  return { tabId: 'h1:1', hostId: 'h1', sessionId: '1', hostLabel: 'studio', blocks: [], ...over };
+}
+
+const NO_SEARCH: BlockSearchView = { query: '', hits: [], hostsAsked: 0, hostsAnswered: 0 };
+
+function hit(over: Partial<BlockHit> & { block: number }): BlockHit {
+  return {
+    hostId: 'h2',
+    session: '4',
+    command: 'make',
+    commandTruncated: false,
+    cwd: '/src',
+    state: { state: 'finished', exit_code: 0 },
+    startedMs: NOW - 10_000,
+    endedMs: NOW - 5_000,
+    branch: '',
+    author: null,
+    ...over,
+  };
+}
+
+function searched(...hits: BlockHit[]): BlockSearchView {
+  return { query: '', hits, hostsAsked: 1, hostsAnswered: 1 };
 }
 
 function tab(over: Partial<Tab> & { id: string }): Tab {
@@ -63,23 +85,6 @@ function entry(over: Partial<SessionEntry>): SessionEntry {
   };
 }
 
-test('the hosts-searched count states the attached-host set, nothing broader', () => {
-  const tabs = [
-    attached({ tabId: 'h1:1', hostId: 'h1' }),
-    attached({ tabId: 'h1:2', hostId: 'h1' }),
-  ];
-  assert.equal(
-    hostsSearchedCount(tabs),
-    1,
-    'two tabs on one machine are one host searched — the count is machines, not tabs',
-  );
-  assert.equal(
-    hostsSearchedCount([]),
-    0,
-    'a directory full of hosts with nothing attached searched zero of them — claiming more fabricates reach',
-  );
-});
-
 test('provenance carries an age only when the host stamped a timestamp', () => {
   const items = blockItems(
     [
@@ -90,6 +95,8 @@ test('provenance carries an age only when the host stamped a timestamp', () => {
         ],
       }),
     ],
+    NO_SEARCH,
+    {},
     NOW,
   );
   assert.deepEqual(
@@ -115,6 +122,8 @@ test('outcomes cross verbatim: exit ?, running, and the tone matches the rail', 
         ],
       }),
     ],
+    NO_SEARCH,
+    {},
     NOW,
   );
   assert.deepEqual(
@@ -140,6 +149,8 @@ test('prompt-state and command-less blocks are not history', () => {
         ],
       }),
     ],
+    NO_SEARCH,
+    {},
     NOW,
   );
   assert.deepEqual(
@@ -178,11 +189,14 @@ test('⏎ resolves per row kind, and a block only types into the ACTIVE tab', ()
   const blockItem: PaletteItem = {
     kind: 'block',
     tabId: 'h1:1',
+    hostId: 'h1',
+    sessionId: '1',
     blockId: 3,
     text: 'cargo test',
     provenance: '',
     recency: null,
     tone: 'success',
+    runnable: true,
   };
   assert.deepEqual(
     runTargetOf(blockItem, 'h1:1'),
@@ -236,4 +250,63 @@ test('⏎ resolves per row kind, and a block only types into the ACTIVE tab', ()
     { kind: 'keybar-toggle' },
     'the key bar is reachable from the palette, so an iPad with a hardware keyboard can turn it off',
   );
+});
+
+test('the same block seen from an attached grid and from its daemon is one row, the live one', () => {
+  // The attached copy has a tab to run in and a fresher state; a second row
+  // for the same (host, session, block) would race it under ⏎.
+  const items = blockItems(
+    [attached({ tabId: 'h1:1', hostId: 'h1', sessionId: '1', blocks: [block({ id: 7, command: 'make' })] })],
+    searched(
+      hit({ hostId: 'h1', session: '1', block: 7, command: 'make' }),
+      hit({ hostId: 'h1', session: '1', block: 8, command: 'make -j' }),
+    ),
+    { h1: 'studio' },
+    NOW,
+  );
+  assert.deepEqual(
+    items.map((i) => [i.text, i.kind === 'block' ? i.tabId : '?']),
+    [
+      ['make', 'h1:1'],
+      ['make -j', null],
+    ],
+    'block 7 once, as the tab’s own; block 8 from the daemon alone, with no tab',
+  );
+});
+
+test('a stored block of a dead session renders its provenance from the host’s stamps', () => {
+  const items = blockItems(
+    [],
+    searched(hit({ hostId: 'h2', session: null, block: 2, command: 'ffmpeg -i in.mov', state: { state: 'finished', exit_code: 1 } })),
+    { h2: 'mac' },
+    NOW,
+  );
+  assert.equal(items[0]?.provenance, 'mac · 5s ago · exit 1');
+  assert.equal(items[0]?.kind === 'block' ? items[0].sessionId : '?', null);
+  assert.equal(items[0]?.kind === 'block' ? items[0].tone : '?', 'danger');
+  const unlabeled = blockItems([], searched(hit({ hostId: 'h2', block: 2 })), {}, NOW);
+  assert.equal(unlabeled[0]?.provenance.split(' · ')[0], 'h2', 'the shortened id when no label is known');
+});
+
+test('⏎ on a block with no tab here runs it in the active tab, and nowhere with no tab at all', () => {
+  const [stored] = blockItems([], searched(hit({ session: null, block: 2, command: 'make' })), {}, NOW);
+  assert.ok(stored);
+  assert.deepEqual(
+    runTargetOf(stored, 'h1:1'),
+    { kind: 'run-block', tabId: 'h1:1', command: 'make' },
+    'the footer’s literal "run here"; the terminal’s own prompt gate still decides',
+  );
+  assert.deepEqual(runTargetOf(stored, null), { kind: 'nothing' }, 'no tab, nowhere to type');
+});
+
+test('a command the host cut is shown with its cut and runs nowhere', () => {
+  const [cut] = blockItems(
+    [],
+    searched(hit({ session: null, block: 2, command: 'a'.repeat(40), commandTruncated: true })),
+    {},
+    NOW,
+  );
+  assert.ok(cut);
+  assert.equal(cut.text, `${'a'.repeat(40)}…`);
+  assert.deepEqual(runTargetOf(cut, 'h1:1'), { kind: 'nothing' }, 'the first four kilobytes of a script are not the script');
 });

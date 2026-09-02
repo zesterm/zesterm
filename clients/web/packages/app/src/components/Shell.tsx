@@ -64,7 +64,6 @@ import {
   actionItems,
   blockItems,
   hostItems,
-  hostsSearchedCount,
   runTargetOf,
   sessionItems,
   type AttachedTabBlocks,
@@ -313,7 +312,10 @@ export const Shell = component<{
    * cached state — the handlers re-ask so a wrap or a ⏎ is decided against
    * the results that exist at the keystroke, not at the last render.
    */
-  const paletteData = (): { sources: PaletteSources; hostsSearched: number } => {
+  const paletteData = (): {
+    sources: PaletteSources;
+    search: { asked: number; answered: number };
+  } => {
     const labels = hostLabelsOf();
     const attached: AttachedTabBlocks[] = [];
     for (const [tabId, hooks] of termHooks) {
@@ -322,20 +324,24 @@ export const Shell = component<{
       attached.push({
         tabId,
         hostId: tab.hostId,
+        sessionId: tab.panes[0]?.sessionId ?? '',
         hostLabel: labels[tab.hostId] ?? shortHostId(tab.hostId),
         blocks: hooks.blocks(),
       });
     }
+    // Every connected machine's answer (#530), the attached grids seeding
+    // the rows until it lands; the count is who answered, not who is listed.
+    const search = hostSource.blockSearch();
     return {
       sources: {
-        blocks: blockItems(attached, Date.now()),
+        blocks: blockItems(attached, search, labels, Date.now()),
         // Every machine's sessions, not one machine's — the same widening the
         // native app's ⌘K got when it started watching more than one host.
         sessions: sessionItems(store.tabs.tabs, hostSource.sessions(), labels),
         hosts: hostItems(hostChoices()),
         actions: actionItems(),
       },
-      hostsSearched: hostsSearchedCount(attached),
+      search: { asked: search.hostsAsked, answered: search.hostsAnswered },
     };
   };
 
@@ -350,6 +356,8 @@ export const Shell = component<{
     store.palette = closePalette(store.palette);
     const target = runTargetOf(item, store.tabs.activeId);
     switch (target.kind) {
+      case 'nothing':
+        break;
       case 'run-block':
         // The terminal's own gate (runCommand = the ⌘⇧R rule) decides whether
         // typing is safe; at a running command or in the alt screen it
@@ -425,6 +433,7 @@ export const Shell = component<{
     { immediate: true },
   );
   onUnmounted(() => routeWatch.stop());
+  onUnmounted(() => hostSource.close());
 
   const platform: 'mac' | 'other' = navigator.platform.toLowerCase().includes('mac')
     ? 'mac'
@@ -434,6 +443,10 @@ export const Shell = component<{
     switch (action.kind) {
       case 'palette':
         store.palette = store.palette.open ? closePalette(store.palette) : openPalette();
+        // The Blocks group is the fleet's answer, so ask on the way in: an
+        // empty query is "the most recent", which is what an opening palette
+        // shows.
+        if (store.palette.open) hostSource.searchBlocks('');
         break;
       case 'profiles':
         // A route rather than an overlay, and a child of the shell record:
@@ -604,14 +617,19 @@ export const Shell = component<{
     // list tracks the keystrokes without its own store.
     const paletteEl = ((): unknown => {
       if (!store.palette.open) return null;
-      const { sources, hostsSearched } = paletteData();
+      const { sources, search } = paletteData();
       return (
         <Palette
           query={store.palette.query}
           selection={store.palette.selection}
           groups={rankResults(store.palette.query, sources)}
-          hostsSearched={hostsSearched}
-          onQuery={(q: string) => (store.palette = setQuery(store.palette, q))}
+          search={search}
+          onQuery={(q: string) => {
+            store.palette = setQuery(store.palette, q);
+            // Every changed keystroke asks again; a stale answer is dropped
+            // by its echo, so there is nothing to debounce.
+            hostSource.searchBlocks(q);
+          }}
           onMove={movePaletteSelection}
           onRun={runPaletteItem}
           onDismiss={() => (store.palette = closePalette(store.palette))}

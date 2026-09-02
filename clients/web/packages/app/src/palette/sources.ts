@@ -4,12 +4,14 @@
  *
  * The honesty rules are the file's whole shape:
  *
- * - **Blocks come from attached tabs' `GridView.blocks`.** The browser's
- *   reach is exactly the sessions it has a live grid for; today the shell
- *   mounts one `TerminalView` at a time, so that is the active tab, and the
- *   map widens by itself when a multi-pane shell mounts more. The
- *   "N hosts searched" count states that set precisely — it never counts a
- *   host the directory merely lists.
+ * - **Blocks come from every connected daemon's answer, seeded by the
+ *   attached grids** (#530). Each machine the shell holds a connection to
+ *   answers `search_blocks` for the sessions it owns and the history it
+ *   stores; the attached tabs' `GridView.blocks` are the rows on screen
+ *   before an answer lands, and the same block seen both ways is one row —
+ *   the live one, because it has a tab to run in. The "N hosts searched"
+ *   count states the hosts that *answered*, never a host the directory
+ *   merely lists.
  * - **Provenance says only what arrived over the wire.** An age renders only
  *   when the host stamped a timestamp; a block without one gets no fabricated
  *   "just now". `exit ?` stays `exit ?` — the same never-a-green-tick rule
@@ -19,10 +21,11 @@
  *   broken feature (the launcher menu's own rule).
  */
 
-import type { BlockPayload } from '@zesterm/proto';
+import type { BlockPayload, BlockState } from '@zesterm/proto';
 import type { SessionEntry } from '@zesterm/control';
 import { builtinThemes } from '@zesterm/theme';
 
+import type { BlockSearchView } from '../block-search.ts';
 import { chipTitle, shortHostId, tabIdOf, type HostChoice } from '../chrome-model.ts';
 import type { Tab } from '../state/tabs.ts';
 
@@ -37,7 +40,11 @@ export type PaletteAction =
 export type PaletteItem =
   | {
       readonly kind: 'block';
-      readonly tabId: string;
+      /** The open tab holding the block's session, when there is one. */
+      readonly tabId: string | null;
+      readonly hostId: string;
+      /** `null` for a block only a host's store remembers (ADR-020). */
+      readonly sessionId: string | null;
       readonly blockId: number;
       /** The command — what matching runs over and what ⏎ types. */
       readonly text: string;
@@ -45,6 +52,8 @@ export type PaletteItem =
       /** Epoch ms of the block's freshest stamp; null when the host sent none. */
       readonly recency: number | null;
       readonly tone: ItemTone;
+      /** False for a command the host cut: history to read, not to re-run. */
+      readonly runnable: boolean;
     }
   | {
       readonly kind: 'session';
@@ -67,18 +76,9 @@ export type PaletteItem =
 export interface AttachedTabBlocks {
   readonly tabId: string;
   readonly hostId: string;
+  readonly sessionId: string;
   readonly hostLabel: string;
   readonly blocks: readonly BlockPayload[];
-}
-
-/**
- * "N hosts searched" states the attached-host set — distinct hosts among the
- * tabs whose blocks were actually searched, nothing broader. Two tabs on one
- * machine are one host; a host the directory lists but nothing is attached to
- * is not searched and must not be counted.
- */
-export function hostsSearchedCount(tabs: readonly AttachedTabBlocks[]): number {
-  return new Set(tabs.map((t) => t.hostId)).size;
 }
 
 /** `129s` would read as a typo; each unit hands over where the next is exact enough. */
@@ -92,42 +92,82 @@ function formatAge(ms: number): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+/** `host · age · outcome`, with the age only when the host stamped one. */
+function provenanceOf(
+  hostLabel: string,
+  stamp: number | null,
+  state: BlockState,
+  nowMs: number,
+): { provenance: string; tone: ItemTone } {
+  const parts: string[] = [hostLabel];
+  // Ages only when the host stamped one — never fabricated.
+  if (stamp !== null) parts.push(formatAge(nowMs - stamp));
+  const finished = state.state === 'finished';
+  parts.push(finished ? `exit ${state.exit_code ?? '?'}` : 'running');
+  return {
+    provenance: parts.join(' · '),
+    tone: !finished
+      ? 'warn'
+      : state.exit_code === null
+        ? 'faint'
+        : state.exit_code === 0
+          ? 'success'
+          : 'danger',
+  };
+}
+
 /**
- * Command history rows from the attached grids. Prompt-state and command-less
- * blocks are skipped — an empty prompt is not history and there is nothing to
- * re-run. Outcomes come from the wire verbatim: `exit ?` for a null code, the
- * blocks pane's never-a-green-tick rule.
+ * Command history rows: the attached grids first, then every host's answer
+ * to the search, one row per `(host, session, block)` with the attached copy
+ * winning — it has a tab to run in, and its state is fresher (a grid flips
+ * running → finished before the next answer lands). Prompt-state and
+ * command-less blocks are skipped — an empty prompt is not history and there
+ * is nothing to re-run. Outcomes come from the wire verbatim: `exit ?` for a
+ * null code, the blocks pane's never-a-green-tick rule. A command the host
+ * cut is shown with its cut and is not runnable.
  */
 export function blockItems(
   tabs: readonly AttachedTabBlocks[],
+  search: BlockSearchView,
+  hostLabels: Readonly<Record<string, string>>,
   nowMs: number,
 ): readonly PaletteItem[] {
+  const label = (hostId: string): string => hostLabels[hostId] ?? shortHostId(hostId);
   const items: PaletteItem[] = [];
+  const seen = new Set<string>();
   for (const tab of tabs) {
     for (const b of tab.blocks) {
       if (b.command === '' || b.state.state === 'prompt') continue;
-      const stamp = b.ended_ms ?? b.started_ms;
-      const parts: string[] = [tab.hostLabel];
-      // Ages only when the host stamped one — never fabricated.
-      if (stamp !== undefined) parts.push(formatAge(nowMs - stamp));
-      const finished = b.state.state === 'finished';
-      parts.push(finished ? `exit ${b.state.exit_code ?? '?'}` : 'running');
+      seen.add(`${tab.hostId}:${tab.sessionId}:${b.id}`);
+      const stamp = b.ended_ms ?? b.started_ms ?? null;
       items.push({
         kind: 'block',
         tabId: tab.tabId,
+        hostId: tab.hostId,
+        sessionId: tab.sessionId,
         blockId: b.id,
         text: b.command,
-        provenance: parts.join(' · '),
-        recency: stamp ?? null,
-        tone: !finished
-          ? 'warn'
-          : b.state.exit_code === null
-            ? 'faint'
-            : b.state.exit_code === 0
-              ? 'success'
-              : 'danger',
+        recency: stamp,
+        runnable: true,
+        ...provenanceOf(tab.hostLabel, stamp, b.state, nowMs),
       });
     }
+  }
+  for (const h of search.hits) {
+    if (h.command === '' || h.state.state === 'prompt') continue;
+    if (h.session !== null && seen.has(`${h.hostId}:${h.session}:${h.block}`)) continue;
+    const stamp = h.endedMs ?? h.startedMs;
+    items.push({
+      kind: 'block',
+      tabId: null,
+      hostId: h.hostId,
+      sessionId: h.session,
+      blockId: h.block,
+      text: h.commandTruncated ? `${h.command}…` : h.command,
+      recency: stamp,
+      runnable: !h.commandTruncated,
+      ...provenanceOf(label(h.hostId), stamp, h.state, nowMs),
+    });
   }
   return items;
 }
@@ -216,6 +256,7 @@ export function actionItems(): readonly PaletteItem[] {
 
 /** What ⏎ means, resolved purely so every row kind's verb is testable. */
 export type RunTarget =
+  | { readonly kind: 'nothing' }
   | { readonly kind: 'run-block'; readonly tabId: string; readonly command: string }
   | { readonly kind: 'activate-tab'; readonly tabId: string }
   | { readonly kind: 'open-session'; readonly hostId: string; readonly sessionId: string }
@@ -225,19 +266,27 @@ export type RunTarget =
   | { readonly kind: 'set-theme'; readonly themeId: string };
 
 /**
- * ⏎ on a block re-runs only when that block's tab is the ACTIVE one — the
- * terminal's own prompt gate (`runCommand`, the ⌘⇧R rule) then decides
- * whether typing is safe. For a block on a background tab the target is
- * activation alone, nothing destructive: the user has not seen that tab's
- * prompt state, and typing into a shell they are not looking at is how a
- * command lands in a running program's stdin.
+ * ⏎ on a block re-runs only in the ACTIVE tab — the terminal's own prompt
+ * gate (`runCommand`, the ⌘⇧R rule) then decides whether typing is safe.
+ * For a block on a background tab the target is activation alone, nothing
+ * destructive: the user has not seen that tab's prompt state, and typing
+ * into a shell they are not looking at is how a command lands in a running
+ * program's stdin. A block with no tab here — another machine's, or one only
+ * a store remembers — is the footer's literal `⏎ run here`: typed into the
+ * active tab, through the same gate. A command the host cut runs nowhere.
  */
 export function runTargetOf(item: PaletteItem, activeTabId: string | null): RunTarget {
   switch (item.kind) {
     case 'block':
-      return item.tabId === activeTabId
-        ? { kind: 'run-block', tabId: item.tabId, command: item.text }
-        : { kind: 'activate-tab', tabId: item.tabId };
+      if (!item.runnable) return { kind: 'nothing' };
+      if (item.tabId !== null) {
+        return item.tabId === activeTabId
+          ? { kind: 'run-block', tabId: item.tabId, command: item.text }
+          : { kind: 'activate-tab', tabId: item.tabId };
+      }
+      return activeTabId === null
+        ? { kind: 'nothing' }
+        : { kind: 'run-block', tabId: activeTabId, command: item.text };
     case 'session':
       return item.tabId !== null
         ? { kind: 'activate-tab', tabId: item.tabId }

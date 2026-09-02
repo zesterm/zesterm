@@ -37,7 +37,8 @@ export const Palette = component<{
   query: string;
   selection: number;
   groups: readonly PaletteGroup[];
-  hostsSearched: number;
+  /** Hosts the question reached, and how many have answered (#530). */
+  search: { readonly asked: number; readonly answered: number };
   onQuery: (query: string) => void;
   onMove: (delta: number) => void;
   onRun: (item: PaletteItem) => void;
@@ -83,7 +84,15 @@ export const Palette = component<{
     const sel = Math.min(ctx.props.selection, flat.length - 1);
     selectedEl = null;
     let flatIndex = -1;
-    const n = ctx.props.hostsSearched;
+    const { asked, answered } = ctx.props.search;
+    // Answers, not the fleet: a host that has not answered has not been
+    // searched, and while some are pending the row says so rather than
+    // describing a fleet smaller than it is.
+    const pending = answered < asked;
+    const n = pending ? asked : answered;
+    const count = pending
+      ? `searching ${n} host${n === 1 ? '' : 's'}…`
+      : `${n} host${n === 1 ? '' : 's'} searched`;
 
     return (
       <div
@@ -123,9 +132,7 @@ export const Palette = component<{
               spellCheck={false}
               onInput={() => ctx.props.onQuery(inputEl?.value ?? '')}
             />
-            <span class="p-count">
-              {n} host{n === 1 ? '' : 's'} searched
-            </span>
+            <span class={pending ? 'p-count pending' : 'p-count'}>{count}</span>
           </div>
           <div class="palette-results">
             {flat.length === 0 ? <div class="palette-empty">no matches</div> : null}
