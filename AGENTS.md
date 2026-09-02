@@ -1009,6 +1009,20 @@ you need before you trip on it.
   `is_clipboard_chord` shipped a field that could not be pasted into at all on
   the primary platform while working on the Mac it was written on. (#228,
   #251, #270)
+- **A window template captured at startup is the settings stored twice, and
+  a reload that refreshes one copy is the writer that does not know about the
+  other.** `WindowTemplate.resolved` is what every *later* window is built
+  from; `App::reload_config` refreshed each open window and never the
+  template, so a window opened after an edit — ⌘N, a cascade, a forwarded
+  `zesterm --profile X` — ran the shell of, and resolved profiles against,
+  the file as it was at startup. It presented as "a profile's env edited over
+  MCP doesn't apply", with the profile machinery innocent, and the two obvious
+  checks disagree: `--new-tab --profile X` (a tab in an open window) works,
+  `--profile X` (a new window) does not. `shell.command` is the discriminator
+  the daemon cannot muddy — it never reads that key — so bash in a new tab and
+  zsh in a new window under one file is the proof. `WindowTemplate::refresh`
+  follows the reload now, keeping the last good template on a parse error as
+  the windows do (#524; #219 is the same lesson about `wrapped`).
 - **A text edit whose only commit is Enter loses work through every other
   exit**, and each exit looks like a different bug ("some settings save" is not
   a shape a broken writer can produce). **Leaving a field is a commit** — only
