@@ -120,6 +120,11 @@ pub struct Shared {
     /// hand each the other's reply.
     pub config_written: Option<HostMessage>,
     pub config_written_gen: u64,
+    /// The last `BlockMatches` this connection was told about, and its
+    /// counter, for `config_gen`'s reason: two searches in flight must not
+    /// hand each other's answer (#527).
+    pub block_matches: Option<HostMessage>,
+    pub block_matches_gen: u64,
 }
 
 impl Shared {
@@ -416,6 +421,41 @@ impl Conn {
         };
         self.send(ClientMessage::GetConfig { keys, profile, want_fields, want_themes });
         self.wait_for(|s| (s.config_gen != seen).then(|| s.config.clone()).flatten())
+    }
+
+    /// Ask this host which of its blocks match `query`, and wait for the
+    /// answer (#527): the matches, whether the host cut the list, and how
+    /// many sessions it scanned. A question, never a cache, for
+    /// [`Self::list_sessions`]'s reason. The host's refusal — `error` set on
+    /// the reply — is an answer, so it comes back as one rather than as a
+    /// deadline.
+    pub fn search_blocks(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<(Vec<zest_proto::BlockMatch>, bool, u32), ConnError> {
+        let seen = {
+            let (lock, _) = &*self.state;
+            lock.lock().expect("state").block_matches_gen
+        };
+        self.send(ClientMessage::SearchBlocks { query: query.to_string(), limit });
+        // The counter says an answer landed; the echo says it is *this*
+        // question's. A search that hit its deadline leaves its reply in
+        // flight, and the next call would otherwise take that reply for its
+        // own the moment it arrived.
+        let reply = self.wait_for(|s| {
+            (s.block_matches_gen != seen)
+                .then(|| s.block_matches.clone())
+                .flatten()
+                .filter(|m| matches!(m, HostMessage::BlockMatches { query: q, .. } if q == query))
+        })?;
+        match reply {
+            HostMessage::BlockMatches { error, .. } if !error.is_empty() => Err(ConnError::Refused(error)),
+            HostMessage::BlockMatches { matches, truncated, sessions, .. } => {
+                Ok((matches, truncated, sessions))
+            }
+            _ => unreachable!("only a BlockMatches is stored in that slot"),
+        }
     }
 
     /// Change one thing about this host's configuration, and wait for the
@@ -753,6 +793,10 @@ fn on_message(state: &State, tx: &Sender<Outbound>, msg: HostMessage) {
             s.config_written = Some(msg);
             s.config_written_gen = s.config_written_gen.wrapping_add(1);
         }
+        msg @ HostMessage::BlockMatches { .. } => {
+            s.block_matches = Some(msg);
+            s.block_matches_gen = s.block_matches_gen.wrapping_add(1);
+        }
         HostMessage::Keyframe {
             session,
             seq,
@@ -913,6 +957,31 @@ mod tests {
     /// one shape `Replica::apply` refuses.
     fn divergent_update(session: SessionAddr) -> HostMessage {
         HostMessage::Update { session, base: Seq(99), seq: Seq(100), delta: Delta::default() }
+    }
+
+    /// The slot-and-counter shape, for search answers: a caller snapshots
+    /// the counter, asks, and waits for it to move — so two answers in a row
+    /// leave the second standing and the counter at two, and a caller that
+    /// saw one cannot be handed the other's.
+    #[test]
+    fn a_block_matches_reply_is_stored_and_moves_its_generation() {
+        let st = state(&[]);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let reply = |query: &str| HostMessage::BlockMatches {
+            query: query.into(),
+            matches: Vec::new(),
+            truncated: false,
+            sessions: 1,
+            error: String::new(),
+        };
+        on_message(&st, &tx, reply("ca"));
+        on_message(&st, &tx, reply("cargo"));
+        let s = st.0.lock().expect("state");
+        assert_eq!(s.block_matches_gen, 2, "one bump per answer");
+        assert!(
+            matches!(&s.block_matches, Some(HostMessage::BlockMatches { query, .. }) if query == "cargo"),
+            "the later answer is the one standing"
+        );
     }
 
     #[test]

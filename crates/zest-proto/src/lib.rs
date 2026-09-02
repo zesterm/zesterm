@@ -42,6 +42,7 @@ pub mod frame;
 pub mod hex;
 pub mod ids;
 pub mod predict;
+pub mod search;
 
 pub use apply::{Applied, Applier};
 pub use auth::{AuthFailure, Nonce32, Pub32, Sig64};
@@ -54,6 +55,7 @@ pub use encode::{Encoder, Keyframe};
 pub use frame::{FrameError, FrameReader};
 pub use ids::{ClientId, HostId, SessionAddr, SessionId};
 pub use predict::{Key, Policy, Prediction, Predictor};
+pub use search::BlockMatch;
 
 /// Wire format version.
 ///
@@ -252,6 +254,27 @@ pub enum ClientMessage {
     /// client already has — anything attached can type `ls` into a shell —
     /// and it changes nothing: a listing is a question.
     ListDir { path: String },
+    /// Which command blocks on this host's sessions match `query`? (#527)
+    ///
+    /// Host-scoped like [`Self::ListDir`]: the connection is the routing, and
+    /// the fleet's answer is the client asking every host it holds a
+    /// connection to and merging what comes back. Answered by
+    /// [`HostMessage::BlockMatches`]; an old daemon answers its generic
+    /// could-not-understand `Error` and keeps serving (the `Enroll`
+    /// bargain). No more authority than the client already holds — an
+    /// attached client receives every block in a keyframe, and this returns
+    /// strictly less: never output text (ADR-015).
+    SearchBlocks {
+        /// Case-folded substring over the command line ([`search::Needle`]).
+        /// Empty means "the most recent `limit` blocks", which is what an
+        /// opening palette asks.
+        query: String,
+        /// Most matches wanted. Zero means the host's default; above the
+        /// host's cap it is the cap, and `truncated` says so — a caller's
+        /// bound is clamped, never trusted (ADR-015).
+        #[serde(default)]
+        limit: u32,
+    },
     /// Resend the whole state; this client cannot apply what it is being sent.
     ///
     /// Detach-and-reattach has the same effect and is what a client had to do
@@ -1054,10 +1077,38 @@ pub enum HostMessage {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         error: String,
     },
+    /// The answer to [`ClientMessage::SearchBlocks`] (#527).
+    ///
+    /// A reply, never a push, so no `Hello` flag — see
+    /// [`Self::DirListing`]. `query` echoes the question, which is the
+    /// correlation: a palette that has typed on since drops the stale answer
+    /// by comparing it. Only the query is echoed, not the limit — nothing
+    /// changes the limit between asks for one query, and accepting a
+    /// same-query answer with another limit is harmless where dropping it
+    /// would strand the rows.
+    BlockMatches {
+        query: String,
+        /// Newest first ([`search::rank`]), at most the clamped limit.
+        matches: Vec<BlockMatch>,
+        /// More matched than `matches` carries — said rather than silently
+        /// cut.
+        #[serde(default)]
+        truncated: bool,
+        /// How many live sessions were scanned. Zero with no matches is
+        /// "nothing to search", which must not read the same as "nothing
+        /// matched".
+        #[serde(default)]
+        sessions: u32,
+        /// Why there is no answer, when there is none for a reason. Empty
+        /// when the host simply has no matching block, which must not render
+        /// as a failure.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
     /// The answer to [`ClientMessage::GetConfig`] (#498).
     ///
-    /// A plain reply, not a push, so — like `DirListing`, `FileContents` and
-    /// `GitDiffResult` — **no `Hello` flag guards it**: a peer that cannot
+    /// A plain reply, not a push, so — like `DirListing`, `FileContents`,
+    /// `GitDiffResult` and `BlockMatches` — **no `Hello` flag guards it**: a peer that cannot
     /// decode this tag structurally never asks for it. `keys` and `profile`
     /// echo the question, which is the correlation; a client that moved on
     /// while a slow answer was in flight drops the stale one by comparing them.
@@ -2030,6 +2081,91 @@ mod tests {
         };
         let body = crate::frame::encode_body(&msg).expect("encode");
         assert_eq!(msg, crate::frame::decode::<HostMessage>(&body).expect("decode"));
+    }
+
+    #[test]
+    fn a_block_search_crosses_the_wire_intact() {
+        let ask = ClientMessage::SearchBlocks { query: "Cargo".into(), limit: 0 };
+        let body = crate::frame::encode_body(&ask).expect("encode");
+        assert_eq!(ask, crate::frame::decode::<ClientMessage>(&body).expect("decode"));
+
+        let msg = HostMessage::BlockMatches {
+            query: "Cargo".into(),
+            matches: vec![
+                BlockMatch {
+                    host: HostId::from_bytes([9; 32]),
+                    session: Some(SessionId(3)),
+                    block: 7,
+                    title: "zsh".into(),
+                    command: "cargo build --workspace".into(),
+                    cwd: "/home/a/p".into(),
+                    state: BlockState::Finished { exit_code: Some(101) },
+                    // Past u32 on purpose: epoch millis are, and a width that
+                    // silently narrowed would read as a date in 1970.
+                    started_ms: Some(1_756_800_000_000),
+                    ended_ms: Some(1_756_800_004_000),
+                    context: Some(delta::BlockContextPayload {
+                        branch: "main".into(),
+                        venv: String::new(),
+                        kube: String::new(),
+                    }),
+                    author: Some(ClientId::from_bytes([4; 32])),
+                },
+                // A stored block of a session that is gone: every option is
+                // its `None`, and each must come back as one rather than as a
+                // zero that looks like an id.
+                BlockMatch {
+                    host: HostId::from_bytes([9; 32]),
+                    session: None,
+                    block: 2,
+                    title: String::new(),
+                    command: "cargo test".into(),
+                    cwd: "/home/a/p".into(),
+                    state: BlockState::Finished { exit_code: None },
+                    started_ms: None,
+                    ended_ms: None,
+                    context: None,
+                    author: None,
+                },
+            ],
+            truncated: true,
+            sessions: 2,
+            error: String::new(),
+        };
+        let body = crate::frame::encode_body(&msg).expect("encode");
+        assert_eq!(msg, crate::frame::decode::<HostMessage>(&body).expect("decode"));
+    }
+
+    #[test]
+    fn a_minimal_block_matches_reply_decodes_through_its_defaults() {
+        // A host with nothing matching sends the tag, the echo and an empty
+        // list; everything else is a default. That is the *successful*
+        // reply, and the one nobody hand-tests.
+        let mut buf = Vec::new();
+        let mut s = rmp_serde::Serializer::new(&mut buf).with_struct_map();
+        use serde::Serialize as _;
+        #[derive(Serialize)]
+        struct Minimal<'a> {
+            t: &'a str,
+            query: &'a str,
+            matches: Vec<()>,
+        }
+        Minimal { t: "block_matches", query: "x", matches: Vec::new() }
+            .serialize(&mut s)
+            .expect("encode");
+
+        let back: HostMessage = crate::frame::decode(&buf).expect("decode");
+        assert_eq!(
+            back,
+            HostMessage::BlockMatches {
+                query: "x".into(),
+                matches: Vec::new(),
+                truncated: false,
+                sessions: 0,
+                error: String::new(),
+            },
+            "an empty answer is mostly absence, and absence has to decode"
+        );
     }
 
     #[test]

@@ -1709,3 +1709,61 @@ fn the_field_metadata_and_theme_roster_are_opt_in() {
         "while a slice that was not asked for stays absent: {typo}"
     );
 }
+
+/// The fleet search, against a real daemon: a block a shell finished on this
+/// machine is found by a case-folded query, named with its session so
+/// `output` can follow, and the answer says how many machines it came from.
+///
+/// The fleet stub carries a second machine nothing can reach; with no `host`
+/// the call must not go looking for it — `sessions`' rule, which is what
+/// keeps the cheapest calls in the surface cheap however large the fleet is.
+/// So `hosts_searched` is one, and the call returns well inside the dial's
+/// own timeout.
+#[test]
+fn search_blocks_answers_from_the_connected_hosts_and_dials_none() {
+    let (addr, registry) = serve_daemon();
+    let conn = dial(&addr, "zest-mcp agent");
+    let mut rows = vec![local_row(&conn)];
+    rows.push(zest_fleet::fixture::host(2, "elsewhere"));
+    let mut tools = zest_mcp::ToolSet::new(conn, Box::new(zest_mcp::StaticFleet::new(rows)));
+
+    // An echo of the markers: the block runs, prints and finishes without a
+    // shell integration in the loop. The bytes are embedded, never spelled
+    // as escapes (#285).
+    let osc = "\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}out\u{1b}]133;D;3\u{7}";
+    let command = if cfg!(windows) { format!("cmd.exe /c echo {osc}") } else { format!("/bin/echo {osc}") };
+    let created = tools
+        .call("create_session", &serde_json::json!({ "command": command, "cols": COLS, "rows": ROWS }))
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    let hit = loop {
+        let started = std::time::Instant::now();
+        let v = tools
+            .call("search_blocks", &serde_json::json!({ "query": "MAKE" }))
+            .expect("a search answers");
+        assert!(started.elapsed() < Duration::from_secs(5), "the unreachable machine was dialled: {v}");
+        assert_eq!(v["hosts_searched"], 1, "only the connected machine answers: {v}");
+        assert_eq!(v["unreadable"], serde_json::json!([]), "{v}");
+        let finished = v["matches"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|m| m["state"] == "finished")
+            .cloned();
+        if let Some(hit) = finished {
+            break hit;
+        }
+        assert!(std::time::Instant::now() < give_up, "the block never finished: {v}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(hit["command"], "make", "the query folded on the host: MAKE found make");
+    assert_eq!(hit["session"], session, "a live hit names the session `output` takes");
+    assert_eq!(hit["exit_code"], 3);
+    assert_eq!(hit["exit_code_source"], "shell_marker");
+    assert!(hit.get("output").is_none(), "never output text: {hit}");
+
+    let a = tools.resolver().resolve(&session).expect("the id this server minted");
+    registry.close(a.session);
+}

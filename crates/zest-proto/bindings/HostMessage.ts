@@ -2,6 +2,7 @@
 import type { AttentionCause } from "./AttentionCause";
 import type { AttrDef } from "./AttrDef";
 import type { AuthFailure } from "./AuthFailure";
+import type { BlockMatch } from "./BlockMatch";
 import type { BlockPayload } from "./BlockPayload";
 import type { ClientId } from "./ClientId";
 import type { ConfigField } from "./ConfigField";
@@ -275,6 +276,27 @@ untracked: Array<string>, untracked_truncated: boolean,
  * Why there is no diff, when there is none for a reason — not a
  * repository, or git did not answer. Empty when the tree is simply
  * clean, which must not render as a failure.
+ */
+error: string, } | { "t": "block_matches", query: string, 
+/**
+ * Newest first ([`search::rank`]), at most the clamped limit.
+ */
+matches: Array<BlockMatch>, 
+/**
+ * More matched than `matches` carries — said rather than silently
+ * cut.
+ */
+truncated: boolean, 
+/**
+ * How many live sessions were scanned. Zero with no matches is
+ * "nothing to search", which must not read the same as "nothing
+ * matched".
+ */
+sessions: number, 
+/**
+ * Why there is no answer, when there is none for a reason. Empty
+ * when the host simply has no matching block, which must not render
+ * as a failure.
  */
 error: string, } | { "t": "config_state", 
 /**

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use zest_core::{ChangeSource, Modes, Terminal, TermEvent};
 use zest_proto::delta::CursorState;
 use zest_proto::delta::Progress;
-use zest_proto::{AttentionCause, AttrDef, Delta, Encoder, Keyframe, RowPayload, SessionId};
+use zest_proto::{AttentionCause, AttrDef, BlockMatch, Delta, Encoder, HostId, Keyframe, RowPayload, SessionId};
 use zest_pty::{CommandSpec, PtySize, PtyTransport};
 
 use crate::DaemonError;
@@ -898,6 +898,33 @@ impl Session {
     #[must_use]
     pub fn facts_rev(&self) -> u64 {
         self.facts_rev.load(Ordering::Acquire)
+    }
+
+    /// The blocks of this session that match `query`, as the search wire
+    /// wants them (#527).
+    ///
+    /// Bounded on purpose: one terminal lock, one pass over the block index,
+    /// strings cloned only for hits. The pty reader takes the same lock per
+    /// parse chunk, so a search waits at most one chunk parse — and a `Vec`
+    /// rather than a closure over the index, because a closure hands the
+    /// caller the lock for however long it runs.
+    ///
+    /// A block still at its prompt has no command and is not a hit; neither
+    /// is a finished block whose command is blank, which is what pwsh makes
+    /// of an empty Enter (#193). A running block *is*: the palette labels it
+    /// `running`, and "what is building on the Mac right now" is a search.
+    #[must_use]
+    pub fn blocks_matching(&self, host: HostId, query: &zest_proto::search::Needle) -> Vec<BlockMatch> {
+        let title = self.title();
+        let Ok(term) = self.terminal.lock() else { return Vec::new() };
+        term.blocks()
+            .blocks()
+            .iter()
+            .filter(|b| !matches!(b.state, zest_core::BlockState::Prompt))
+            .filter(|b| !b.command.trim().is_empty())
+            .filter(|b| query.matches(&b.command))
+            .map(|b| BlockMatch::from_block(host, Some(self.id), &title, b))
+            .collect()
     }
 
     /// Whether a command is running, by the tail block's word.

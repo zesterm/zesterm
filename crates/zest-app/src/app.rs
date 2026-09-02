@@ -1335,6 +1335,64 @@ fn clip_row(text: &str) -> String {
     format!("{cut}\u{2026}")
 }
 
+/// Block rows on an empty filter: a glance, so Sessions and Hosts stay above
+/// the fold.
+const PALETTE_BLOCKS_IDLE: usize = 6;
+/// Block rows once something is typed: a list, and the panel scrolls.
+const PALETTE_BLOCKS_FILTERED: usize = 24;
+
+/// The query row's fact (#527): hosts that have *answered* the query the
+/// palette shows, over the hosts the question reached. An in-process shell
+/// is this machine, searched by reading its replica directly.
+fn hosts_searched(
+    view: Option<&crate::fleet::BlockSearchView>,
+    query: &str,
+    in_process: bool,
+) -> crate::chrome::model::HostsSearched {
+    let (answered, asked) = match view {
+        Some(v) if v.query == query => (v.answered.len(), v.asked),
+        _ => (0, 0),
+    };
+    let own = usize::from(in_process);
+    crate::chrome::model::HostsSearched { answered: answered + own, asked: asked + own }
+}
+
+#[cfg(test)]
+mod hosts_searched_tests {
+    use super::hosts_searched;
+    use crate::chrome::model::HostsSearched;
+    use crate::fleet::BlockSearchView;
+
+    /// The number beside the list used to be the fleet listing's length
+    /// while the list came from attached tabs. It is now the hosts that
+    /// answered *this* query — not the fleet, not an older query's answers,
+    /// not a host the question never reached.
+    #[test]
+    fn hosts_searched_counts_answers_not_known_hosts() {
+        let host = |n: u8| zest_proto::HostId::from_bytes([n; 32]);
+        let view = BlockSearchView {
+            query: "cargo".into(),
+            asked: 3,
+            answered: vec![(host(1), Vec::new()), (host(2), Vec::new())],
+        };
+        assert_eq!(
+            hosts_searched(Some(&view), "cargo", false),
+            HostsSearched { answered: 2, asked: 3 },
+            "two of the three asked have spoken; the third is pending, not searched"
+        );
+        assert_eq!(
+            hosts_searched(Some(&view), "cargo b", false),
+            HostsSearched { answered: 0, asked: 0 },
+            "answers to an older query say nothing about this one"
+        );
+        assert_eq!(
+            hosts_searched(None, "", true),
+            HostsSearched { answered: 1, asked: 1 },
+            "no daemon at all, and an in-process shell: this machine, searched by hand"
+        );
+    }
+}
+
 #[derive(Clone)]
 enum PickerAction {
     /// A group label or an empty-state row; Enter does nothing.
@@ -5887,7 +5945,6 @@ impl App {
         }
         // Built before the font borrow below: row construction reads the
         // fleet and the tabs, never the fonts.
-        let hosts_searched = self.shared.fleet.get().map_or(0, |f| f.snapshot().len());
         let anim = self.anim_phase();
         let caret_on = anim.caret_on;
         let early_geometry = self.window.as_ref().map(|w| {
@@ -5895,7 +5952,7 @@ impl App {
             (scale, w.inner_size())
         });
         let picker_rows = self.picker.is_some().then(|| self.build_picker());
-        let picker_model = picker_rows.map(|(rows, actions)| {
+        let picker_model = picker_rows.map(|(rows, actions, hosts_searched)| {
             let state = self.picker.as_mut().expect("is_some gated the build");
             state.actions = actions;
             state.selected = state.selected.min(rows.len().saturating_sub(1));
@@ -7467,6 +7524,7 @@ impl App {
 
     /// Toggle the fleet picker (⌘K, and the picker rows' Escape hatch).
     fn toggle_picker(&mut self) {
+        let opening = self.picker.is_none();
         self.picker = match self.picker {
             Some(_) => None,
             None => {
@@ -7487,6 +7545,14 @@ impl App {
                 })
             }
         };
+        // The Blocks group is the fleet's answer, so ask on the way in: an
+        // empty query is "the most recent", which is what an opening
+        // palette shows.
+        if opening {
+            if let Some(fleet) = self.shared.fleet.get() {
+                fleet.search_blocks("");
+            }
+        }
         self.mark_chrome_dirty();
     }
 
@@ -8939,7 +9005,10 @@ impl App {
     /// One pass builds both lists, which is what keeps a drawn row and its
     /// meaning aligned by construction — the hit map's discipline, applied
     /// to indices.
-    fn build_picker(&self) -> (Vec<crate::chrome::model::PickerRow>, Vec<PickerAction>) {
+    fn build_picker(
+        &self,
+    ) -> (Vec<crate::chrome::model::PickerRow>, Vec<PickerAction>, crate::chrome::model::HostsSearched)
+    {
         use crate::chrome::model::PickerRow;
         use crate::fleet::SessionsState;
 
@@ -8952,71 +9021,99 @@ impl App {
             .unwrap_or_default();
         let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(&filter);
 
+        let fleet_hosts = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
+
         // Blocks first — the palette is primarily a history of what ran
-        // anywhere in the fleet (design screen 6). Gathered from every
-        // attached tab; unattached sessions' history has not crossed the
-        // wire and pretending otherwise would be a lie with a scrollbar.
+        // anywhere in the fleet (design screen 6). The rows are every
+        // reachable host's answer to the filter (`FleetModel::search_blocks`,
+        // asked on every keystroke), merged newest first. Until a host has
+        // answered, the blocks this window's own replicas hold for it stand
+        // in, and yield the moment it speaks — `zest_fleet::merge_matches`
+        // owns that rule. An in-process shell has no daemon to answer for it
+        // and is seed for good.
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
-        let mut history: Vec<(u64, PickerRow, PickerAction)> = Vec::new();
+        let query = self.picker.as_ref().map(|p| p.filter.text().to_string()).unwrap_or_default();
+        let view = self.shared.fleet.get().map(|f| f.block_matches());
+        let answers: Vec<(zest_proto::HostId, Vec<zest_proto::BlockMatch>)> = match &view {
+            Some(v) if v.query == query => v.answered.clone(),
+            _ => Vec::new(),
+        };
+        let needle = zest_proto::search::Needle::new(&query);
+        let mut seed = Vec::new();
+        let mut in_process = false;
         for tab in self.tabs.iter() {
-            let host = match tab.source().origin() {
-                Origin::Daemon { host, local: false } => host,
-                _ => String::new(),
-            };
+            if crate::tabs::is_placeholder_host(tab.addr.host) {
+                in_process = true;
+            }
             let term = tab.source().terminal();
             let term = term.lock();
-            for b in term.blocks().blocks() {
-                let command = b.command.trim();
-                if command.is_empty() || b.output_line.is_none() || !matches(command) {
-                    continue;
-                }
-                let when = b.ended_ms.or(b.started_ms).unwrap_or(0);
-                let ago = match b.ended_ms {
-                    _ if b.is_running() => "running".to_string(),
-                    Some(e) => {
-                        crate::status::age_label(std::time::Duration::from_millis(
-                            now_ms.saturating_sub(e),
-                        )) + " ago"
-                    }
-                    None => String::new(),
+            seed.extend(
+                term.blocks()
+                    .blocks()
+                    .iter()
+                    .filter(|b| !matches!(b.state, zest_core::BlockState::Prompt))
+                    .filter(|b| !b.command.trim().is_empty())
+                    .filter(|b| needle.matches(&b.command))
+                    .map(|b| {
+                        zest_proto::BlockMatch::from_block(
+                            tab.addr.host,
+                            Some(tab.addr.session),
+                            "",
+                            b,
+                        )
+                    }),
+            );
+        }
+        let hosts_searched = hosts_searched(view.as_ref(), &query, in_process);
+        // A glance on an empty filter, so Sessions and Hosts stay above the
+        // fold; a real list once something is typed (the panel scrolls).
+        let cap = if query.is_empty() { PALETTE_BLOCKS_IDLE } else { PALETTE_BLOCKS_FILTERED };
+        let history = zest_fleet::merge_matches(&answers, &seed, cap);
+        // By id, never by label (#304): the window's own machine says
+        // nothing, as its tabs never did.
+        let label_of = |host: zest_proto::HostId| -> String {
+            if crate::tabs::is_placeholder_host(host) {
+                return String::new();
+            }
+            match fleet_hosts.iter().find(|h| h.host == host) {
+                Some(h) if h.local => String::new(),
+                Some(h) => h.label.clone(),
+                None => host.short(),
+            }
+        };
+        if !history.is_empty() {
+            rows.push(PickerRow::Group { title: "Blocks".into() });
+            actions.push(PickerAction::None);
+            for m in &history {
+                let command = m.command.trim().to_string();
+                let ago = match (m.state, m.ended_ms) {
+                    (zest_proto::BlockState::Running, _) => "running".to_string(),
+                    (_, Some(e)) => crate::status::age_words(std::time::Duration::from_millis(
+                        now_ms.saturating_sub(e),
+                    )),
+                    (_, None) => String::new(),
                 };
-                let outcome = match b.state {
-                    zest_core::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
-                    zest_core::BlockState::Finished { exit_code: None } => "done".to_string(),
+                let outcome = match m.state {
+                    zest_proto::BlockState::Finished { exit_code: Some(c) } => format!("exit {c}"),
+                    zest_proto::BlockState::Finished { exit_code: None } => "done".to_string(),
                     _ => String::new(),
                 };
+                let host = label_of(m.host);
                 let provenance = [host.as_str(), ago.as_str(), outcome.as_str()]
                     .iter()
                     .filter(|p| !p.is_empty())
                     .copied()
                     .collect::<Vec<_>>()
                     .join(" \u{b7} ");
-                history.push((
-                    when,
-                    PickerRow::Block {
-                        command: command.to_string(),
-                        provenance,
-                        ok: !b.failed(),
-                    },
-                    PickerAction::RunBlock { command: command.to_string() },
-                ));
-            }
-        }
-        history.sort_by(|a, b| b.0.cmp(&a.0));
-        let cap = if filter.is_empty() { 4 } else { 8 };
-        if !history.is_empty() {
-            rows.push(PickerRow::Group { title: "Blocks".into() });
-            actions.push(PickerAction::None);
-            for (_, row, action) in history.into_iter().take(cap) {
-                rows.push(row);
-                actions.push(action);
+                let ok = !matches!(m.state, zest_proto::BlockState::Finished { exit_code: Some(c) } if c != 0);
+                rows.push(PickerRow::Block { command: command.clone(), provenance, ok });
+                actions.push(PickerAction::RunBlock { command });
             }
         }
 
         // Sessions and hosts, from the fleet.
-        let fleet_hosts = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
         let mut session_rows = Vec::new();
         let mut host_rows = Vec::new();
         for host in &fleet_hosts {
@@ -9158,7 +9255,7 @@ impl App {
             actions.push(PickerAction::None);
         }
 
-        (rows, actions)
+        (rows, actions, hosts_searched)
     }
 
     /// Act on a picker row.
@@ -12757,7 +12854,25 @@ impl App {
             Some(StartScreen::Fleet) => self.show_screen(AppScreen::Fleet),
             Some(StartScreen::Themes) => self.show_screen(AppScreen::Themes),
             Some(StartScreen::Settings) => self.open_settings_tab(),
-            Some(StartScreen::Palette) => self.toggle_picker(),
+            Some(StartScreen::Palette) => {
+                self.toggle_picker();
+                // A picture of the palette is a picture of its Blocks group,
+                // and at first paint an ordinary shell has run nothing. Say
+                // so rather than photograph a complete-looking palette with
+                // no history (#236's rule); a transcript fed through `-e`
+                // that emits the OSC 133 markers is how to get one.
+                let ran_anything = self.tabs.iter().any(|t| {
+                    let term = t.source().terminal();
+                    let term = term.lock();
+                    term.blocks().blocks().iter().any(|b| !b.command.trim().is_empty())
+                });
+                if !ran_anything {
+                    tracing::warn!(
+                        "--screen palette: no command has run in this session yet, so the \
+                         picture shows the palette without a Blocks group"
+                    );
+                }
+            }
             Some(StartScreen::DirPicker) => {
                 // The session's shell has not reported a cwd yet this early;
                 // the process's own is the honest stand-in, and in-process
@@ -13465,12 +13580,21 @@ impl App {
                     if let Some(cmd) = command_for(&event.logical_key, self.modifiers) {
                         let pasted = self.paste_text(&cmd);
                         let mut copied = None;
+                        let mut asked = None;
                         if let Some(p) = self.picker.as_mut() {
                             let out = p.filter.apply(cmd, pasted.as_deref());
                             if out.changed {
                                 p.selected = 0;
+                                asked = Some(p.filter.text().to_string());
                             }
                             copied = out.copied;
+                        }
+                        // Only a *changed* filter asks the fleet again — an
+                        // arrow or a copy chord leaves the answers standing.
+                        if let Some(query) = asked {
+                            if let Some(fleet) = self.shared.fleet.get() {
+                                fleet.search_blocks(&query);
+                            }
                         }
                         if let Some(text) = copied {
                             self.set_clipboard(text);

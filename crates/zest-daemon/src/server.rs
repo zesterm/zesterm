@@ -388,6 +388,16 @@ impl Registry {
         out
     }
 
+    /// Every session's handle, cloned out.
+    ///
+    /// For a caller that has to take each session's own lock — a block
+    /// search takes the terminal's — with the registry lock already released,
+    /// the order `remove` argues for below.
+    #[must_use]
+    pub fn sessions(&self) -> Vec<Arc<Session>> {
+        self.sessions.lock().expect("registry lock").values().cloned().collect()
+    }
+
     /// Drop a session and end its child.
     ///
     /// The hangup is explicit and happens **outside** the registry lock. Two
@@ -1389,6 +1399,10 @@ impl Connection {
                 vec![list_dir(&path)]
             }
 
+            ClientMessage::SearchBlocks { query, limit } => {
+                vec![search_blocks(&self.registry, self.config.host, &query, limit)]
+            }
+
             ClientMessage::CreateSession { command, cwd, cols, rows, env, profile } => {
                 let mut spec = CommandSpec::default_shell();
                 if !command.is_empty() {
@@ -2378,6 +2392,34 @@ fn ensure_profile_dir(ctx: &zest_config::profiles::ExpandContext, env: &[(String
 fn home_dir() -> Option<std::path::PathBuf> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(key).filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+}
+
+/// Answer [`ClientMessage::SearchBlocks`] (#527): every block on this host's
+/// live sessions whose command matches, newest first, clamped and honest
+/// about the clamp.
+///
+/// Inline, like `list_dir`, and unlike `GitDiff`'s worker: `Registry::list`
+/// already takes three terminal locks per session inline on every listing,
+/// and a block index is a small side table bounded by scrollback eviction.
+/// `GitDiff` defers because a subprocess has unbounded latency; nothing here
+/// does. Sessions on the alternate screen are searched too — a block index
+/// survives `vim`, and a command launched from one is still history.
+pub fn search_blocks(registry: &Registry, host: HostId, query: &str, limit: u32) -> HostMessage {
+    let sessions = registry.sessions();
+    let needle = zest_proto::search::Needle::new(query);
+    let mut matches: Vec<zest_proto::BlockMatch> =
+        sessions.iter().flat_map(|s| s.blocks_matching(host, &needle)).collect();
+    zest_proto::search::rank(&mut matches);
+    let cap = zest_proto::search::clamp_limit(limit);
+    let truncated = matches.len() > cap;
+    matches.truncate(cap);
+    HostMessage::BlockMatches {
+        query: query.to_string(),
+        matches,
+        truncated,
+        sessions: u32::try_from(sessions.len()).unwrap_or(u32::MAX),
+        error: String::new(),
+    }
 }
 
 pub fn list_dir(path: &str) -> HostMessage {
@@ -4538,6 +4580,149 @@ mod tests {
         assert_eq!(ctx.venv, "ml", "the venv is the shell's word, carried along");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The finished block a shell's OSC 133 markers describe, as a search
+    /// answers it — asked over the wire and checked by value (#299's rule),
+    /// because every layer between (core state, the session accessor, the
+    /// fold, the rank, the clamp) can be individually right while the chain
+    /// answers nothing.
+    fn search_session_command() -> String {
+        // `echo` of the markers, so the block runs, prints and finishes in
+        // one chunk. No backslash escapes in the command line: the splitter
+        // eats them inside double quotes (#285), so the bytes are embedded.
+        let osc = "\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}make\u{1b}]133;C\u{7}out\u{1b}]133;D;3\u{7}";
+        if cfg!(windows) { format!("cmd.exe /c echo {osc}") } else { format!("/bin/echo {osc}") }
+    }
+
+    fn finished_matches(registry: &Registry, host: HostId, query: &str) -> Vec<zest_proto::BlockMatch> {
+        match search_blocks(registry, host, query, 0) {
+            HostMessage::BlockMatches { matches, .. } => matches
+                .into_iter()
+                .filter(|m| matches!(m.state, zest_proto::delta::BlockState::Finished { .. }))
+                .collect(),
+            other => panic!("not a search answer: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_can_search_the_blocks_of_every_session_on_this_host() {
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: search_session_command(),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                profile: String::new(),
+            },
+        );
+        let host = config().host;
+        assert!(
+            wait_for(|| !finished_matches(&registry, host, "make").is_empty()),
+            "the 133;D never finished the block, so nothing after this is about search"
+        );
+
+        // Uppercase on purpose: the fold has to happen on the host, not in
+        // whatever test helper built the query.
+        let out = peer.send(&mut c, &ClientMessage::SearchBlocks { query: "MAKE".into(), limit: 0 });
+        let Some(HostMessage::BlockMatches { query, matches, truncated, sessions, error }) =
+            out.into_iter().find(|m| matches!(m, HostMessage::BlockMatches { .. }))
+        else {
+            panic!("no answer to the search");
+        };
+        assert_eq!(query, "MAKE", "the echo is the correlation");
+        assert!(error.is_empty(), "a plain answer carries no error: {error}");
+        assert!(!truncated);
+        assert_eq!(sessions, 1, "one session was scanned, and the answer says so");
+        let hit = matches.iter().find(|m| m.command == "make").expect("the block that ran make");
+        assert_eq!(hit.host, host);
+        assert_eq!(hit.session, Some(registry.list(host)[0].addr.session), "a live block names its session");
+        assert_eq!(
+            hit.state,
+            zest_proto::delta::BlockState::Finished { exit_code: Some(3) },
+            "the exit code is the shell's word from 133;D"
+        );
+        assert!(hit.ended_ms.is_some(), "a finished block carries the host's end stamp");
+        assert!(
+            finished_matches(&registry, host, "nothing-ran-this").is_empty(),
+            "a query that matches no command is an empty answer, not every block"
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_ran_nothing_is_not_a_search_hit() {
+        // #193: an empty Enter, a ^C, a resize is a `133;A` on its own, and a
+        // drag is dozens of them. None of them ran anything, so none of them
+        // is history — but the session was scanned and the answer says so.
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let osc = "\u{1b}]133;A\u{7}$ ";
+        let command = if cfg!(windows) { format!("cmd.exe /c echo {osc}") } else { format!("/bin/echo {osc}") };
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                profile: String::new(),
+            },
+        );
+        let host = config().host;
+        assert!(
+            wait_for(|| registry.get(SessionId(1)).is_some_and(|s| s.has_exited())),
+            "the echo never exited"
+        );
+        let HostMessage::BlockMatches { matches, sessions, .. } = search_blocks(&registry, host, "", 0)
+        else {
+            panic!("not a search answer");
+        };
+        assert!(matches.is_empty(), "a prompt block has no command to match: {matches:?}");
+        assert_eq!(sessions, 1, "scanned, and found nothing — which is not \"nothing to scan\"");
+    }
+
+    #[test]
+    fn a_search_is_capped_and_says_so() {
+        // Two blocks in one session, a limit of one: the newest comes back,
+        // and `truncated` is the difference between "one matched" and "one
+        // was shown" — a caller reading a short list as the whole history is
+        // the bug this field exists to prevent.
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let osc = "\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}first\u{1b}]133;C\u{7}\u{1b}]133;D;0\u{7}\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}second\u{1b}]133;C\u{7}\u{1b}]133;D;0\u{7}";
+        let command = if cfg!(windows) { format!("cmd.exe /c echo {osc}") } else { format!("/bin/echo {osc}") };
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command,
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                profile: String::new(),
+            },
+        );
+        let host = config().host;
+        assert!(
+            wait_for(|| finished_matches(&registry, host, "").len() == 2),
+            "both blocks never finished"
+        );
+        let HostMessage::BlockMatches { matches, truncated, .. } = search_blocks(&registry, host, "", 1)
+        else {
+            panic!("not a search answer");
+        };
+        assert_eq!(matches.len(), 1);
+        assert!(truncated, "one of two shown has to say so");
+        assert_eq!(matches[0].command, "second", "newest first, by the block's own end stamp");
+        let HostMessage::BlockMatches { truncated, .. } = search_blocks(&registry, host, "", 0) else {
+            panic!("not a search answer");
+        };
+        assert!(!truncated, "the default limit holds both");
     }
 
     #[test]

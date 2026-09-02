@@ -41,6 +41,24 @@ pub fn age_label(elapsed: std::time::Duration) -> String {
     }
 }
 
+/// "now", "2m ago", "12h ago", "yesterday", "3d ago" — the palette's
+/// provenance (#527). [`age_label`]'s coarseness with the word the design
+/// mock uses for one day: a history row reads as prose where the sidebar's
+/// column reads as a number, and "1d ago" is a number pretending to be one.
+#[must_use]
+pub fn age_words(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        "now".to_string()
+    } else if secs < 86_400 {
+        format!("{} ago", age_label(elapsed))
+    } else if secs < 2 * 86_400 {
+        "yesterday".to_string()
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
 fn dirs_home() -> Option<String> {
     std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()).filter(|h| !h.is_empty())
 }
@@ -48,6 +66,19 @@ fn dirs_home() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mock says `yesterday`, and the day after must not: "2d ago" is
+    /// the same coarseness the sidebar already promises.
+    #[test]
+    fn one_day_is_yesterday_and_two_is_2d_ago() {
+        let d = std::time::Duration::from_secs;
+        assert_eq!(age_words(d(5)), "now");
+        assert_eq!(age_words(d(120)), "2m ago");
+        assert_eq!(age_words(d(3 * 3600)), "3h ago");
+        assert_eq!(age_words(d(86_400)), "yesterday");
+        assert_eq!(age_words(d(2 * 86_400 - 1)), "yesterday");
+        assert_eq!(age_words(d(2 * 86_400)), "2d ago");
+    }
 
     #[test]
     fn home_shortening_never_bites_mid_component() {

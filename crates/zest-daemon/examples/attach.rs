@@ -376,7 +376,8 @@ fn run<R: Read + Send + 'static, W: Write + Send + 'static>(
                 | HostMessage::FileWritten { .. }
                 | HostMessage::GitDiffResult { .. }
                 | HostMessage::ConfigState { .. }
-                | HostMessage::ConfigWritten { .. } => {}
+                | HostMessage::ConfigWritten { .. }
+                | HostMessage::BlockMatches { .. } => {}
 
                 HostMessage::Challenge { host, label, nonce, dh, signature, version } => {
                     eprintln!("[attach] host {} ({label}) challenged", host.short());

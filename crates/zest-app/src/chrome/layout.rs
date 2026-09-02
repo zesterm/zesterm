@@ -1296,8 +1296,11 @@ fn picker_overlay(
             ));
         }
         let hosts = match picker.hosts_searched {
-            1 => "1 host searched".to_string(),
-            n => format!("{n} hosts searched"),
+            crate::chrome::model::HostsSearched { answered, asked } if answered < asked => {
+                format!("{answered} of {asked} hosts searched")
+            }
+            crate::chrome::model::HostsSearched { answered: 1, .. } => "1 host searched".to_string(),
+            crate::chrome::model::HostsSearched { answered: n, .. } => format!("{n} hosts searched"),
         };
         let hw = measure(&hosts, UI_STATUS * s, false, 0.0);
         out.texts.push(TextRun {
@@ -4834,7 +4837,7 @@ mod tests {
             filter_caret: Default::default(),
             scroll: 0.0,
             ensure_visible: false,
-            hosts_searched: 4,
+            hosts_searched: crate::chrome::model::HostsSearched { answered: 4, asked: 4 },
             caret_on: true,
         });
         let l = layout(&mo, &colors(), &m, &mut measure);

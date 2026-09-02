@@ -116,7 +116,19 @@ watch_signals: boolean,
  * gate against one that stays quiet; `zest_daemon::auth::Auth` carries
  * the rest of that argument.
  */
-agent: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
+agent: boolean, } | { "t": "auth", signature: Sig64, } | { "t": "pairing_decision", client: ClientId, approve: boolean, } | { "t": "enroll", code: string, } | { "t": "list_dir", path: string, } | { "t": "search_blocks", 
+/**
+ * Case-folded substring over the command line ([`search::Needle`]).
+ * Empty means "the most recent `limit` blocks", which is what an
+ * opening palette asks.
+ */
+query: string, 
+/**
+ * Most matches wanted. Zero means the host's default; above the
+ * host's cap it is the cap, and `truncated` says so — a caller's
+ * bound is clamped, never trusted (ADR-015).
+ */
+limit: number, } | { "t": "request_keyframe", session: SessionAddr, } | { "t": "list_sessions" } | { "t": "create_session", 
 /**
  * Empty means the host's default shell.
  */
