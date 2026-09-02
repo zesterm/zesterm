@@ -172,6 +172,30 @@ impl CommandSpec {
         }
     }
 
+    /// The environment a child spawned right now would actually see.
+    ///
+    /// This process's environment with [`Self::env`] applied in order, empty
+    /// values removing rather than blanking — the same rules both pty backends
+    /// follow, in one place so a caller cannot get a *different* answer from
+    /// the one the child gets.
+    ///
+    /// Exists because "read the process environment" is not the same question:
+    /// [`terminal_env`] clears another terminal's stale identity, and shell
+    /// integration injects `ZDOTDIR`. A value resolved against `std::env`
+    /// would name variables the child will not have and miss ones it will.
+    #[must_use]
+    pub fn effective_env(&self) -> std::collections::BTreeMap<String, String> {
+        let mut out: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        for (key, value) in &self.env {
+            if value.is_empty() {
+                out.remove(key);
+            } else {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+        out
+    }
+
     /// The keys [`Self::enable_shell_integration`] added, given the length
     /// [`Self::env`] had before it ran.
     ///

@@ -1427,20 +1427,35 @@ impl Connection {
                 // path every ordinary session actually takes. Until #488 the
                 // daemon applied neither, so `shell.env` was a setting that
                 // did nothing outside `--no-daemon`.
-                let configured = settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone()));
+                // This machine's `shell.env` first, on its own, so that the
+                // environment the launch's `${env:…}` reads is the one the
+                // child will really have -- host entries included, and with
+                // `terminal_env`'s clears and the shell-integration injection
+                // already applied. Reading `std::env` instead would answer for
+                // variables the child does not get and miss ones it does.
+                spec.layer_env(
+                    settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone())),
+                    &injected,
+                );
                 // The launch's values arrive unexpanded and are resolved
                 // *here*, against this machine's directories, which is what
                 // lets one profile mean the same thing on every machine in the
                 // fleet -- `${profile_dir}` on the Mac that wrote the profile
                 // and on the Linux box it is launched at are different paths
-                // and the same idea. Only the launch's own entries expand;
-                // `shell.env` has no profile in scope to resolve against.
-                let ctx = launch_expand_context(&profile);
-                let launched = env.into_iter().map(|(k, v)| {
-                    let v = zest_config::profiles::expand(&v, &ctx);
-                    (k, v)
-                });
-                spec.layer_env(configured.chain(launched), &injected);
+                // and the same idea.
+                //
+                // Taken before the launch's own entries are layered, which is
+                // what makes "`${env:…}` never reads a sibling" true by
+                // construction rather than by rule.
+                let ctx = launch_expand_context(&profile, spec.effective_env());
+                let launched: Vec<(String, String)> = env
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let v = zest_config::profiles::expand(&v, &ctx);
+                        (k, v)
+                    })
+                    .collect();
+                spec.layer_env(launched, &injected);
                 // Made once the values are final, and only when something
                 // actually names it: a launch that never mentions
                 // `${profile_dir}` must not leave a directory behind on every
@@ -2295,11 +2310,15 @@ const LIST_DIR_CAP: usize = 500;
 /// with *why* rather than an empty success: an empty directory and a
 /// refused one must not render the same.
 /// Where a launch's placeholders resolve on *this* machine.
-fn launch_expand_context(profile: &str) -> zest_config::profiles::ExpandContext {
+fn launch_expand_context(
+    profile: &str,
+    env: std::collections::BTreeMap<String, String>,
+) -> zest_config::profiles::ExpandContext {
     zest_config::profiles::ExpandContext {
         profile: profile.to_string(),
         config_dir: zest_config::paths::config_dir(),
         home: home_dir(),
+        env,
     }
 }
 

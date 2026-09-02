@@ -2581,7 +2581,10 @@ impl App {
     pub(crate) fn open_tab(&mut self, open: &TabOpen) {
         match open {
             TabOpen::Shell { command, cwd } => {
-                self.open_shell_tab(command.clone(), None, cwd.clone());
+                // A plain shell, so no profile and no profile environment.
+                // `TabOpen::Profile` below is the arm that carries one, and it
+                // goes through `launch_profile` to get it.
+                self.open_shell_tab(command.clone(), None, cwd.clone(), Vec::new());
             }
             TabOpen::Profile(name) => self.launch_profile(name),
             TabOpen::Settings => self.open_settings_tab(),
@@ -8053,8 +8056,26 @@ impl App {
 
     /// A list item's ×: fonts and tags lose the item, an env entry loses its
     /// key. The whole new value goes through `apply_edit` — no second path.
+    ///
+    /// **Both editors, dispatched on which tab is showing.** The profiles
+    /// editor draws its controls with the same `ss::draw_control`, so a
+    /// KeyValue row there pushes the same `SettingsListAdd`/`Remove` regions —
+    /// and while this read `settings_ui` unconditionally, those chips drew and
+    /// did nothing on the profiles tab. A control that silently does nothing
+    /// is the #272 class; the §12 `env` row was shipping as one (#496).
     fn remove_list_item(&mut self, row: usize, item: usize) {
-        use zest_config::ui::Widget;
+        if self.profiles_tab_active() {
+            let Some(idx) = self.profiles_field_of_row(row) else { return };
+            let Some(widget) =
+                self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+            else {
+                return;
+            };
+            let Some(current) = self.profiles_value_of(idx) else { return };
+            let Some(next) = list_value_without(widget, &current, item) else { return };
+            self.profiles_apply_edit(idx, next);
+            return;
+        }
         let Some(idx) = self.settings_field_of_row(row) else { return };
         let Some(widget) =
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
@@ -8062,24 +8083,7 @@ impl App {
             return;
         };
         let Some(current) = self.settings_value_of(idx) else { return };
-        let next = match widget {
-            Widget::FontList | Widget::TagList => {
-                let mut arr = current.as_array().cloned().unwrap_or_default();
-                if item >= arr.len() {
-                    return;
-                }
-                arr.remove(item);
-                serde_json::Value::Array(arr)
-            }
-            Widget::KeyValue => {
-                let Some(map) = current.as_object() else { return };
-                let Some(key) = map.keys().nth(item).cloned() else { return };
-                let mut map = map.clone();
-                map.remove(&key);
-                serde_json::Value::Object(map)
-            }
-            _ => return,
-        };
+        let Some(next) = list_value_without(widget, &current, item) else { return };
         self.apply_edit(idx, next);
     }
 
@@ -8088,6 +8092,29 @@ impl App {
     /// appends.
     fn begin_list_add(&mut self, row: usize) {
         use zest_config::ui::Widget;
+        if self.profiles_tab_active() {
+            if !self.profiles_commit_edit() {
+                return;
+            }
+            let Some(idx) = self.profiles_field_of_row(row) else { return };
+            let widget =
+                self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget);
+            // No `FontList` arm: §12 offers no roster field, and opening the
+            // Settings roster menu from here would edit the wrong document.
+            if widget == Some(Widget::KeyValue) || widget == Some(Widget::TagList) {
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.selected = row;
+                    ui.editing = Some(crate::settings_ui::EditBuffer {
+                        field_idx: idx,
+                        buffer: TextField::default(),
+                        error: false,
+                        append: true,
+                    });
+                }
+            }
+            self.mark_chrome_dirty();
+            return;
+        }
         if !self.settings_commit_edit() {
             return;
         }
@@ -8124,39 +8151,27 @@ impl App {
     /// value, which *unsets* under the wholesale-replace semantics. Returns
     /// false when the input cannot be an entry (shown as a buffer error).
     fn commit_list_append(&mut self, idx: usize, text: &str) -> bool {
-        use zest_config::ui::Widget;
-        let Some(widget) =
+        let profiles = self.profiles_tab_active();
+        let widget = if profiles {
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        } else {
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
-        else {
-            return false;
         };
+        let Some(widget) = widget else { return false };
         let text = text.trim();
         if text.is_empty() {
             // Committing nothing is closing the buffer, not an error.
             return true;
         }
-        let Some(current) = self.settings_value_of(idx) else { return false };
-        let next = match widget {
-            Widget::TagList => {
-                let mut arr = current.as_array().cloned().unwrap_or_default();
-                arr.push(serde_json::Value::String(text.to_string()));
-                serde_json::Value::Array(arr)
-            }
-            Widget::KeyValue => {
-                let (key, value) = match text.split_once('=') {
-                    Some((k, v)) => (k.trim(), v.trim()),
-                    None => (text, ""),
-                };
-                if key.is_empty() {
-                    return false;
-                }
-                let mut map = current.as_object().cloned().unwrap_or_default();
-                map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
-                serde_json::Value::Object(map)
-            }
-            _ => return false,
-        };
-        self.apply_edit(idx, next);
+        let current =
+            if profiles { self.profiles_value_of(idx) } else { self.settings_value_of(idx) };
+        let Some(current) = current else { return false };
+        let Some(next) = list_value_with(widget, &current, text) else { return false };
+        if profiles {
+            self.profiles_apply_edit(idx, next);
+        } else {
+            self.apply_edit(idx, next);
+        }
         true
     }
 
@@ -8564,13 +8579,13 @@ impl App {
                 self.profiles_apply_edit(idx, value);
                 true
             }
-            // Unreachable: the add-chip is a Settings affordance, and nothing
-            // in the profiles editor opens a buffer with `append` set. Said
-            // out loud rather than swallowed, because a §12 list field would
-            // otherwise arrive as an Enter that silently does nothing (#272).
-            crate::settings_ui::Pending::Append(idx, _) => {
-                self.profiles_report(format!("this field cannot be appended to (field {idx})"));
-                false
+            // Reachable since §12 grew `env` (#496): `begin_list_add` opens
+            // an append buffer on this tab too, and its Enter lands here.
+            // Kept as an explicit arm rather than folded in, because the
+            // *reason* it was unreachable — no profiles field was a list —
+            // stopped being true, and a swallowed Enter is #272 again.
+            crate::settings_ui::Pending::Append(idx, text) => {
+                self.commit_list_append(idx, &text)
             }
         }
     }
@@ -10077,10 +10092,15 @@ impl App {
                 // nobody else to resolve `${profile_dir}` against, and the
                 // answer has to be the same one the daemon would give or the
                 // two paths would put a profile's files in two places.
+                // Taken after `build_spec` has applied `shell.env` and the
+                // integration hook, so `${env:…}` reads what the child will
+                // really have -- and before this profile's own entries, which
+                // is what makes "never a sibling" structural.
                 let ctx = zest_config::profiles::ExpandContext {
                     profile: profile.clone(),
                     config_dir: zest_config::paths::config_dir(),
                     home: crate::launch::home_dir(),
+                    env: spec.effective_env(),
                 };
                 let injected = spec.injected_since(spec.env.len());
                 spec.layer_env(
@@ -12208,6 +12228,76 @@ impl App {
         }
     }
 }
+
+/// The new value for a list or key/value row with one item removed.
+///
+/// Free-standing because both editors need the identical transformation, and a
+/// second copy is how they drift: the Settings tab and the §12 profiles tab
+/// draw these rows with the same `draw_control`, so they must also agree about
+/// what its × does. `None` means "nothing to do", never "write null".
+fn list_value_without(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    item: usize,
+) -> Option<serde_json::Value> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::FontList | Widget::TagList => {
+            let mut arr = current.as_array().cloned().unwrap_or_default();
+            if item >= arr.len() {
+                return None;
+            }
+            arr.remove(item);
+            Some(serde_json::Value::Array(arr))
+        }
+        Widget::KeyValue => {
+            // By position, because that is what the × was drawn beside: the
+            // control renders the map in iteration order, and resolving the
+            // click back to a *key* here is what keeps the two in step.
+            let map = current.as_object()?;
+            let key = map.keys().nth(item).cloned()?;
+            let mut map = map.clone();
+            map.remove(&key);
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+/// The new value for a list or key/value row with `text` appended.
+///
+/// `KEY=VALUE` for a key/value row; a bare `KEY` gets an empty value, which is
+/// the empty-means-unset spelling all the way down to the pty. `None` means
+/// the input cannot be an entry, which the caller shows as a buffer error
+/// rather than swallowing.
+fn list_value_with(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    text: &str,
+) -> Option<serde_json::Value> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::TagList => {
+            let mut arr = current.as_array().cloned().unwrap_or_default();
+            arr.push(serde_json::Value::String(text.to_string()));
+            Some(serde_json::Value::Array(arr))
+        }
+        Widget::KeyValue => {
+            let (key, value) = match text.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => (text, ""),
+            };
+            if key.is_empty() {
+                return None;
+            }
+            let mut map = current.as_object().cloned().unwrap_or_default();
+            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
 
 impl App {
     /// Create this window's OS window, its fonts, its GPU surface and its
@@ -16644,6 +16734,66 @@ mod palette_tests {
 }
 
 #[cfg(test)]
+mod list_value_tests {
+    use super::{list_value_with, list_value_without};
+    use zest_config::ui::Widget;
+
+    fn map(pairs: &[(&str, &str)]) -> serde_json::Value {
+        serde_json::Value::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), serde_json::Value::String((*v).to_string())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_key_value_entry_is_added_by_key_and_removed_by_position() {
+        // One copy of the rule, shared by the Settings tab and the §12
+        // profiles tab (#496): they draw these rows with the same
+        // `draw_control`, so they have to agree about what its controls do.
+        let current = map(&[("A", "1"), ("B", "2")]);
+
+        let added = list_value_with(Widget::KeyValue, &current, "C=3").expect("an entry");
+        assert_eq!(added["C"], serde_json::json!("3"));
+        assert_eq!(added["A"], serde_json::json!("1"), "the others are untouched");
+
+        // A bare key is the empty-value spelling, which unsets all the way
+        // down to the pty rather than setting an empty string.
+        let bare = list_value_with(Widget::KeyValue, &current, "C").expect("an entry");
+        assert_eq!(bare["C"], serde_json::json!(""));
+
+        // `=` inside the value survives: only the first splits.
+        let url = list_value_with(Widget::KeyValue, &current, "Q=a=b").expect("an entry");
+        assert_eq!(url["Q"], serde_json::json!("a=b"));
+
+        assert!(
+            list_value_with(Widget::KeyValue, &current, "=orphan").is_none(),
+            "a nameless entry is refused, and the caller shows that as a buffer error"
+        );
+
+        // Removal is by *position*, because that is what the × was drawn
+        // beside — the control renders the map in iteration order.
+        let removed = list_value_without(Widget::KeyValue, &current, 0).expect("a value");
+        assert!(removed.get("A").is_none() && removed.get("B").is_some());
+        assert!(
+            list_value_without(Widget::KeyValue, &current, 9).is_none(),
+            "a stale index is nothing to do, never a write"
+        );
+    }
+
+    #[test]
+    fn a_widget_with_no_list_behaviour_refuses_both() {
+        // `None` means "nothing to do" and must never be written as null: a
+        // Text row's × or add chip cannot exist, and if one ever reaches here
+        // the answer is to do nothing rather than blank the value.
+        let current = serde_json::Value::String("x".into());
+        assert!(list_value_with(Widget::Text, &current, "y").is_none());
+        assert!(list_value_without(Widget::Text, &current, 0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod profiles_edit_tests {
     use super::{ProfilesUiState, TextCommand, TextField};
 
@@ -16675,6 +16825,34 @@ mod profiles_edit_tests {
             error: false,
             append: false,
         });
+    }
+
+    #[test]
+    fn an_append_on_the_env_row_hands_back_an_append_not_a_commit() {
+        // The half of #496's editor gap this level can see. `begin_list_add`
+        // opens a buffer with `append` set on the profiles tab now, and the
+        // commit path's `Pending::Append` arm used to answer "this field
+        // cannot be appended to" — the row drew an add chip that did nothing.
+        //
+        // Asserting the *variant* is the point: a `Commit` here would write
+        // the typed text as the whole env table rather than adding one entry,
+        // which is a worse outcome than the no-op it replaced.
+        let mut ui = state();
+        let idx = ui.fields.iter().position(|f| f.key == "env").expect("env is a field");
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: idx,
+            buffer: TextField::new("CLAUDE_CONFIG_DIR=${profile_dir}/claude"),
+            error: false,
+            append: true,
+        });
+        assert_eq!(
+            ui.take_pending_edit(),
+            crate::settings_ui::Pending::Append(
+                idx,
+                "CLAUDE_CONFIG_DIR=${profile_dir}/claude".into(),
+            ),
+            "an append buffer must reach the append arm, or the add chip is decoration"
+        );
     }
 
     #[test]

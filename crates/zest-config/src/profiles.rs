@@ -454,6 +454,20 @@ pub struct ExpandContext {
     pub config_dir: Option<std::path::PathBuf>,
     /// This machine's home directory.
     pub home: Option<std::path::PathBuf>,
+    /// The environment the child will actually have when it starts — what
+    /// `${env:NAME}` reads.
+    ///
+    /// Supplied by the caller rather than read from `std::env` here, because
+    /// those are different questions: `terminal_env` clears another terminal's
+    /// stale identity and shell integration injects `ZDOTDIR`, so this
+    /// process's environment both names variables the child will not have and
+    /// misses ones it will. `CommandSpec::effective_env` is the producer, and
+    /// it applies the same empty-means-unset rule both pty backends do.
+    ///
+    /// A consequence worth stating: the map is taken *before* this profile's
+    /// own entries are layered, which is what makes "never a sibling entry"
+    /// true by construction rather than by rule.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl ExpandContext {
@@ -554,15 +568,16 @@ pub fn expand(value: &str, ctx: &ExpandContext) -> String {
             "profile" => (!ctx.profile.is_empty()).then(|| ctx.profile.clone()),
             "profile_dir" => ctx.profile_dir().map(|p| p.display().to_string()),
             "home" => ctx.home.as_ref().map(|p| p.display().to_string()),
-            // The child inherits this process's environment, so reading it
-            // here gives the same answer the shell would have — which is what
-            // makes `PATH = "${env:PATH}:/x"` mean what it looks like. An
-            // empty name (`${env:}`) resolves to nothing and is left as
+            // `ctx.env`, never `std::env`: the child's environment is this
+            // process's *plus* what the spec has layered — stale-identity
+            // markers cleared, `ZDOTDIR` injected — so reading the process
+            // directly would answer for variables the child will not have.
+            // An empty name (`${env:}`) resolves to nothing and is left as
             // written, like any other token we cannot answer.
             _ => token
                 .strip_prefix("env:")
                 .filter(|name| !name.is_empty())
-                .and_then(|name| std::env::var(name).ok()),
+                .and_then(|name| ctx.env.get(name).cloned()),
         };
         match resolved {
             Some(text) => out.push_str(&text),
@@ -1017,6 +1032,7 @@ mod tests {
             profile: name.into(),
             config_dir: Some(std::path::PathBuf::from("/cfg")),
             home: None,
+            env: Default::default(),
         };
         let work = ctx("work").profile_dir().expect("a plain name has a directory");
         let work2 = ctx("work2").profile_dir().expect("so does its neighbour");
@@ -1037,6 +1053,7 @@ mod tests {
             profile: "node..old".into(),
             config_dir: Some(std::path::PathBuf::from("/cfg")),
             home: None,
+            env: Default::default(),
         };
         assert_eq!(
             ctx.profile_dir(),
@@ -1074,6 +1091,7 @@ mod tests {
             profile: "work".into(),
             config_dir: Some(std::path::PathBuf::from("/cfg")),
             home: Some(std::path::PathBuf::from("/home/a")),
+            env: Default::default(),
         };
         let dir = std::path::Path::new("/cfg").join("profiles").join("work");
         assert_eq!(expand("${profile_dir}/claude", &ctx), format!("{}/claude", dir.display()));
@@ -1088,6 +1106,14 @@ mod tests {
         assert_eq!(expand("plain", &ctx), "plain", "a value with no token is untouched");
     }
 
+    /// An [`ExpandContext`] with a stated environment and nothing else.
+    fn ctx_with_env(pairs: &[(&str, &str)]) -> ExpandContext {
+        ExpandContext {
+            env: pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            ..ExpandContext::default()
+        }
+    }
+
     #[test]
     fn env_colon_reads_the_environment_the_child_will_inherit() {
         // The escape hatch, spelled as VS Code spells it for the same job.
@@ -1095,16 +1121,14 @@ mod tests {
         // ambiguous between our placeholder and a variable of that name, and a
         // precedence rule is a thing users have to learn. kitty gets away with
         // the bare form only because it has no placeholders of its own.
-        struct RestoreVar(&'static str);
-        impl Drop for RestoreVar {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
-        let _restore = RestoreVar("ZESTERM_TEST_EXPAND_SRC");
-        std::env::set_var("ZESTERM_TEST_EXPAND_SRC", "/opt/base");
-
-        let ctx = ExpandContext::default();
+        //
+        // The environment is stated here rather than poked into the process
+        // with `set_var`: review pointed out that reading `std::env` answers
+        // the wrong question (the child's environment is this process's *plus*
+        // what the spec layers), and taking the map as an argument makes these
+        // tests hermetic as a side effect -- which matters on a threaded test
+        // binary, per #403.
+        let ctx = ctx_with_env(&[("ZESTERM_TEST_EXPAND_SRC", "/opt/base")]);
         assert_eq!(
             expand("${env:ZESTERM_TEST_EXPAND_SRC}/bin", &ctx),
             "/opt/base/bin",
@@ -1120,24 +1144,43 @@ mod tests {
     }
 
     #[test]
+    fn env_colon_sees_what_the_spec_layered_not_the_raw_process() {
+        // The distinction review caught. `terminal_env` clears another
+        // terminal's stale identity and shell integration injects `ZDOTDIR`,
+        // so a value resolved against `std::env` would name variables the
+        // child does not get and miss ones it does. The context carries the
+        // *effective* environment, so both directions are expressible.
+        let ctx = ctx_with_env(&[("ZDOTDIR", "/from/integration")]);
+        assert_eq!(
+            expand("${env:ZDOTDIR}", &ctx),
+            "/from/integration",
+            "a variable the spec injected must be visible"
+        );
+        // And one `terminal_env` cleared is absent, so it reads as unset --
+        // left verbatim rather than resolving to this process's stale copy.
+        assert_eq!(
+            expand("${env:WT_SESSION}", &ctx),
+            "${env:WT_SESSION}",
+            "a variable the child will not have must not answer from the daemon's own"
+        );
+    }
+
+    #[test]
     fn a_placeholder_of_ours_is_never_shadowed_by_a_variable_of_the_same_name() {
         // The collision the `env:` prefix exists to make impossible. With a
         // bare `${profile}` this test could not be written -- one of the two
         // readings would have to lose, and which one would be a rule rather
         // than a fact.
-        struct RestoreVar(&'static str);
-        impl Drop for RestoreVar {
-            fn drop(&mut self) {
-                std::env::remove_var(self.0);
-            }
-        }
-        let _restore = RestoreVar("profile");
-        std::env::set_var("profile", "the-environments-idea-of-it");
-
+        //
+        // No `set_var`: the environment is an argument now, so this asserts
+        // the rule without mutating a process-global on a threaded test
+        // binary (#403's lesson, avoided rather than managed).
         let ctx = ExpandContext {
             profile: "ours".into(),
-            config_dir: None,
-            home: None,
+            env: [("profile".to_string(), "the-environments-idea-of-it".to_string())]
+                .into_iter()
+                .collect(),
+            ..ExpandContext::default()
         };
         assert_eq!(expand("${profile}", &ctx), "ours", "our placeholder answers");
         assert_eq!(
@@ -1187,6 +1230,7 @@ mod tests {
             profile: "work".into(),
             config_dir: Some(std::path::PathBuf::from("/cfg")),
             home: Some(std::path::PathBuf::from("/home/a")),
+            env: Default::default(),
         };
         assert_eq!(expand("$HOME/x", &ctx), "$HOME/x");
         assert_eq!(expand("${unterminated", &ctx), "${unterminated", "an unclosed token is text");
@@ -1203,6 +1247,7 @@ mod tests {
                 profile: name.into(),
                 config_dir: Some(std::path::PathBuf::from("/cfg")),
                 home: None,
+                env: Default::default(),
             };
             assert_eq!(ctx.profile_dir(), None, "{name} must not name a directory");
             assert_eq!(expand("${profile_dir}", &ctx), "${profile_dir}", "and must not expand");
