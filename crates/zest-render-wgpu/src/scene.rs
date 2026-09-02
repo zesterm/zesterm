@@ -494,9 +494,11 @@ pub struct Scene {
     /// which is the one thing two opacity settings exist to express. Written,
     /// it is glass onto whatever is behind the window.
     ///
-    /// Drawn before everything, and they may not overlap a viewport: replace
-    /// erases rather than composites. The chrome bars occupy the insets, which
-    /// is exactly the region no viewport reaches.
+    /// Drawn before every rect and glyph — after the background pictures,
+    /// which are a pane's own surface and cannot reach the insets — and they
+    /// may not overlap a viewport: replace erases rather than composites. The
+    /// chrome bars occupy the insets, which is exactly the region no viewport
+    /// reaches.
     pub surface_rects: Vec<RectInstance>,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,

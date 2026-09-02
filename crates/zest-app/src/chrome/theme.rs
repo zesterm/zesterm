@@ -111,6 +111,22 @@ fn text(c: Rgba8) -> LinearRgba {
 }
 
 impl ChromeColors {
+    /// The terminal surface at `opacity`, for a tab whose profile overrides
+    /// `window.opacity`.
+    ///
+    /// Arithmetic over a finished colour rather than a second resolve: a
+    /// premultiplied fill scales linearly with its alpha, so the opaque
+    /// surface this struct already holds is all it takes. That keeps this
+    /// module's rule — tokens are converted once, never per frame — while
+    /// letting one tab in the strip disagree with the window about how solid
+    /// the pane under it is.
+    #[must_use]
+    pub fn pane_fill(&self, opacity: f32) -> LinearRgba {
+        let a = opacity.clamp(0.0, 1.0);
+        let [r, g, b, _] = self.bg_opaque.0;
+        LinearRgba([r * a, g * a, b * a, a])
+    }
+
     #[must_use]
     pub fn new(
         ui: &UiTokens,

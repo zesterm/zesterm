@@ -132,6 +132,15 @@ pub struct TabModel {
     /// the chip's glyph tile takes warn ink when stalled, danger when
     /// reconnecting.
     pub link: LinkKind,
+    /// This tab's profile override of `window.opacity`, when it has one
+    /// (`ProfileIdentity::opacity`, the same value `pane_opacity` gives the
+    /// pane). `None` follows the window.
+    ///
+    /// The active chip *is* the pane drawn a few pixels higher, so it has to
+    /// be as solid as that pane and not as the window around it — a profile
+    /// pinned to 0.5 in an opaque window would otherwise read as a solid tab
+    /// over a see-through pane.
+    pub opacity: Option<f32>,
 }
 
 impl TabModel {

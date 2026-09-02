@@ -2764,8 +2764,11 @@ fn horizontal(
         // What is actually behind the chip's glyph tile, which the progress
         // ring's bite has to match to read as a gap rather than a notch.
         // Three answers, and the same three the fills below produce.
+        // The pane this chip continues, which a profile can make more or less
+        // solid than the window (`ProfileIdentity::opacity`).
+        let active_fill = tab.opacity.map_or(colors.tab_active_bg, |o| colors.pane_fill(o));
         let chip_bg = if active {
-            colors.tab_active_bg
+            active_fill
         } else if hovered {
             colors.tab_hover_bg
         } else {
@@ -2799,7 +2802,7 @@ fn horizontal(
                         chip[2] - 2.0 * HAIRLINE * s,
                         chip[3] - HAIRLINE * s,
                     ],
-                    colors.tab_active_bg,
+                    active_fill,
                     clip,
                 )
             });
@@ -3734,6 +3737,7 @@ mod tests {
             age: "2m".into(),
             connecting: false,
             link: LinkKind::Loopback,
+            opacity: None,
         }
     }
 
@@ -3802,6 +3806,32 @@ mod tests {
         assert!(
             (c.tab_active_bg.0[3] - 0.5).abs() < 1e-6,
             "and as translucent, when that is what the pane is"
+        );
+    }
+
+    #[test]
+    fn a_profile_tab_matches_its_own_pane_not_the_window() {
+        // `pane_opacity` lets a profile override `window.opacity` for its own
+        // pane, so the chip that reads as the top of that pane has to follow
+        // it too: a solid tab over a see-through pane names the wrong pane.
+        let c = colors_at(0.3, 1.0);
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut t = tab(1, TabOrigin::Local, TabPresence::Online);
+        t.opacity = Some(0.5);
+        let l = layout(&model(vec![t], TabsPosition::Top), &c, &m, &mut measure);
+
+        // The chip's fill is the only rect carrying the pane's own alpha:
+        // the strip is a surface, the border and rule are structure.
+        assert!(
+            l.rects.iter().any(|r| (r.fill.0[3] - 0.5).abs() < 1e-6),
+            "the active chip takes the profile's opacity, not the window's 1.0"
+        );
+        // And the arithmetic is the premultiplied surface halved, not a
+        // second resolve that could drift from `ui.bg`.
+        let half = c.pane_fill(0.5);
+        assert!(
+            (half.0[0] - c.bg_opaque.0[0] * 0.5).abs() < 1e-6,
+            "pane_fill scales the finished colour"
         );
     }
 

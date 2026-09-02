@@ -6529,6 +6529,7 @@ impl App {
                     // wears it for real (issue #175).
                     connecting: tab.dead || tab.connecting,
                     link,
+                    opacity: tab.identity.as_ref().and_then(|i| i.opacity),
                 }
             })
             .collect();
@@ -6565,6 +6566,9 @@ impl App {
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
+                // An app tab is a place, not a shell on a host: no pane, so
+                // nothing to match.
+                opacity: None,
             });
         }
         if self.tabs.settings_open() {
@@ -6584,6 +6588,9 @@ impl App {
                 age: String::new(),
                 connecting: false,
                 link: crate::chrome::model::LinkKind::Loopback,
+                // An app tab is a place, not a shell on a host: no pane, so
+                // nothing to match.
+                opacity: None,
             });
         }
 
@@ -12080,7 +12087,8 @@ impl App {
         if cfg!(all(unix, not(target_os = "macos"))) {
             tracing::info!(
                 "window transparency is fixed at creation on X11; \
-                 window.opacity applies on the next launch here"
+                 window.opacity and window.chrome_opacity apply on the \
+                 next launch here"
             );
         }
         w.set_transparent(want);
@@ -12467,7 +12475,7 @@ impl App {
         // shared adapter cannot present to — a window on another GPU — gets
         // a private device through the old path, so the ladder still ends in
         // a window rather than a panic.
-        let want_transparency = self.config.opacity < 1.0;
+        let want_transparency = self.config.translucent_surface();
         let antialias = self.effective_antialias();
         let gpu = match self.shared.gpu.get() {
             Some(host) => host.surface_for(&window, None, want_transparency, clear, antialias),
