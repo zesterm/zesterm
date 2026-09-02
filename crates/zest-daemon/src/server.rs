@@ -1389,7 +1389,7 @@ impl Connection {
                 vec![list_dir(&path)]
             }
 
-            ClientMessage::CreateSession { command, cwd, cols, rows, env } => {
+            ClientMessage::CreateSession { command, cwd, cols, rows, env, profile } => {
                 let mut spec = CommandSpec::default_shell();
                 if !command.is_empty() {
                     spec.command_line = command;
@@ -1413,22 +1413,53 @@ impl Connection {
                 // After `command_line` is settled, because which shell this is
                 // decides what gets injected -- and a client may have asked for
                 // something that is not a shell at all.
-                let injected_from = spec.env.len();
+                let mut injected = Vec::new();
                 if self.config.shell_integration {
-                    spec.enable_shell_integration(&shell_integration_dir());
+                    injected = spec.enable_shell_integration(&shell_integration_dir());
                     if settings.prompt.compact_ps1 {
                         spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
                     }
                 }
-                let injected = spec.injected_since(injected_from);
                 // This machine's `shell.env` first, then whatever the launch
                 // carried, so the more specific of the two wins -- the order
                 // `apply_shell_settings` states app-side, now obeyed on the
                 // path every ordinary session actually takes. Until #488 the
                 // daemon applied neither, so `shell.env` was a setting that
                 // did nothing outside `--no-daemon`.
-                let configured = settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone()));
-                spec.layer_env(configured.chain(env), &injected);
+                // This machine's `shell.env` first, on its own, so that the
+                // environment the launch's `${env:…}` reads is the one the
+                // child will really have -- host entries included, and with
+                // `terminal_env`'s clears and the shell-integration injection
+                // already applied. Reading `std::env` instead would answer for
+                // variables the child does not get and miss ones it does.
+                spec.layer_env(
+                    settings.shell.env.iter().map(|(k, v)| (k.clone(), v.clone())),
+                    &injected,
+                );
+                // The launch's values arrive unexpanded and are resolved
+                // *here*, against this machine's directories, which is what
+                // lets one profile mean the same thing on every machine in the
+                // fleet -- `${profile_dir}` on the Mac that wrote the profile
+                // and on the Linux box it is launched at are different paths
+                // and the same idea.
+                //
+                // Taken before the launch's own entries are layered, which is
+                // what makes "`${env:…}` never reads a sibling" true by
+                // construction rather than by rule.
+                let ctx = launch_expand_context(&profile, spec.effective_env());
+                let launched: Vec<(String, String)> = env
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let v = zest_config::profiles::expand(&v, &ctx);
+                        (k, v)
+                    })
+                    .collect();
+                spec.layer_env(launched, &injected);
+                // Made once the values are final, and only when something
+                // actually names it: a launch that never mentions
+                // `${profile_dir}` must not leave a directory behind on every
+                // machine it touches.
+                ensure_profile_dir(&ctx, &spec.env);
                 match self.registry.create(&spec, PtySize::new(cols, rows), 10_000) {
                     Ok(created) => {
                         vec![HostMessage::Sessions {
@@ -2277,6 +2308,78 @@ const LIST_DIR_CAP: usize = 500;
 /// skipped, sorted case-insensitively. A path that cannot be listed answers
 /// with *why* rather than an empty success: an empty directory and a
 /// refused one must not render the same.
+/// Where a launch's placeholders resolve on *this* machine.
+fn launch_expand_context(
+    profile: &str,
+    env: std::collections::BTreeMap<String, String>,
+) -> zest_config::profiles::ExpandContext {
+    zest_config::profiles::ExpandContext {
+        profile: profile.to_string(),
+        config_dir: zest_config::paths::config_dir(),
+        home: home_dir(),
+        env,
+    }
+}
+
+/// Create `${profile_dir}` if any final value points inside it.
+///
+/// Deliberately conditional on the *expanded* environment mentioning it: a
+/// session that never asked would otherwise mint a directory on every machine
+/// it is launched at, which is litter that looks like state.
+///
+/// Created with `mkdir`'s explicit mode rather than behind a umask guard --
+/// umask is process-global and the daemon is threaded, which is #403's whole
+/// lesson. `0o700` because what lands here is a login: a second account's
+/// credentials should not be world-readable because a directory was born
+/// under whatever umask the daemon inherited.
+fn ensure_profile_dir(ctx: &zest_config::profiles::ExpandContext, env: &[(String, String)]) {
+    let Some(dir) = ctx.profile_dir() else { return };
+    let prefix = dir.display().to_string();
+    // A path boundary, not a textual prefix: `<...>/profiles/work` is a prefix
+    // of `<...>/profiles/work2`, so a bare `starts_with` would have profile
+    // `work` mint its directory because some value pointed into `work2`'s.
+    let points_inside = |v: &str| {
+        v == prefix
+            || v.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+    };
+    if !env.iter().any(|(_, v)| points_inside(v)) {
+        return;
+    }
+    if dir.is_dir() {
+        return;
+    }
+    let made = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows has no mode argument; the parent's ACL is inherited, and
+            // a user's config directory is already theirs alone.
+            std::fs::DirBuilder::new().recursive(true).create(&dir)
+        }
+    };
+    match made {
+        Ok(()) => tracing::debug!(dir = %dir.display(), "created this profile's directory"),
+        // Not fatal: the shell still starts, and the tool that wanted the
+        // directory will say so far more usefully than we can here.
+        Err(e) => tracing::warn!(
+            dir = %dir.display(),
+            error = %e,
+            "could not create this profile's directory; its session starts anyway"
+        ),
+    }
+}
+
+/// This user's home, as the platform spells it.
+fn home_dir() -> Option<std::path::PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key).filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+}
+
 pub fn list_dir(path: &str) -> HostMessage {
     let dir = std::path::Path::new(path);
     let parent = dir.parent().map(|p| p.to_string_lossy().into_owned());
@@ -3428,6 +3531,7 @@ mod tests {
                 cols: 20,
                 rows: 5,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
 
@@ -3471,6 +3575,7 @@ mod tests {
                 cols: 20,
                 rows: 5,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let [HostMessage::Sessions { created: Some(id), .. }] = &out[..] else {
@@ -3667,6 +3772,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![("ZESTERM_TEST_LAUNCH_ENV".into(), "from-the-launch".into())],
+                profile: String::new(),
             },
         );
 
@@ -3678,6 +3784,151 @@ mod tests {
         assert_eq!(
             got, "from-the-launch",
             "the value must arrive intact, not merely be present: {got:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_launch_envs_placeholders_resolve_on_the_host_not_the_client() {
+        // #496. The client sends `${profile_dir}` verbatim; the machine that
+        // spawns the shell is the one that knows where that is. Asserted from
+        // inside the child's environment, which is the only place the answer
+        // matters -- and by *shape* rather than against a literal, because the
+        // config directory is this machine's and a test that hardcoded one
+        // would assert the developer's box rather than the rule.
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-expand-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_EXPANDED", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_EXPANDED".into(), "${profile_dir}/claude".into())],
+                profile: "probe-profile".into(),
+            },
+        );
+
+        assert!(
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_EXPANDED").is_some_and(|v| !v.is_empty())),
+            "the child never wrote the variable"
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_EXPANDED").expect("the child wrote it");
+        assert!(
+            !got.contains("${"),
+            "the placeholder reached the child unexpanded, so the host did not resolve it: {got:?}"
+        );
+        assert!(
+            got.ends_with("claude"),
+            "the text around the placeholder must survive it: {got:?}"
+        );
+        let expected = zest_config::paths::config_dir()
+            .map(|d| d.join("profiles").join("probe-profile").display().to_string());
+        if let Some(expected) = expected {
+            assert_eq!(
+                got,
+                format!("{expected}/claude"),
+                "it must resolve against *this* machine's config directory"
+            );
+            // Only created because the value points inside it -- the other two
+            // tests in this file launch with no placeholder and must leave
+            // nothing behind.
+            assert!(
+                std::path::Path::new(&expected).is_dir(),
+                "a profile directory something points at must exist by the time the shell runs"
+            );
+            let _ = std::fs::remove_dir_all(&expected);
+        }
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_sibling_profiles_directory_is_not_this_ones() {
+        // Review's catch: `ensure_profile_dir` decided "does anything point
+        // inside my directory" with a textual `starts_with`, and
+        // `<config>/profiles/probe-sib` is a prefix of
+        // `<config>/profiles/probe-sib2`. So launching the first while some
+        // value pointed into the second minted a directory nobody asked for --
+        // litter that looks like state, on every machine the profile touches.
+        let Some(cfg) = zest_config::paths::config_dir() else { return };
+        let mine = cfg.join("profiles").join("probe-sib");
+        let sibling = cfg.join("profiles").join("probe-sib2");
+        let _ = std::fs::remove_dir_all(&mine);
+
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+        let out = std::env::temp_dir().join(format!("zest-env-sib-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_SIBLING", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                // Points into the *neighbour's* directory, not this profile's.
+                env: vec![(
+                    "ZESTERM_TEST_SIBLING".into(),
+                    format!("{}/x", sibling.display()),
+                )],
+                profile: "probe-sib".into(),
+            },
+        );
+
+        assert!(
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_SIBLING").is_some_and(|v| !v.is_empty())),
+            "the child never ran, so nothing here is about the boundary"
+        );
+        assert!(
+            !mine.is_dir(),
+            "a value pointing into a *sibling* directory must not create this profile's: {mine:?}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+        drop(registry);
+    }
+
+    #[test]
+    fn a_launch_with_no_profile_leaves_its_placeholder_alone() {
+        // The never-crash rule at the wire: a value naming `${profile_dir}`
+        // with no profile behind the launch has no answer, and inventing one
+        // is worse than leaving it. Emptying it would turn
+        // `"${profile_dir}/claude"` into `/claude` -- an absolute path at the
+        // filesystem root that a tool will create or fail on, with the cause
+        // nowhere near the symptom.
+        let (mut c, registry) = conn();
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-noprofile-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd("ZESTERM_TEST_NOPROFILE", &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: vec![("ZESTERM_TEST_NOPROFILE".into(), "${profile_dir}/x".into())],
+                profile: String::new(),
+            },
+        );
+
+        assert!(
+            wait_for(|| env_probe(&out, "ZESTERM_TEST_NOPROFILE").is_some_and(|v| !v.is_empty())),
+            "the child never wrote the variable"
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_NOPROFILE").expect("the child wrote it");
+        assert_eq!(
+            got, "${profile_dir}/x",
+            "an unresolvable placeholder must reach the child as written, never emptied: {got:?}"
         );
 
         let _ = std::fs::remove_file(&out);
@@ -3718,6 +3969,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![("ZESTERM_TEST_DAEMON_INHERITED".into(), String::new())],
+                profile: String::new(),
             },
         );
 
@@ -3909,6 +4161,7 @@ mod tests {
             cols: 80,
             rows: 24,
             env: Vec::new(),
+            profile: String::new(),
         });
         let addr = SessionAddr::new(config().host, SessionId(1));
         peer.send(&mut c, &ClientMessage::Attach { session: addr, cols: 80, rows: 24, observe: false });
@@ -4040,6 +4293,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         assert!(matches!(&out[..], [HostMessage::Sessions { sessions, .. }] if sessions.len() == 1));
@@ -4133,6 +4387,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
 
@@ -4189,6 +4444,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
 
@@ -4253,6 +4509,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
 
@@ -4295,6 +4552,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4327,6 +4585,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4369,6 +4628,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4410,6 +4670,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4459,6 +4720,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4503,6 +4765,7 @@ mod tests {
                 cols: 100,
                 rows: 30,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4533,6 +4796,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4575,6 +4839,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4623,6 +4888,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4665,6 +4931,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4745,6 +5012,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4781,6 +5049,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -4818,6 +5087,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5638,6 +5908,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5666,6 +5937,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5707,6 +5979,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5764,6 +6037,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5815,6 +6089,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;
@@ -5857,6 +6132,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     env: Vec::new(),
+                    profile: String::new(),
                 },
             );
             let addr = registry.list(config().host)[0].addr;
@@ -5898,6 +6174,7 @@ mod tests {
                     cols: 80,
                     rows: 24,
                     env: Vec::new(),
+                    profile: String::new(),
                 },
             );
         }
@@ -5923,6 +6200,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         for info in registry.list(config().host) {
@@ -5951,6 +6229,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: Vec::new(),
+                profile: String::new(),
             },
         );
         let addr = registry.list(config().host)[0].addr;

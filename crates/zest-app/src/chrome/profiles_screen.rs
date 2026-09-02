@@ -330,6 +330,15 @@ pub fn profiles_screen(
                             colors.block_header_bg,
                             colors.hairline_soft,
                         ),
+                        // Faint like `Inherited`, never the warning colours the
+                        // Settings screen's restart chip wears: this is a fact
+                        // about when the row takes effect, not a problem.
+                        InheritChip::NewSessions => (
+                            "applies to new sessions",
+                            colors.text_faint,
+                            colors.block_header_bg,
+                            colors.hairline_soft,
+                        ),
                     };
                     let tw = measure(text, ss::CHIP_PX * s, false, 0.0);
                     let pad = 6.0 * s;

@@ -594,18 +594,63 @@ control column `flex:0 1 300px; margin-left:auto`, wrapping when narrow), groupe
 
 | Section | Fields |
 |---|---|
-| **Launch** | `command` (mono text area — wraps; a WSL invocation is long), `host` (host pill: status dot, name, path+latency coloured `success` for LAN/loopback and `warn` for tunnel, ▾) plus an *Ask which host at launch* toggle for host-agnostic profiles, `starting_directory` (mono + `Browse…`; may be a path this machine has never heard of, e.g. `\\wsl$\Ubuntu-24.04\home\…`), `tab_title` (segmented: From shell / Profile name / Custom) |
+| **Launch** | `command` (mono text area — wraps; a WSL invocation is long), `host` (host pill: status dot, name, path+latency coloured `success` for LAN/loopback and `warn` for tunnel, ▾) plus an *Ask which host at launch* toggle for host-agnostic profiles, `starting_directory` (mono + `Browse…`; may be a path this machine has never heard of, e.g. `\\wsl$\Ubuntu-24.04\home\…`), `tab_title` (segmented: From shell / Profile name / Custom), `env` (key/value rows) |
 | **Appearance** | `color_scheme` as a **swatch picker** — one 60×14 chip per scheme showing its **eight normal ANSI colours in index order**, name under it, selected chip bordered `ui.accent` on `ui.accentSoft`; `typography.families` (font pill) + `size_pt` (stepper); `window.opacity` (slider) + `backdrop` (segmented None/Mica/Acrylic/Vibrancy); `background_image` (a real drop target — `<image-slot>`, 96px, radius 9 — plus Fill/Fit/Watermark and a Dim slider); `tab_color` — a **Profile colour / Host colour** segmented choice first, then six 22px swatches (from the theme's accents, selected one ringed) which dim to 35% and stop taking clicks when the host decides — and `icon` (six 26px glyph tiles) |
 | **Cursor** | `shape` (segmented) and `blink` (toggle) |
 
 Deliberately **not** per-profile: padding, window size, and keybindings. They are window- or
 app-level, and putting them here invites profiles that fight each other over one window.
 
+**`env` is what makes a profile an identity rather than a colour.** Point a tool at its own
+config directory and the profile becomes a separate login — `CLAUDE_CONFIG_DIR`, `GH_CONFIG_DIR`,
+`KUBECONFIG`, `GIT_CONFIG_GLOBAL` are all the same one-line shape.
+
+Four placeholders and no others: `${profile_dir}` (`<config>/profiles/<name>`, created when
+something points into it), `${profile}`, `${home}`, and `${env:NAME}` for a variable the session
+would inherit anyway — `PATH = "${env:PATH}:/opt/bin"`. They resolve on the machine that *runs*
+the profile, which is what lets one profile mean the same thing on every machine in the fleet —
+the rule `starting_directory` already follows.
+
+Four decisions worth keeping, each with a failure behind it:
+
+- **A bare `$FOO` is text.** These values reach the child's environment block without a shell,
+  so implying shell expansion would promise a substitution nothing performs. `${env:NAME}` is
+  the explicit spelling, taken from VS Code, which documents exactly this for terminal `env`
+  values.
+- **`${env:…}` is namespaced so nothing can collide.** A bare `${VAR}` would make `${profile}`
+  ambiguous between our placeholder and a variable of that name, and a precedence rule is a
+  thing every user has to learn. kitty's bare form is safe only because kitty has no
+  placeholders of its own.
+- **An unresolvable placeholder is left as written, never emptied.** Emptying
+  `"${profile_dir}/claude"` yields `/claude`, an absolute path at the filesystem root. kitty and
+  Windows Terminal both leave it; Tabby empties it, which turns one typo in a `PATH` entry into
+  a destroyed `PATH` with nothing to see.
+- **`${env:…}` reads the inherited environment, never a sibling entry.** kitty resolves earlier
+  `env` lines because its config is line-ordered; a profile's env is a map, so "earlier" would
+  mean *alphabetically* earlier — one entry resolving and another not, for a reason invisible in
+  the file.
+
+`${home}` is **not** a synonym for `${env:HOME}`: `HOME` is `USERPROFILE` on Windows, and a
+profile written on one machine gets launched on another.
+
+An empty value unsets a variable — which is also how you drop something `profiles.defaults.env`
+sets, per variable rather than all-or-nothing. Do not set `HOME`: the zsh hook resolves the
+user's dotfiles from the *daemon's* `HOME`, so a session would hand itself back the wrong ones.
+
+The row carries an **`applies to new sessions`** chip rather than an inheritance one. A running
+process cannot be handed a new environment on any operating system, so editing this leaves open
+tabs as they were — and `env` is the one row whose inheritance is genuinely partial, so either
+inheritance chip would be a lie about half of it. No terminal surveyed shows this in its UI;
+WezTerm states it in prose beside the option, which is the closest prior art.
+
+Unlike the appearance rows, Defaults' `env` **merges** key by key: `profiles.defaults.env` is
+where fleet-wide variables live, and a profile naming one of its own must not throw them away.
+
 **Inheritance is the whole interaction.** Every appearance row shows one of two chips:
 `inherited from Defaults` (`ui.faint` on `#0f1526`, 1px `#1b2338`) or `overrides Defaults`
 (`ui.accent` on `ui.accentSoft`), and the 5px modified dot only appears on an override.
 Editing a row creates the override; clearing it falls back through Defaults. Launch fields
-(command, host, directory) never show a chip — they are what makes the profile a profile, so
+(command, host, directory, env) never show a chip — they are what makes the profile a profile, so
 inheriting them is meaningless.
 
 **Footer bar** (42px): a dot in the profile's colour, the override count as a sentence

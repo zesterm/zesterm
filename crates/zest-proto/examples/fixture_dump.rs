@@ -875,6 +875,7 @@ fn write_client_messages(path: &Path) {
                 cols: 300,
                 rows: 80,
                 env: Vec::new(),
+                profile: String::new(),
             },
         ),
         ("attach", ClientMessage::Attach { session: addr, cols: 120, rows: 40, observe: false }),

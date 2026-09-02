@@ -2602,7 +2602,10 @@ impl App {
     pub(crate) fn open_tab(&mut self, open: &TabOpen) {
         match open {
             TabOpen::Shell { command, cwd } => {
-                self.open_shell_tab(command.clone(), None, cwd.clone());
+                // A plain shell, so no profile and no profile environment.
+                // `TabOpen::Profile` below is the arm that carries one, and it
+                // goes through `launch_profile` to get it.
+                self.open_shell_tab(command.clone(), None, cwd.clone(), Vec::new());
             }
             TabOpen::Profile(name) => self.launch_profile(name),
             TabOpen::Settings => self.open_settings_tab(),
@@ -2780,6 +2783,9 @@ impl App {
             command: self.config.shell.as_deref().unwrap_or_default(),
             cwd: "",
             env: &self.config.shell_env,
+            // Restore reattaches sessions that already exist; a created one
+            // here has no profile behind it.
+            profile: "",
             cols,
             rows,
             scrollback: self.config.scrollback,
@@ -2947,6 +2953,7 @@ impl App {
                 // box would be this window's configuration quietly deciding
                 // another machine's shells.
                 env: &[],
+                profile: "",
                 cols,
                 rows,
                 scrollback: self.config.scrollback,
@@ -3642,7 +3649,7 @@ impl App {
                 // command the session's *shell* and kill the tab the moment it
                 // finished. A pty holds type-ahead, so this needs no callback
                 // waiting for the prompt.
-                self.open_shell_tab(None, None, cwd);
+                self.open_shell_tab(None, None, cwd, Vec::new());
                 if let Some(s) = self.tabs.active_source() {
                     s.write(bytes);
                 }
@@ -3893,11 +3900,32 @@ impl App {
                     // Remote either way: the far host runs its own default.
                     HostRoute::Tcp(_) | HostRoute::Relay { .. } => String::new(),
                 };
-                    // This machine's `shell.env` only when the shell runs
-                    // here: it is a machine's own setting, and a remote
-                    // daemon applies its own (#488).
-                let env: &[(String, String)] =
-                    if route.is_local() { &self.config.shell_env } else { &[] };
+                // A pane shares its tab's identity until panes carry their own
+                // profile, and an identity that is a colour but not an
+                // environment is only half of one: splitting a tab running one
+                // account's CLI would hand the new pane a different account.
+                //
+                // The tab's own launch environment, **verbatim**: not the
+                // profile's half re-combined with whatever `shell.env` says
+                // now, which would give a pane a different environment from
+                // the tab it split the moment that setting changed. The tab
+                // carries this for exactly this use (`Tab::launch_env`), and
+                // re-deriving it here would be the second copy that drifts.
+                //
+                // A tab with no launch environment (an ordinary ⌘T shell)
+                // yields an empty vector, and the host applies its own
+                // `shell.env` as it does for any launch — so the plain case
+                // is unchanged.
+                let (tab_env, tab_profile) = self
+                    .tabs
+                    .active()
+                    .map(|t| {
+                        let name =
+                            t.identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+                        (t.launch_env.clone(), name)
+                    })
+                    .unwrap_or_default();
+                let env: Vec<(String, String)> = tab_env;
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -3905,7 +3933,8 @@ impl App {
                         label: "zesterm",
                         command: &command,
                         cwd: "",
-                        env,
+                        env: &env,
+                        profile: &tab_profile,
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -3935,7 +3964,7 @@ impl App {
                 let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
                 match Session::spawn(
-                    &self.build_spec(None),
+                    &self.build_spec(None).0,
                     PtySize::new(cols, rows),
                     self.config.scrollback,
                     wake_for(&self.proxy, cell, Arc::clone(&self.activity)),
@@ -4046,6 +4075,7 @@ impl App {
                 command: &command,
                 cwd: "",
                 env: &env,
+                profile: "",
                 cols,
                 rows,
                 scrollback,
@@ -8058,8 +8088,26 @@ impl App {
 
     /// A list item's ×: fonts and tags lose the item, an env entry loses its
     /// key. The whole new value goes through `apply_edit` — no second path.
+    ///
+    /// **Both editors, dispatched on which tab is showing.** The profiles
+    /// editor draws its controls with the same `ss::draw_control`, so a
+    /// KeyValue row there pushes the same `SettingsListAdd`/`Remove` regions —
+    /// and while this read `settings_ui` unconditionally, those chips drew and
+    /// did nothing on the profiles tab. A control that silently does nothing
+    /// is the #272 class; the §12 `env` row was shipping as one (#496).
     fn remove_list_item(&mut self, row: usize, item: usize) {
-        use zest_config::ui::Widget;
+        if self.profiles_tab_active() {
+            let Some(idx) = self.profiles_field_of_row(row) else { return };
+            let Some(widget) =
+                self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+            else {
+                return;
+            };
+            let Some(current) = self.profiles_value_of(idx) else { return };
+            let Some(next) = list_value_without(widget, &current, item) else { return };
+            self.profiles_apply_edit(idx, next);
+            return;
+        }
         let Some(idx) = self.settings_field_of_row(row) else { return };
         let Some(widget) =
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
@@ -8067,24 +8115,7 @@ impl App {
             return;
         };
         let Some(current) = self.settings_value_of(idx) else { return };
-        let next = match widget {
-            Widget::FontList | Widget::TagList => {
-                let mut arr = current.as_array().cloned().unwrap_or_default();
-                if item >= arr.len() {
-                    return;
-                }
-                arr.remove(item);
-                serde_json::Value::Array(arr)
-            }
-            Widget::KeyValue => {
-                let Some(map) = current.as_object() else { return };
-                let Some(key) = map.keys().nth(item).cloned() else { return };
-                let mut map = map.clone();
-                map.remove(&key);
-                serde_json::Value::Object(map)
-            }
-            _ => return,
-        };
+        let Some(next) = list_value_without(widget, &current, item) else { return };
         self.apply_edit(idx, next);
     }
 
@@ -8093,6 +8124,29 @@ impl App {
     /// appends.
     fn begin_list_add(&mut self, row: usize) {
         use zest_config::ui::Widget;
+        if self.profiles_tab_active() {
+            if !self.profiles_commit_edit() {
+                return;
+            }
+            let Some(idx) = self.profiles_field_of_row(row) else { return };
+            let widget =
+                self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget);
+            // No `FontList` arm: §12 offers no roster field, and opening the
+            // Settings roster menu from here would edit the wrong document.
+            if widget == Some(Widget::KeyValue) || widget == Some(Widget::TagList) {
+                if let Some(ui) = self.profiles_ui.as_mut() {
+                    ui.selected = row;
+                    ui.editing = Some(crate::settings_ui::EditBuffer {
+                        field_idx: idx,
+                        buffer: TextField::default(),
+                        error: false,
+                        append: true,
+                    });
+                }
+            }
+            self.mark_chrome_dirty();
+            return;
+        }
         if !self.settings_commit_edit() {
             return;
         }
@@ -8129,39 +8183,27 @@ impl App {
     /// value, which *unsets* under the wholesale-replace semantics. Returns
     /// false when the input cannot be an entry (shown as a buffer error).
     fn commit_list_append(&mut self, idx: usize, text: &str) -> bool {
-        use zest_config::ui::Widget;
-        let Some(widget) =
+        let profiles = self.profiles_tab_active();
+        let widget = if profiles {
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        } else {
             self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
-        else {
-            return false;
         };
+        let Some(widget) = widget else { return false };
         let text = text.trim();
         if text.is_empty() {
             // Committing nothing is closing the buffer, not an error.
             return true;
         }
-        let Some(current) = self.settings_value_of(idx) else { return false };
-        let next = match widget {
-            Widget::TagList => {
-                let mut arr = current.as_array().cloned().unwrap_or_default();
-                arr.push(serde_json::Value::String(text.to_string()));
-                serde_json::Value::Array(arr)
-            }
-            Widget::KeyValue => {
-                let (key, value) = match text.split_once('=') {
-                    Some((k, v)) => (k.trim(), v.trim()),
-                    None => (text, ""),
-                };
-                if key.is_empty() {
-                    return false;
-                }
-                let mut map = current.as_object().cloned().unwrap_or_default();
-                map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
-                serde_json::Value::Object(map)
-            }
-            _ => return false,
-        };
-        self.apply_edit(idx, next);
+        let current =
+            if profiles { self.profiles_value_of(idx) } else { self.settings_value_of(idx) };
+        let Some(current) = current else { return false };
+        let Some(next) = list_value_with(widget, &current, text) else { return false };
+        if profiles {
+            self.profiles_apply_edit(idx, next);
+        } else {
+            self.apply_edit(idx, next);
+        }
         true
     }
 
@@ -8569,13 +8611,13 @@ impl App {
                 self.profiles_apply_edit(idx, value);
                 true
             }
-            // Unreachable: the add-chip is a Settings affordance, and nothing
-            // in the profiles editor opens a buffer with `append` set. Said
-            // out loud rather than swallowed, because a §12 list field would
-            // otherwise arrive as an Enter that silently does nothing (#272).
-            crate::settings_ui::Pending::Append(idx, _) => {
-                self.profiles_report(format!("this field cannot be appended to (field {idx})"));
-                false
+            // Reachable since §12 grew `env` (#496): `begin_list_add` opens
+            // an append buffer on this tab too, and its Enter lands here.
+            // Kept as an explicit arm rather than folded in, because the
+            // *reason* it was unreachable — no profiles field was a list —
+            // stopped being true, and a swallowed Enter is #272 again.
+            crate::settings_ui::Pending::Append(idx, text) => {
+                self.commit_list_append(idx, &text)
             }
         }
     }
@@ -9519,6 +9561,7 @@ impl App {
                 command: &command,
                 cwd: "",
                 env: &env,
+                profile: "",
                 cols,
                 rows,
                 scrollback,
@@ -9567,7 +9610,14 @@ impl App {
     /// overwrites it afterwards is a caller that hooked the wrong shell (a
     /// profile-launched WSL tab got a zsh's `ZDOTDIR`, and a pwsh profile had
     /// its appended `-Command` thrown away).
-    fn build_spec(&self, command: Option<&str>) -> CommandSpec {
+    ///
+    /// Returns the spec **and** the variables shell integration injected: the
+    /// in-process spawn layers a profile's environment after this returns, and
+    /// it needs the same collision warning `apply_shell_settings` gets. It used
+    /// to recompute the list from `spec.env.len()` at that point, which is a
+    /// mark taken after the thing it measures — always empty, so a profile
+    /// setting `ZDOTDIR` lost its command blocks in silence (#496).
+    fn build_spec(&self, command: Option<&str>) -> (CommandSpec, Vec<String>) {
         let mut spec = CommandSpec::default_shell();
         if let Some(command) = command {
             spec.command_line = command.to_string();
@@ -9582,9 +9632,9 @@ impl App {
         // have to be applied last to actually win. Whatever it added is the
         // tail, which is how `apply_shell_settings` knows which collisions are
         // worth warning about.
-        let injected_from = spec.env.len();
+        let mut injected = Vec::new();
         if let Some(dir) = zest_config::paths::config_dir() {
-            spec.enable_shell_integration(&dir.join("shell-integration"));
+            injected = spec.enable_shell_integration(&dir.join("shell-integration"));
         }
         // The daemon's spawn makes the same read (#426); an in-process
         // session diverging from a daemon-backed one over which prompt it
@@ -9592,9 +9642,8 @@ impl App {
         if self.settings.prompt.compact_ps1 {
             spec.env.push(("ZESTERM_COMPACT_PS1".into(), "1".into()));
         }
-        let injected = spec.injected_since(injected_from);
         apply_shell_settings(&mut spec, &self.config, &injected);
-        spec
+        (spec, injected)
     }
 
     /// The grid size a tab should be told right now.
@@ -9611,7 +9660,7 @@ impl App {
     /// button used to do this directly and now opens the launcher instead —
     /// the chord is how the default stays one keystroke away).
     fn new_tab(&mut self) {
-        self.open_shell_tab(None, None, None);
+        self.open_shell_tab(None, None, None, Vec::new());
     }
 
     /// The command a command-less launch resolves to — the launcher rows'
@@ -9707,6 +9756,15 @@ impl App {
                     (!command.is_empty()).then_some(command),
                     Some(identity),
                     (!cwd.is_empty()).then_some(cwd),
+                    // A published profile belongs to the machine that
+                    // published it, and `HostProfile` deliberately carries no
+                    // environment: a host must not hand its profiles'
+                    // environments to every paired device. Resolving the name
+                    // against *this* machine's config instead would be worse
+                    // than nothing -- a local profile can share a name with a
+                    // remote one and mean something else entirely. The host
+                    // applying its own is #487's phase 3.
+                    Vec::new(),
                 );
             }
             target => self.spawn_connecting_tab(name, identity, command, cwd, label, target),
@@ -9754,7 +9812,12 @@ impl App {
         let cwd = meta.starting_directory.clone();
         match target {
             crate::launch::HostTarget::Local => {
-                self.open_shell_tab(meta.command.clone(), Some(identity), cwd);
+                self.open_shell_tab(
+                    meta.command.clone(),
+                    Some(identity),
+                    cwd,
+                    meta.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                );
             }
             target => {
                 let command = crate::launch::launch_command(
@@ -9869,6 +9932,7 @@ impl App {
                                     // stays home; the far daemon applies its
                                     // own (#488).
                                     env: &[],
+                                    profile: "",
                                     cols,
                                     rows,
                                     scrollback,
@@ -9945,12 +10009,19 @@ impl App {
     /// inline: creating on an already-proven route is sub-millisecond on
     /// loopback and a few on the LAN — the picker's cold dials are the ones
     /// that must not block, and they arrive with the fleet model.
+    /// `env` is the profile's own, unexpanded: `${profile_dir}` names a
+    /// directory on the machine that runs the shell, so the host resolves it.
+    /// The profile's *name* travels beside it, taken from `identity` — which
+    /// already carries it, and is the only thing here that knows whether there
+    /// is a profile at all.
     fn open_shell_tab(
         &mut self,
         command: Option<String>,
         identity: Option<crate::tabs::ProfileIdentity>,
         cwd: Option<String>,
+        env: Vec<(String, String)>,
     ) {
+        let profile = identity.as_ref().map(|i| i.name.clone()).unwrap_or_default();
         let (cols, rows) = self.current_dims();
         // Seeded before the first byte arrives, so the grid never flashes
         // the window's palette under a profile's scheme.
@@ -9972,6 +10043,13 @@ impl App {
                     route.is_local(),
                     self.config.shell.as_deref(),
                 );
+                let launch_env: Vec<(String, String)> = if route.is_local() {
+                    self.config.shell_env.iter().cloned().chain(env.iter().cloned()).collect()
+                } else {
+                    // A remote host applies its own `shell.env`; only the
+                    // profile's entries are this launch's to carry.
+                    env.clone()
+                };
                 let session = crate::remote::RemoteSession::create_and_attach(
                     route.dialer(),
                     &crate::remote::AttachOptions {
@@ -9991,7 +10069,14 @@ impl App {
                         // therefore never applies. Where they do agree the
                         // entry simply arrives twice with the same value, and
                         // last-wins makes that a no-op.
-                        env: if route.is_local() { &self.config.shell_env } else { &[] },
+                        //
+                        // The profile's own entries go after, so the more
+                        // specific of the two wins: a profile names the
+                        // identity this tab is *for*, and losing to a
+                        // machine-wide default would make it the identity of
+                        // whoever configured the box.
+                        env: &launch_env,
+                        profile: &profile,
                         cols,
                         rows,
                         scrollback: self.config.scrollback,
@@ -10012,7 +10097,14 @@ impl App {
                         // A create should never collide, but the daemon owns
                         // session ids — adopt guards every path the same way
                         // (#188); a refused duplicate detaches on drop.
-                        let tab = Tab::daemon(session, local, (cols, rows)).with_identity(identity);
+                        let tab = Tab::daemon(session, local, (cols, rows))
+                            .with_identity(identity)
+                            // What actually crossed the wire, not just the
+                            // profile's half: a split reuses this verbatim,
+                            // and re-deriving the machine's half at split time
+                            // would give a pane a different environment from
+                            // its tab the moment `shell.env` changed.
+                            .with_launch_env(launch_env.clone());
                         if let Some(dup) = self.tabs.adopt(tab, true) {
                             tracing::info!(addr = %dup.addr, "session already open; activating its tab");
                             drop(dup);
@@ -10030,13 +10122,33 @@ impl App {
             _ => {
                 let addr = crate::tabs::placeholder_addr(self.shared.mint_placeholder());
                 let cell = Arc::new(parking_lot::Mutex::new(addr));
-                let mut spec = self.build_spec(command.as_deref());
+                let (mut spec, injected) = self.build_spec(command.as_deref());
                 // The profile's starting_directory, resolved by the machine
                 // that spawns — here, this one (§12: the daemon path sends
                 // it over the wire instead).
                 if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
                     spec.cwd = Some(dir.into());
                 }
+                // The profile's own environment, after `build_spec` has
+                // applied `shell.env`, so the more specific wins. Expanded
+                // here because here *is* the host: with no daemon there is
+                // nobody else to resolve `${profile_dir}` against, and the
+                // answer has to be the same one the daemon would give or the
+                // two paths would put a profile's files in two places.
+                // Taken after `build_spec` has applied `shell.env` and the
+                // integration hook, so `${env:…}` reads what the child will
+                // really have -- and before this profile's own entries, which
+                // is what makes "never a sibling" structural.
+                let ctx = zest_config::profiles::ExpandContext {
+                    profile: profile.clone(),
+                    config_dir: zest_config::paths::config_dir(),
+                    home: crate::launch::home_dir(),
+                    env: spec.effective_env(),
+                };
+                spec.layer_env(
+                    env.iter().map(|(k, v)| (k.clone(), zest_config::profiles::expand(v, &ctx))),
+                    &injected,
+                );
                 match Session::spawn(
                     &spec,
                     PtySize::new(cols, rows),
@@ -10045,8 +10157,14 @@ impl App {
                 ) {
                     Ok(session) => {
                         self.seed_terminal(&mut session.terminal().lock(), seed);
-                        self.tabs
-                            .push(Tab::in_process(session, addr, (cols, rows)).with_identity(identity));
+                        self.tabs.push(
+                            Tab::in_process(session, addr, (cols, rows))
+                                .with_identity(identity)
+                                // The in-process twin of the daemon branch:
+                                // the spec's own entries, so a split of this
+                                // tab reuses exactly what this shell got.
+                                .with_launch_env(spec.env.to_vec()),
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not spawn a new in-process tab");
@@ -12169,6 +12287,76 @@ impl App {
     }
 }
 
+/// The new value for a list or key/value row with one item removed.
+///
+/// Free-standing because both editors need the identical transformation, and a
+/// second copy is how they drift: the Settings tab and the §12 profiles tab
+/// draw these rows with the same `draw_control`, so they must also agree about
+/// what its × does. `None` means "nothing to do", never "write null".
+fn list_value_without(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    item: usize,
+) -> Option<serde_json::Value> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::FontList | Widget::TagList => {
+            let mut arr = current.as_array().cloned().unwrap_or_default();
+            if item >= arr.len() {
+                return None;
+            }
+            arr.remove(item);
+            Some(serde_json::Value::Array(arr))
+        }
+        Widget::KeyValue => {
+            // By position, because that is what the × was drawn beside: the
+            // control renders the map in iteration order, and resolving the
+            // click back to a *key* here is what keeps the two in step.
+            let map = current.as_object()?;
+            let key = map.keys().nth(item).cloned()?;
+            let mut map = map.clone();
+            map.remove(&key);
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+/// The new value for a list or key/value row with `text` appended.
+///
+/// `KEY=VALUE` for a key/value row; a bare `KEY` gets an empty value, which is
+/// the empty-means-unset spelling all the way down to the pty. `None` means
+/// the input cannot be an entry, which the caller shows as a buffer error
+/// rather than swallowing.
+fn list_value_with(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    text: &str,
+) -> Option<serde_json::Value> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::TagList => {
+            let mut arr = current.as_array().cloned().unwrap_or_default();
+            arr.push(serde_json::Value::String(text.to_string()));
+            Some(serde_json::Value::Array(arr))
+        }
+        Widget::KeyValue => {
+            let (key, value) = match text.split_once('=') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => (text, ""),
+            };
+            if key.is_empty() {
+                return None;
+            }
+            let mut map = current.as_object().cloned().unwrap_or_default();
+            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+
 impl App {
     /// Create this window's OS window, its fonts, its GPU surface and its
     /// first tab. Everything the old single-window `resumed` did for the
@@ -12398,7 +12586,7 @@ impl App {
         let (cols, rows) = insets.grid_dims(metrics, size.width.max(1), size.height.max(1));
 
         let proxy = self.proxy.clone();
-        let spec = self.build_spec(None);
+        let (spec, _) = self.build_spec(None);
         // TERM, COLORTERM and the TERM_PROGRAM pair come from
         // `zest_pty::terminal_env`, which `default_shell` already applied --
         // deliberately in one place, because a child that learns the wrong
@@ -16604,6 +16792,66 @@ mod palette_tests {
 }
 
 #[cfg(test)]
+mod list_value_tests {
+    use super::{list_value_with, list_value_without};
+    use zest_config::ui::Widget;
+
+    fn map(pairs: &[(&str, &str)]) -> serde_json::Value {
+        serde_json::Value::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), serde_json::Value::String((*v).to_string())))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_key_value_entry_is_added_by_key_and_removed_by_position() {
+        // One copy of the rule, shared by the Settings tab and the §12
+        // profiles tab (#496): they draw these rows with the same
+        // `draw_control`, so they have to agree about what its controls do.
+        let current = map(&[("A", "1"), ("B", "2")]);
+
+        let added = list_value_with(Widget::KeyValue, &current, "C=3").expect("an entry");
+        assert_eq!(added["C"], serde_json::json!("3"));
+        assert_eq!(added["A"], serde_json::json!("1"), "the others are untouched");
+
+        // A bare key is the empty-value spelling, which unsets all the way
+        // down to the pty rather than setting an empty string.
+        let bare = list_value_with(Widget::KeyValue, &current, "C").expect("an entry");
+        assert_eq!(bare["C"], serde_json::json!(""));
+
+        // `=` inside the value survives: only the first splits.
+        let url = list_value_with(Widget::KeyValue, &current, "Q=a=b").expect("an entry");
+        assert_eq!(url["Q"], serde_json::json!("a=b"));
+
+        assert!(
+            list_value_with(Widget::KeyValue, &current, "=orphan").is_none(),
+            "a nameless entry is refused, and the caller shows that as a buffer error"
+        );
+
+        // Removal is by *position*, because that is what the × was drawn
+        // beside — the control renders the map in iteration order.
+        let removed = list_value_without(Widget::KeyValue, &current, 0).expect("a value");
+        assert!(removed.get("A").is_none() && removed.get("B").is_some());
+        assert!(
+            list_value_without(Widget::KeyValue, &current, 9).is_none(),
+            "a stale index is nothing to do, never a write"
+        );
+    }
+
+    #[test]
+    fn a_widget_with_no_list_behaviour_refuses_both() {
+        // `None` means "nothing to do" and must never be written as null: a
+        // Text row's × or add chip cannot exist, and if one ever reaches here
+        // the answer is to do nothing rather than blank the value.
+        let current = serde_json::Value::String("x".into());
+        assert!(list_value_with(Widget::Text, &current, "y").is_none());
+        assert!(list_value_without(Widget::Text, &current, 0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod profiles_edit_tests {
     use super::{ProfilesUiState, TextCommand, TextField};
 
@@ -16635,6 +16883,34 @@ mod profiles_edit_tests {
             error: false,
             append: false,
         });
+    }
+
+    #[test]
+    fn an_append_on_the_env_row_hands_back_an_append_not_a_commit() {
+        // The half of #496's editor gap this level can see. `begin_list_add`
+        // opens a buffer with `append` set on the profiles tab now, and the
+        // commit path's `Pending::Append` arm used to answer "this field
+        // cannot be appended to" — the row drew an add chip that did nothing.
+        //
+        // Asserting the *variant* is the point: a `Commit` here would write
+        // the typed text as the whole env table rather than adding one entry,
+        // which is a worse outcome than the no-op it replaced.
+        let mut ui = state();
+        let idx = ui.fields.iter().position(|f| f.key == "env").expect("env is a field");
+        ui.editing = Some(crate::settings_ui::EditBuffer {
+            field_idx: idx,
+            buffer: TextField::new("CLAUDE_CONFIG_DIR=${profile_dir}/claude"),
+            error: false,
+            append: true,
+        });
+        assert_eq!(
+            ui.take_pending_edit(),
+            crate::settings_ui::Pending::Append(
+                idx,
+                "CLAUDE_CONFIG_DIR=${profile_dir}/claude".into(),
+            ),
+            "an append buffer must reach the append arm, or the add chip is decoration"
+        );
     }
 
     #[test]

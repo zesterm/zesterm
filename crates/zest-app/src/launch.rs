@@ -149,6 +149,18 @@ pub fn verdict_after(failures: u32) -> DialVerdict {
     }
 }
 
+/// This user's home directory, as the platform spells it.
+///
+/// Used to resolve a profile environment's `${home}` on the in-process path,
+/// where this process *is* the host. The daemon keeps its own copy for the
+/// same reason it has its own config load: it is the machine that spawns the
+/// shell, and a launch must not carry one machine's paths to another.
+#[must_use]
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key).filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

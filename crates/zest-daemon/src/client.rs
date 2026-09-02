@@ -172,6 +172,35 @@ pub struct DaemonClient {
     channel: Option<SecureChannel>,
     sealing_out: bool,
 }
+/// What to start, when a call starts something.
+///
+/// A struct rather than four more parameters: these travel together, three of
+/// them are strings, and `create(command, cwd, ...)` with a third `&str` on the
+/// end is a transposition the compiler cannot catch. Clippy reached the same
+/// conclusion at eight arguments; naming them at the call site is the point.
+///
+/// All four describe a session being **created**. Adoption ignores every one
+/// of them, which [`DaemonClient::open_session`] says out loud.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Launch<'a> {
+    /// Empty means the host's default shell.
+    pub command: &'a str,
+    /// Opaque to us — it is resolved on the host, and may name a path this
+    /// machine has never heard of.
+    pub cwd: &'a str,
+    /// Layered over the host's own `shell.env`, last-wins, **empty value
+    /// unsets** — the convention `CommandSpec` and the setting already share.
+    /// Unexpanded: see `profile`.
+    pub env: &'a [(String, String)],
+    /// The profile this launch came from, for resolving `env`'s placeholders.
+    ///
+    /// Travels **beside** the unexpanded values rather than being resolved
+    /// into them: `${profile_dir}` names a directory on the machine that runs
+    /// the shell, so the host expands it. Empty when no profile is behind the
+    /// launch.
+    pub profile: &'a str,
+}
+
 
 impl DaemonClient {
     /// Hello → Challenge → Auth → Welcome over an already-open transport.
@@ -399,24 +428,19 @@ impl DaemonClient {
 
     /// Start a fresh session and return its address.
     ///
-    /// `env` is layered over whatever the host's own settings give the child,
-    /// last-wins, with the empty-value-unsets convention `CommandSpec` and
-    /// `shell.env` already share. Empty is the ordinary case and costs no
-    /// bytes on the wire.
     pub fn create(
         &mut self,
-        command: &str,
-        cwd: &str,
+        launch: &Launch<'_>,
         cols: u16,
         rows: u16,
-        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         self.send(&ClientMessage::CreateSession {
-            command: command.to_string(),
-            cwd: cwd.to_string(),
+            command: launch.command.to_string(),
+            cwd: launch.cwd.to_string(),
             cols,
             rows,
-            env,
+            env: launch.env.to_vec(),
+            profile: launch.profile.to_string(),
         })?;
         loop {
             match self.recv()? {
@@ -443,26 +467,24 @@ impl DaemonClient {
     /// newest unattached, else create. See `AttachOptions::adopt` for why
     /// adopting is the GUI default today.
     ///
-    /// `env` reaches only a session this call *creates*. An adopted one is
-    /// already running and its environment was fixed when it spawned — a
-    /// process cannot be handed a new one, and pretending otherwise is how a
-    /// profile would appear to apply while the shell it adopted belongs to a
-    /// different identity entirely.
+    /// The launch's `env` and `cwd` reach only a session this call *creates*.
+    /// An adopted one is already running and its environment was fixed when it
+    /// spawned — a process cannot be handed a new one, and pretending
+    /// otherwise is how a profile would appear to apply while the shell it
+    /// adopted belongs to a different identity entirely.
     pub fn open_session(
         &mut self,
-        command: &str,
-        cwd: &str,
+        launch: &Launch<'_>,
         cols: u16,
         rows: u16,
         adopt: bool,
-        env: Vec<(String, String)>,
     ) -> Result<SessionAddr, DaemonError> {
         let existing = self.list()?;
         let adopted =
             adopt.then(|| existing.iter().rev().find(|s| !s.attached).map(|s| s.addr)).flatten();
         match adopted {
             Some(addr) => Ok(addr),
-            None => self.create(command, cwd, cols, rows, env),
+            None => self.create(launch, cols, rows),
         }
     }
 
