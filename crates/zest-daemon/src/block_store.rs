@@ -247,10 +247,8 @@ impl BlockStore {
     /// Open (or create) the store at `path`. The parent directory is created;
     /// a schema newer than this build's is refused rather than guessed at.
     pub fn open(path: &Path) -> Result<Arc<Self>, rusqlite::Error> {
-        if let Some(dir) = path.parent() {
-            // A failure surfaces as the open failing, with its own reason.
-            let _ = std::fs::create_dir_all(dir);
-        }
+        // A failure here surfaces as the open failing, with its own reason.
+        let _ = create_private(path);
         let flags = OpenFlags::default();
         let writer = Connection::open_with_flags(path, flags)?;
         let reader = Connection::open_with_flags(path, flags)?;
@@ -295,16 +293,17 @@ impl BlockStore {
     /// history went unsearched, and the answer should say so.
     ///
     /// The SQL narrows only when it can promise a superset: `LIKE` folds
-    /// ASCII case and nothing else, so for an ASCII query every row the Rust
-    /// rule accepts also passes `LIKE` (the one exception is a command whose
-    /// non-ASCII letter folds *to* ASCII — a Kelvin sign, a dotted capital I
-    /// — which no search is worth a full scan per keystroke to catch). A
-    /// query with any non-ASCII character skips the narrowing and the scan
-    /// cap does the bounding.
+    /// ASCII case and nothing else, so for a query typed in ASCII every row
+    /// the Rust rule accepts also passes `LIKE` (the one exception is a
+    /// *command* whose non-ASCII letter folds to ASCII — a Kelvin sign, a
+    /// dotted capital I — which no search is worth a full scan per keystroke
+    /// to catch). A query with any non-ASCII character as typed skips the
+    /// narrowing — decided on the query, not its fold, since a fold can be
+    /// ASCII when the query was not — and the scan cap does the bounding.
     pub fn search(&self, needle: &Needle, cap: usize) -> Result<(Vec<StoredBlock>, bool), rusqlite::Error> {
         let db = self.read.lock().expect("block store reader");
         let folded = needle.folded();
-        let narrow = !folded.is_empty() && folded.is_ascii();
+        let narrow = !folded.is_empty() && needle.is_ascii();
         let pattern = format!(
             "%{}%",
             folded.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
@@ -370,6 +369,43 @@ impl BlockStore {
         let mut stmt = db.prepare("SELECT name FROM pragma_table_info('block')")?;
         let names = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         Ok(names)
+    }
+}
+
+/// Make room for the history and make it private: the directory 0700 when
+/// this creates it, the file 0600 from birth. Command history with its
+/// directories, branches and authors is not for other accounts on the
+/// machine, and a umask of 022 would otherwise hand it to them.
+///
+/// The file is created here, empty, with its mode — SQLite reads a
+/// zero-length file as an empty database, and mirrors the main file's mode
+/// onto `-wal` and `-shm` — because a chmod after the open is a window,
+/// where a mode on the create is not (#403's lesson: prefer the call that
+/// takes the property as an argument). Never umask: process-global, and
+/// the victims are a crate away. An existing directory keeps its mode; it
+/// may hold other state whose permissions are not this module's to decide.
+fn create_private(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        file.mode(0o600);
+    }
+    match file.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -692,6 +728,46 @@ mod tests {
         assert!(hits.is_empty() && !capped, "an ASCII query the SQL narrowed to nothing scanned nothing");
         let (hits, capped) = store.search(&Needle::new("日"), 2).expect("search");
         assert!(hits.is_empty() && capped, "unnarrowed, capped is about rows scanned, not rows matched");
+    }
+
+    /// Command history is not for the other accounts on a machine: a fresh
+    /// history is 0600 in a 0700 directory from the moment it exists, and
+    /// SQLite gives the WAL the same mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_history_is_private_from_birth() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zest-blocks-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state").join("blocks.sqlite");
+        let store = BlockStore::open(&path).expect("open");
+        store.sink().record(vec![stored(1, 1, "ls", 1)]);
+        settled(&store);
+        let mode = |p: &Path| std::fs::metadata(p).expect("exists").permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "the file");
+        assert_eq!(mode(path.parent().expect("dir")), 0o700, "the directory this created");
+        let wal = dir.join("state").join("blocks.sqlite-wal");
+        if wal.exists() {
+            assert_eq!(mode(&wal), 0o600, "the WAL follows the main file's mode");
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The narrowing must be decided on the query as typed: a Kelvin sign
+    /// folds to `k`, and a decision on the fold would send it down the
+    /// ASCII path, which is fine for the pattern and wrong for the claim
+    /// the doc makes. It matches either way; what this pins is that
+    /// `Needle::is_ascii` is the fact the store reads.
+    #[test]
+    fn a_query_that_folds_to_ascii_is_still_not_narrowed() {
+        let store = BlockStore::in_memory().expect("open");
+        store.sink().record(vec![stored(1, 1, "make", 100), stored(1, 2, "ls", 200)]);
+        settled(&store);
+        let needle = Needle::new("\u{212a}");
+        assert!(!needle.is_ascii() && needle.folded() == "k");
+        let (hits, _) = store.search(&needle, SCAN_CAP).expect("search");
+        assert_eq!(hits.iter().map(|b| b.command.as_str()).collect::<Vec<_>>(), ["make"]);
     }
 
     /// `LIKE` folds ASCII only, so it is a superset only for an ASCII query;

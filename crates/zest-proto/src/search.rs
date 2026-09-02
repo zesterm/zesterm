@@ -115,12 +115,23 @@ pub fn clamp_limit(asked: u32) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Needle {
     folded: String,
+    /// Whether the query *as typed* was ASCII — not the fold, which can be
+    /// ASCII for a query that was not (a Kelvin sign folds to `k`). A store
+    /// narrowing in SQL with an ASCII-only `LIKE` reads this, so the
+    /// decision is about the bytes the person typed.
+    ascii: bool,
 }
 
 impl Needle {
     #[must_use]
     pub fn new(query: &str) -> Self {
-        Self { folded: query.to_lowercase() }
+        Self { folded: query.to_lowercase(), ascii: query.is_ascii() }
+    }
+
+    /// Whether the query as typed was ASCII.
+    #[must_use]
+    pub fn is_ascii(&self) -> bool {
+        self.ascii
     }
 
     /// The query as folded, for a store that narrows in SQL before asking
@@ -231,6 +242,9 @@ mod tests {
         assert!(!hit("cargo build", "cargo t"));
         assert!(hit("ls src", "src"), "substring, not word");
         assert!(!hit("", "x"));
+        assert!(Needle::new("make").is_ascii());
+        assert!(!Needle::new("\u{212a}").is_ascii(), "a Kelvin sign folds to `k` and is still not ASCII as typed");
+        assert!(hit("make", "\u{212a}"), "and it matches through the fold");
     }
 
     /// The daemon, the fleet merge and the tool must all agree on order, or
