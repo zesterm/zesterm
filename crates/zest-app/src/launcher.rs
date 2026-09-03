@@ -129,10 +129,12 @@ enum Bucket {
 /// every profile falls through to is meaningless.
 ///
 /// `fleet` carries what each machine published (#262, fetched by #265). A host
-/// that has told us nothing contributes no group rather than an empty one:
-/// that covers an older daemon, a machine nothing can reach, and one whose
-/// watcher simply has not connected yet, and all three should read the same —
-/// nobody has said anything, so nothing is drawn.
+/// that has *answered* and published nothing — an older daemon, or simply no
+/// profiles — contributes no group rather than an empty one. But a host that
+/// is enrolled and online with no answer at all gets a header and a faint
+/// "connecting…" line (#537): its watcher is a beat behind or failing, and
+/// total silence there made a broken feature read as one that does not exist.
+/// A machine nothing can reach still contributes nothing.
 #[must_use]
 pub fn build_rows(
     settings: &Settings,
@@ -214,12 +216,34 @@ pub fn build_rows(
     let mut groups: Vec<Group> = groups.into_values().filter(|g| !g.entries.is_empty()).collect();
     groups.sort_by(|a, b| a.order.cmp(&b.order));
 
+    // A machine that should be about to answer (#537): enrolled, online, no
+    // offer, and no fresh listing either — its watcher has not delivered.
+    // With the join fixed this is a startup beat or a genuinely failing
+    // watcher, and both are worth one faint row: total silence here is what
+    // let a broken feature read as one that does not exist. A host that has
+    // answered (a `Fresh` listing) and still published nothing — an older
+    // daemon, a machine with no profiles worth publishing — stays silent, as
+    // the doc above `build_rows` argues.
+    let mut pending: Vec<&FleetHost> = fleet
+        .iter()
+        .filter(|h| {
+            !h.local
+                && h.enrolled
+                && h.is_online()
+                && h.offer.is_none()
+                && !matches!(h.sessions, crate::fleet::SessionsState::Fresh(_))
+                && !groups.iter().any(|g| g.order.2 == Some(h.host))
+        })
+        .collect();
+    pending.sort_by(|a, b| a.label.cmp(&b.label));
+
     // Headers whenever there is something to say. A single-machine setup —
     // which is most setups — must not grow chrome to say "this machine" over
     // the only rows there are; but a single group that is *not* this machine
     // is precisely the case worth naming, and dropping its header would leave
     // a menu whose every row runs somewhere else without saying where.
-    let headed = groups.len() > 1 || !matches!(groups.first().map(|g| g.order.0), None | Some(1));
+    let headed = groups.len() + pending.len() > 1
+        || !matches!(groups.first().map(|g| g.order.0), None | Some(1));
 
     let mut rows = Vec::new();
     let mut actions = Vec::new();
@@ -275,6 +299,19 @@ pub fn build_rows(
             actions.push(LauncherAction::Launch(target.clone()));
             first = false;
         }
+    }
+
+    // The pending machines, each a header and one faint line. Always headed —
+    // a note with no machine over it would explain nothing.
+    for host in &pending {
+        rows.push(LauncherRow::Group {
+            label: host.label.clone(),
+            sub: host_sub(host),
+            online: true,
+        });
+        actions.push(LauncherAction::None);
+        rows.push(LauncherRow::Note { text: "connecting\u{2026}".into() });
+        actions.push(LauncherAction::None);
     }
 
     rows.push(LauncherRow::Divider);
@@ -532,6 +569,49 @@ mod tests {
                 name: "ubuntu".into(),
             })),
             "and the remote row launches the *published* profile, not a local name lookup"
+        );
+    }
+
+    #[test]
+    fn an_enrolled_online_host_with_no_answer_yet_shows_a_connecting_note() {
+        // #537's UX half. A relay-only machine's watcher data was dropped for
+        // weeks and the menu said nothing at all — a broken feature reading
+        // as one that does not exist. An enrolled, online machine that has
+        // not answered yet is now named, with one faint non-actionable line.
+        let settings = settings_with(&[("local-only", "command = \"zsh\"")]);
+        let mut mac = host(2, "mac", false);
+        mac.enrolled = true;
+        mac.relay_online = true;
+        mac.presence = zest_mesh::discovery::Presence::Unseen;
+        mac.address = None;
+        let fleet = [host(1, "studio", true), mac];
+        let (rows, actions) = build_rows(&settings, &fleet, "sh", None, String::new());
+
+        let header = rows
+            .iter()
+            .position(|r| matches!(r, LauncherRow::Group { label, .. } if label == "mac"))
+            .expect("an enrolled online machine is named even before it answers");
+        assert!(
+            matches!(rows.get(header + 1), Some(LauncherRow::Note { .. })),
+            "with a faint note where its rows will be"
+        );
+        assert_eq!(
+            actions[header + 1],
+            LauncherAction::None,
+            "the note is context, not a row to land on"
+        );
+
+        // A host that *answered* and published nothing keeps the old silence:
+        // an older daemon and a machine with no profiles read the same.
+        let mut quiet = host(3, "quiet", false);
+        quiet.enrolled = true;
+        quiet.relay_online = true;
+        quiet.sessions = crate::fleet::SessionsState::Fresh(Vec::new());
+        let fleet = [host(1, "studio", true), quiet];
+        let (rows, _) = build_rows(&settings, &fleet, "sh", None, String::new());
+        assert!(
+            !rows.iter().any(|r| matches!(r, LauncherRow::Note { .. })),
+            "a machine that answered with nothing to publish stays silent, as before"
         );
     }
 

@@ -810,6 +810,12 @@ pub enum LauncherRow {
         /// Drives the status dot, exactly as the sidebar's host headers do.
         online: bool,
     },
+    /// A faint explanatory line under a host header (#537): the machine is
+    /// enrolled and online but its watcher has not delivered yet, so its
+    /// published profiles cannot be listed — and silence here reads as "the
+    /// feature does not exist". Never actionable: the keyboard skips it and
+    /// it takes no hit region, like the header above it.
+    Note { text: String },
     /// The hairline between the launch targets and the two actions.
     Divider,
     /// "Run on another host…" — the fleet picker (⇧⏎).

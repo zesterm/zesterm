@@ -403,6 +403,12 @@ struct Inner {
     /// `try_send`: a reconcile already queued is the same reconcile, and the
     /// discovery thread must never block on it.
     reconcile: crossbeam_channel::Sender<()>,
+    /// The account watcher's doorbell, kept so a second `watch_account` joins
+    /// the loop the first call started instead of spawning a twin (#537). The
+    /// triggers are per window — the Fleet screen, and now any window whose
+    /// local offer says the machine is enrolled — but the loop is the model's,
+    /// and two of them would poll the control plane twice about one account.
+    account_poke: parking_lot::Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
 
 impl Inner {
@@ -436,6 +442,7 @@ impl FleetModel {
             state: parking_lot::Mutex::new(State { local, ..State::default() }),
             decide_dial: parking_lot::Mutex::new(None),
             reconcile,
+            account_poke: parking_lot::Mutex::new(None),
         });
 
         // The browser: observations land in the roster on the mesh thread;
@@ -1244,57 +1251,7 @@ impl FleetModel {
     /// [`Self::snapshot`] over an `Inner` directly, for the background threads
     /// that hold one but no `FleetModel`.
     fn snapshot_of(inner: &Arc<Inner>) -> Vec<FleetHost> {
-        let state = inner.state.lock();
-        let mut out = Vec::new();
-
-        if let Some((host, label)) = &state.local {
-            out.push(FleetHost {
-                host: *host,
-                label: label.clone(),
-                presence: Presence::Online,
-                local: true,
-                address: None,
-                reachability: Some(zest_mesh::Reachability::Loopback),
-                rtt_ms: state.rtt.get(host).copied(),
-                sessions: state.sessions.get(host).cloned().unwrap_or_default(),
-                offer: state.offers.get(host).cloned(),
-                enrolled: false,
-                // Discovery's rows carry no account fact; `merge_account`
-                // is what lays one over them.
-                relay_online: false,
-            });
-        }
-
-        if let Some(d) = state.discovery.as_ref() {
-            for record in d.records() {
-                // The local daemon may also advertise (--listen-lan); the
-                // synthesized row above already covers it.
-                if state.local.as_ref().is_some_and(|(h, _)| *h == record.peer.host) {
-                    continue;
-                }
-                let best = record.peer.best_endpoint();
-                out.push(FleetHost {
-                    host: record.peer.host,
-                    label: record.peer.label.clone(),
-                    presence: record.presence,
-                    local: false,
-                    address: best.map(|e| e.address.clone()),
-                    reachability: best.map(|e| e.reachability),
-                    rtt_ms: state.rtt.get(&record.peer.host).copied(),
-                    sessions: state
-                        .sessions
-                        .get(&record.peer.host)
-                        .cloned()
-                        .unwrap_or_default(),
-                    offer: state.offers.get(&record.peer.host).cloned(),
-                    enrolled: false,
-                    relay_online: false,
-                });
-            }
-        }
-
-        merge_account(&mut out, state.account.as_ref().map(|l| l.hosts.as_slice()));
-        out
+        build_snapshot(&inner.state.lock())
     }
 
     /// Where the account says the relay lives, when a listing has one.
@@ -1331,6 +1288,12 @@ impl FleetModel {
         &self,
         fetch: impl Fn() -> Result<AccountListing, AccountError> + Send + 'static,
     ) -> AccountPoke {
+        // One loop per model, however many windows ask (#537): a second call
+        // gets a poke into the loop the first one started.
+        let mut slot = self.inner.account_poke.lock();
+        if let Some(tx) = slot.as_ref() {
+            return AccountPoke(tx.clone());
+        }
         let (tx, rx) = crossbeam_channel::bounded(1);
         let inner = Arc::clone(&self.inner);
         let spawned = std::thread::Builder::new().name("zest-fleet-account".into()).spawn(
@@ -1347,12 +1310,84 @@ impl FleetModel {
                 );
             },
         );
-        if let Err(e) = spawned {
-            tracing::warn!(error = %e, "no account watcher; enrolled hosts will not be listed");
+        match spawned {
+            // Left empty so a later call may retry: a poke into a loop that
+            // never started would count as watching and watch nothing.
+            Err(e) => {
+                tracing::warn!(error = %e, "no account watcher; enrolled hosts will not be listed");
+            }
+            Ok(_) => *slot = Some(tx.clone()),
         }
         AccountPoke(tx)
     }
 }
+
+/// The snapshot itself, pure over the state so the account/watcher join is a
+/// `cargo test` rather than something only two machines and a relay can
+/// demonstrate (#537).
+fn build_snapshot(state: &State) -> Vec<FleetHost> {
+    let mut out = Vec::new();
+
+    if let Some((host, label)) = &state.local {
+        out.push(FleetHost {
+            host: *host,
+            label: label.clone(),
+            presence: Presence::Online,
+            local: true,
+            address: None,
+            reachability: Some(zest_mesh::Reachability::Loopback),
+            rtt_ms: None,
+            sessions: SessionsState::default(),
+            offer: None,
+            enrolled: false,
+            // Discovery's rows carry no account fact; `merge_account`
+            // is what lays one over them.
+            relay_online: false,
+        });
+    }
+
+    if let Some(d) = state.discovery.as_ref() {
+        for record in d.records() {
+            // The local daemon may also advertise (--listen-lan); the
+            // synthesized row above already covers it.
+            if state.local.as_ref().is_some_and(|(h, _)| *h == record.peer.host) {
+                continue;
+            }
+            let best = record.peer.best_endpoint();
+            out.push(FleetHost {
+                host: record.peer.host,
+                label: record.peer.label.clone(),
+                presence: record.presence,
+                local: false,
+                address: best.map(|e| e.address.clone()),
+                reachability: best.map(|e| e.reachability),
+                rtt_ms: None,
+                sessions: SessionsState::default(),
+                offer: None,
+                enrolled: false,
+                relay_online: false,
+            });
+        }
+    }
+
+    merge_account(&mut out, state.account.as_ref().map(|l| l.hosts.as_slice()));
+
+    // One join, after every source has contributed its rows: what the
+    // watchers learned (#265), laid over whichever row a host got. Joining
+    // per source is how a machine only the account knows — reached through
+    // the relay, invisible to mDNS — shipped with its watcher's sessions and
+    // published profiles permanently dropped (#537): the append arm above
+    // cannot know them, and nothing after it looked.
+    for row in &mut out {
+        if let Some(sessions) = state.sessions.get(&row.host) {
+            row.sessions = sessions.clone();
+        }
+        row.offer = state.offers.get(&row.host).cloned();
+        row.rtt_ms = state.rtt.get(&row.host).copied();
+    }
+    out
+}
+
 /// The account poll loop, free of the thread and the event loop so the tests
 /// can drive it with injected closures and no winit proxy.
 ///
@@ -1498,6 +1533,67 @@ mod tests {
         );
         assert!(!state.sessions.contains_key(&host), "and the clear must survive it");
         assert!(!state.offers.contains_key(&host));
+    }
+
+    #[test]
+    fn a_relay_only_host_keeps_its_watcher_listing_and_offer_in_the_snapshot() {
+        // The host class the tunnel exists for (#537): a machine only the
+        // account knows has no discovery row, so its FleetHost is minted by
+        // `merge_account`'s append arm — which cannot know what the watcher
+        // learned. If the join with `state.sessions`/`state.offers` happens
+        // per source instead of after the merge, this host's watcher delivers
+        // sessions and published profiles that no snapshot ever carries: the
+        // launcher shows no remote profiles and the fleet card stays bare,
+        // while the same machine on the dev LAN (a discovery row) works —
+        // which is exactly how it shipped.
+        let mac = HostId::from_bytes([7; 32]);
+        let mut state = State {
+            account: Some(AccountListing {
+                relay_origin: Some("wss://relay.example".into()),
+                hosts: vec![AccountEntry {
+                    host: mac,
+                    label: "Mac".into(),
+                    relay_online: true,
+                }],
+                devices: Vec::new(),
+            }),
+            ..State::default()
+        };
+        let listing = vec![zest_proto::SessionInfo {
+            addr: zest_proto::SessionAddr::new(mac, zest_proto::SessionId(1)),
+            title: "zsh".into(),
+            cwd: "/".into(),
+            cols: 80,
+            rows: 24,
+            alt_screen: false,
+            attached: false,
+            context: None,
+            busy: false,
+        }];
+        let offer = zest_proto::HostOffer {
+            os: "macos".into(),
+            profiles: vec![zest_proto::HostProfile {
+                name: "Claude 1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(
+            apply_listing(&mut state, mac, false, listing, Some(offer)),
+            "the watcher's write must land before the snapshot is worth asking about"
+        );
+
+        let rows = build_snapshot(&state);
+        let row = rows.iter().find(|h| h.host == mac).expect("the account listed it");
+        assert!(
+            matches!(&row.sessions, SessionsState::Fresh(s) if s.len() == 1),
+            "a relay-only host's watcher listing must reach the snapshot"
+        );
+        let offer = row
+            .offer
+            .as_ref()
+            .expect("and its offer — the published profiles are the + menu's whole input");
+        assert_eq!(offer.profiles.len(), 1, "with the published profiles intact");
     }
 
     #[test]

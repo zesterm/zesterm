@@ -1755,6 +1755,19 @@ fn probed_account_state(
     }
 }
 
+/// Whether this machine's own daemon says it holds an account token (#537).
+///
+/// Read off the fleet snapshot's local row rather than asked anywhere: the
+/// loopback watcher's offer already carries the fact, keychain-free. Only
+/// `Some(true)` counts — `Some(false)` is a readable store holding nothing,
+/// and `None` is a daemon that did not say (too old, or a locked store),
+/// neither of which justifies a token read.
+fn local_daemon_is_enrolled(fleet: &[crate::fleet::FleetHost]) -> bool {
+    fleet
+        .iter()
+        .any(|h| h.local && h.offer.as_ref().and_then(|o| o.has_account_token) == Some(true))
+}
+
 /// Settled profile launches, parked by workers for `Wakeup::TabsChanged` —
 /// the connecting tab's placeholder address, and the session (or the error
 /// its pane will carry).
@@ -5043,6 +5056,19 @@ impl App {
         self.mark_chrome_dirty();
     }
 
+    /// The account machinery starts on this machine's own word, not on a
+    /// screen (#537): until the listing exists a relay-only host is
+    /// unroutable, so the `+` menu shows no published profiles and the status
+    /// bar undercounts — for the whole run, unless the person happens to open
+    /// the Fleet screen. The loopback offer's `has_account_token` arrives
+    /// keychain-free, and `Some(true)` is the signal that reading the stored
+    /// token is finally worth it; `Some(false)`, `None` (an old daemon, a
+    /// locked store) and a missing offer all keep the keychain untouched, so
+    /// a loopback-only machine still never pays for it.
+    fn should_start_account_watch(&self, fleet: &[crate::fleet::FleetHost]) -> bool {
+        self.account_poke.is_none() && local_daemon_is_enrolled(fleet)
+    }
+
     /// Start the fleet's account watcher, once. The fetch closure is the
     /// whole transport: stored token → bearer GET /api/hosts → the minimal
     /// entries fleet.rs merges on. A 401 also flips the header through the
@@ -6502,6 +6528,17 @@ impl App {
         // Built before the font borrow below: these read tabs, fleet and the
         // filesystem, never the fonts.
         let fleet_hosts = self.shared.fleet.get().map(|f| f.snapshot()).unwrap_or_default();
+        // The enrolled machine's account machinery, started on the daemon's
+        // word instead of waiting for someone to open the Fleet screen —
+        // see `should_start_account_watch`. Cheap per rebuild: a bool and a
+        // scan of a handful of rows, and `account_poke` closes the gate the
+        // moment the watch is up.
+        if self.should_start_account_watch(&fleet_hosts) {
+            if self.account == AccountState::Unknown {
+                self.probe_account();
+            }
+            self.start_account_watch();
+        }
         // Retained beside the model it feeds: the fleet screen's hit map
         // carries card indices, and they must resolve against the snapshot
         // the cards were built from, not a fresher one.
@@ -17725,6 +17762,48 @@ mod run_on_host_tests {
         // And the third rider (#436) carries nothing but its intent: a host
         // row with it becomes a pane of the active tab, never a tab.
         assert_ne!(Pending::Split, Pending::Command(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod account_watch_tests {
+    use super::local_daemon_is_enrolled;
+
+    fn with_token(local: bool, token: Option<bool>) -> Vec<crate::fleet::FleetHost> {
+        let mut h = if local {
+            zest_fleet::fixture::local(1, "studio")
+        } else {
+            zest_fleet::fixture::host(2, "forge")
+        };
+        h.offer = Some(zest_proto::HostOffer { has_account_token: token, ..Default::default() });
+        vec![h]
+    }
+
+    #[test]
+    fn the_account_watch_starts_on_the_local_daemons_word_alone() {
+        // The gate for #537's fix: an enrolled machine's fleet must work
+        // without a visit to the Fleet screen, and an unenrolled one must
+        // still never pay a keychain read for a screen it never opens.
+        assert!(
+            local_daemon_is_enrolled(&with_token(true, Some(true))),
+            "the loopback offer says enrolled, keychain-free — start"
+        );
+        assert!(
+            !local_daemon_is_enrolled(&with_token(true, Some(false))),
+            "a readable store holding nothing is a machine that never enrolled"
+        );
+        assert!(
+            !local_daemon_is_enrolled(&with_token(true, None)),
+            "an old daemon or a locked store did not say — no keychain read on a guess"
+        );
+        assert!(
+            !local_daemon_is_enrolled(&with_token(false, Some(true))),
+            "another machine's enrolment says nothing about this one's token"
+        );
+        assert!(
+            !local_daemon_is_enrolled(&[zest_fleet::fixture::local(1, "studio")]),
+            "no offer yet — the loopback watcher has not answered"
+        );
     }
 }
 
