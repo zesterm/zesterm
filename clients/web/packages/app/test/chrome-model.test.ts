@@ -77,6 +77,19 @@ test('a multiline command is flattened before it reaches a chip', () => {
   assert.equal(label, 'for f in *; do echo $f done');
 });
 
+test('C1 controls are stripped too, not only C0', () => {
+  // The rule mirrored here is Rust's `char::is_control()`, which covers C0,
+  // DEL and C1 — and C1 is where a divergence would hide, those being the
+  // single-byte forms of the escape sequences this is stripping. A web client
+  // that kept them would put a control byte in a chip the native one cleans.
+  const label = chipTitle({ title: '', command: 'ls\u0085-la\u009b31m' });
+  assert.equal(label, 'ls -la 31m');
+  assert.ok(
+    ![...label].some((c) => c <= '\u001f' || (c >= '\u007f' && c <= '\u009f')),
+    `no control survives: ${JSON.stringify(label)}`,
+  );
+});
+
 test('a pasted script cannot reach the DOM whole', () => {
   // A guard, not a display decision — the bound sits far past anything a
   // 34px chip could show.

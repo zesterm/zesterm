@@ -1432,6 +1432,12 @@ mod tests {
             !label.chars().any(char::is_control),
             "no control byte survives into a label: {label:?}"
         );
+        // C0, DEL and C1 alike — `char::is_control` covers all three, and C1
+        // is where the web mirror of this rule diverged before review caught
+        // it (`chrome-model.ts`, PR #535). The pair is checked in both
+        // languages so the next divergence fails somewhere.
+        let c1 = session_label("ls\u{85}-la\u{9b}31m", "");
+        assert_eq!(c1, "ls -la 31m", "a C1 byte is a control byte");
     }
 
     #[test]

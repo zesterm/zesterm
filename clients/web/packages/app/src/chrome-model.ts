@@ -77,12 +77,17 @@ export function sessionName(command: string, title: string): string {
  * an ordinary VS Code-integration case, and an OSC 2 title is whatever a
  * program chose to send. Iterates code points, never `length` — an astral
  * emoji is two UTF-16 units and slicing between them makes a lone surrogate.
+ *
+ * The class spans C0, DEL **and C1** (U+0080–U+009F), because the rule it
+ * mirrors is Rust's `char::is_control()`, which covers all three — and C1 is
+ * exactly where a divergence would hide: those are the single-byte forms of
+ * the escape sequences this is stripping in the first place.
  */
 function oneLine(text: string): string {
   const out: string[] = [];
   let space = false;
   for (const c of text) {
-    if (/[\s\u0000-\u001f\u007f]/u.test(c)) {
+    if (/[\s\u0000-\u001f\u007f-\u009f]/u.test(c)) {
       space = out.length > 0;
       continue;
     }
