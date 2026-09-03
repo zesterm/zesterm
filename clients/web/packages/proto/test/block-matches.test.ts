@@ -92,6 +92,22 @@ test('a malformed context or author reads as null, and never throws', () => {
   assert.equal(m.command, LIVE.command, 'and the rest of the row survives');
 });
 
+test('one malformed row is dropped, and the rest of the reply survives', () => {
+  // A row `parseBlockMatch` cannot read at all — a `block` that is not a
+  // number — costs that row, not the reply, and not the fleet connection.
+  const msg = parseHostMessage({
+    t: 'block_matches',
+    query: 'cargo',
+    matches: [LIVE, { ...LIVE, block: 'x' }, { ...LIVE, block: 4 }],
+  });
+  assert.ok(isBlockMatches(msg));
+  if (!isBlockMatches(msg)) return;
+  assert.deepEqual(
+    msg.matches.map((m) => m.block),
+    [3, 4],
+  );
+});
+
 test('a refusal is still a block_matches, with its reason and no rows', () => {
   const msg = parseHostMessage({
     t: 'block_matches',

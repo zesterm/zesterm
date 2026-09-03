@@ -982,10 +982,19 @@ export function parseHostMessage(v: unknown): HostMessage {
       return {
         t,
         query: str(o['query'], 'block_matches.query'),
+        // Row by row, dropping one that will not read rather than the
+        // reply — or the connection: a malformed row from one machine is
+        // one row fewer, never every other machine's listing.
         matches:
           o['matches'] === undefined || o['matches'] === null
             ? []
-            : arr(o['matches'], 'block_matches.matches').map(parseBlockMatch),
+            : arr(o['matches'], 'block_matches.matches').flatMap((m) => {
+                try {
+                  return [parseBlockMatch(m)];
+                } catch {
+                  return [];
+                }
+              }),
         truncated: o['truncated'] === undefined ? false : bool(o['truncated'], 'block_matches.truncated'),
         sessions: o['sessions'] === undefined ? 0 : num(o['sessions'], 'block_matches.sessions'),
         // `skip_serializing_if = "String::is_empty"`: absent is the success case.
