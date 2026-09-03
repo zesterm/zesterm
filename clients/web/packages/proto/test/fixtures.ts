@@ -154,6 +154,27 @@ export function loadClientMessages(): {
   return g;
 }
 
+/**
+ * Reply-only host messages, framed exactly as `rmp_serde` wrote them (#530) —
+ * the one place the null-versus-absent spelling of a reply's options is
+ * checked against the real encoder rather than against JSON a test typed.
+ */
+export function loadHostMessages(): {
+  schema: number;
+  protocol: number;
+  messages: Array<{ name: string; wire: string }>;
+} {
+  const g = JSON.parse(readFileSync(join(FIXTURES_DIR, 'host-messages.json'), 'utf8')) as {
+    schema: number;
+    protocol: number;
+    messages: Array<{ name: string; wire: string }>;
+  };
+  if (g.schema !== FIXTURE_SCHEMA) {
+    throw new Error(`host-messages.json is schema ${g.schema}, this suite reads ${FIXTURE_SCHEMA}`);
+  }
+  return g;
+}
+
 export function loadBits(): {
   schema: number;
   cell_flags: Record<string, number>;

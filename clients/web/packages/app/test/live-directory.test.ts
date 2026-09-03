@@ -81,6 +81,7 @@ class FakeLink implements DirectoryLink {
   connects = 0;
   closes = 0;
   readonly creates: Array<{ command: string; cwd: string; cols: number; rows: number }> = [];
+  readonly searches: Array<{ query: string; limit: number }> = [];
   readonly events: ConnectionEvents;
 
   constructor(events: ConnectionEvents) {
@@ -94,6 +95,11 @@ class FakeLink implements DirectoryLink {
 
   close(): void {
     this.closes += 1;
+  }
+
+  searchBlocks(query: string, limit: number): boolean {
+    this.searches.push({ query, limit });
+    return true;
   }
 
   createSession(opts: { command: string; cwd: string; cols: number; rows: number }): void {
@@ -640,4 +646,48 @@ test('a create carries the profile it was asked for, verbatim', () => {
   assert.deepEqual(link.creates, [
     { command: 'wsl.exe -d Ubuntu', cwd: '/home/andy', cols: 143, rows: 41 },
   ]);
+});
+
+test('a search reaches only the machines that are online, and their answers come back by host', () => {
+  // A machine still in its handshake, asleep or failed is not asked and not
+  // counted: the query row prints "asked", and a frame that never went out
+  // would leave it saying `searching 2 hosts…` for ever.
+  const { links, directory } = harness();
+  directory.setHosts([MAC, PC]);
+  links.current(MAC.id).welcome();
+  assert.equal(directory.statusFor(MAC.id).kind, 'ready');
+  assert.equal(directory.statusFor(PC.id).kind, 'pending', 'PC is still probing');
+
+  assert.equal(directory.searchBlocks('cargo'), 1, 'one machine was online to ask');
+  assert.deepEqual(links.current(MAC.id).searches, [{ query: 'cargo', limit: 40 }]);
+  assert.deepEqual(links.current(PC.id).searches, [], 'a probing machine is not asked');
+  assert.equal(directory.blockSearch().hostsAsked, 1);
+
+  links.current(MAC.id).events.onBlockMatches?.({
+    t: 'block_matches',
+    query: 'cargo',
+    matches: [
+      {
+        host: MAC.id,
+        session: 3,
+        block: 1,
+        title: 'zsh',
+        command: 'cargo build',
+        command_truncated: false,
+        cwd: '/src',
+        state: { state: 'finished', exit_code: 0 },
+        started_ms: 1,
+        ended_ms: 2,
+        context: null,
+        author: null,
+      },
+    ],
+    truncated: false,
+    sessions: 1,
+    error: '',
+  });
+  const view = directory.blockSearch();
+  assert.equal(view.hostsAnswered, 1);
+  assert.equal(view.hits[0]?.hostId, MAC.id, 'keyed by the watch that answered');
+  assert.equal(view.hits[0]?.session, '3');
 });

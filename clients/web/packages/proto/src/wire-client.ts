@@ -97,6 +97,13 @@ export type ClientMessage =
   | { readonly t: 'enroll'; readonly code: string }
   | { readonly t: 'request_keyframe'; readonly session: SessionAddrLike }
   | { readonly t: 'list_sessions' }
+  /**
+   * Which command blocks on this host match `query` (#527): case-folded
+   * substring over the command line, empty for the newest. The host clamps
+   * `limit`. Answered by `block_matches`; an old daemon answers its generic
+   * `error`, which is why nothing waits on it.
+   */
+  | { readonly t: 'search_blocks'; readonly query: string; readonly limit: number }
   | {
       readonly t: 'create_session';
       readonly command: string;
@@ -200,6 +207,9 @@ export function encodeClientMessageBody(msg: ClientMessage): Uint8Array {
       break;
     case 'list_sessions':
       wire = { t: msg.t };
+      break;
+    case 'search_blocks':
+      wire = { t: msg.t, query: msg.query, limit: msg.limit };
       break;
     case 'create_session':
       wire = { t: msg.t, command: msg.command, cwd: msg.cwd, cols: msg.cols, rows: msg.rows };

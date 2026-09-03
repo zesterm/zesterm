@@ -10,8 +10,19 @@ import {
 import type { PaletteItem } from '../src/palette/sources.ts';
 import { moveSelection, openPalette } from '../src/state/palette.ts';
 
-function blockItem(text: string, recency: number | null = null): PaletteItem {
-  return { kind: 'block', tabId: 'h1:1', blockId: 0, text, provenance: '', recency, tone: 'success' };
+function blockItem(text: string, recency: number | null = null, tabId: string | null = 'h1:1'): PaletteItem {
+  return {
+    kind: 'block',
+    tabId,
+    hostId: 'h1',
+    sessionId: '1',
+    blockId: 0,
+    text,
+    provenance: '',
+    recency,
+    tone: 'success',
+    runnable: true,
+  };
 }
 
 function sessionItem(text: string): PaletteItem {
@@ -126,4 +137,17 @@ test('selection wraps against the real flattened result count', () => {
   assert.equal(s.selection, 2, '↑ from the first row lands on the LAST row of the last group');
   s = moveSelection(s, 1, count);
   assert.equal(s.selection, 0, '↓ past the last row wraps to the first block');
+});
+
+test('fleet rows interleave with live rows by recency, whichever machine ran them', () => {
+  // A fresher block stored on another machine ranks above an older one in
+  // an attached tab: the list is one history, not this tab's then theirs.
+  const groups = rankResults('', {
+    ...EMPTY,
+    blocks: [blockItem('old here', 100), blockItem('newer there', 200, null), blockItem('newest here', 300)],
+  });
+  assert.deepEqual(
+    groups[0]?.items.map((i) => i.text),
+    ['newest here', 'newer there', 'old here'],
+  );
 });

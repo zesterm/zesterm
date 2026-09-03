@@ -70,6 +70,7 @@ import {
 } from '@zesterm/control';
 import { signal } from 'sigx';
 
+import { blockSearchStore, type BlockSearchView } from './block-search.ts';
 import type { CreateSpec } from './create-session.ts';
 import { dialFor, type RelayAccess } from './dial-for.ts';
 import type { DirectorySource, DirectoryStatus } from './directory-source.ts';
@@ -126,6 +127,8 @@ export interface DirectoryLink {
     cols: number;
     rows: number;
   }): void;
+  /** Ask for matching blocks (#530); `false` when the frame could not go out yet. */
+  searchBlocks(query: string, limit: number): boolean;
 }
 
 /**
@@ -194,6 +197,14 @@ export interface LiveDirectory {
    * watching it. Rejects if that machine is not connected.
    */
   createSession(hostId: string, spec: CreateSpec): Promise<SessionEntry>;
+  /**
+   * Ask every machine that is online for the blocks matching `query`
+   * (#530), over the watches already open; returns how many were asked. A
+   * machine still probing, asleep or failed is not asked and not counted.
+   */
+  searchBlocks(query: string): number;
+  /** The search as it stands; a reactive read. */
+  blockSearch(): BlockSearchView;
   /** Close every connection and cancel every timer. */
   close(): void;
 }
@@ -237,6 +248,7 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
   });
 
   const watches = new Map<string, Watch>();
+  const search = blockSearchStore();
 
   const patch = (id: string, next: Partial<HostSnapshot>): void => {
     const current = state.hosts[id];
@@ -372,6 +384,9 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
       if (mine === undefined) waiter.reject(new Error('the created session was not in the listing'));
       else waiter.resolve(mine);
     },
+    // The search's answer, parked by the host it came from; the store drops
+    // an echo for a question no longer asked.
+    onBlockMatches: (reply) => search.answer(w.host.id, reply),
     onError: (message) => {
       // A protocol-level error from the daemon. It does not end the connection
       // — the watch keeps running — but it is very likely the answer to a
@@ -514,6 +529,20 @@ export function liveDirectory(options: LiveDirectoryOptions): LiveDirectory {
       });
     },
 
+    searchBlocks(query): number {
+      let asked = 0;
+      search.ask(query, (q, limit) => {
+        for (const w of watches.values()) {
+          // Only a machine that is answering: a link mid-handshake refuses
+          // the frame itself, and a stood-down machine has no link at all.
+          if (w.link === null || state.hosts[w.host.id]?.presence.kind !== 'online') continue;
+          if (w.link.searchBlocks(q, limit)) asked += 1;
+        }
+        return asked;
+      });
+      return asked;
+    },
+    blockSearch: () => search.view(),
     close(): void {
       for (const w of watches.values()) closeWatch(w);
       watches.clear();

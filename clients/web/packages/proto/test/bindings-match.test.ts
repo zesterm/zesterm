@@ -19,6 +19,7 @@
 import { test } from 'node:test';
 
 import type { AttrDef as GenAttrDef } from '@zest/bindings/AttrDef';
+import type { BlockMatch as GenBlockMatch } from '@zest/bindings/BlockMatch';
 import type { Color as GenColor } from '@zest/bindings/Color';
 import type { HostOffer as GenHostOffer } from '@zest/bindings/HostOffer';
 import type { HostProfile as GenHostProfile } from '@zest/bindings/HostProfile';
@@ -32,6 +33,7 @@ import type { Run as GenRun } from '@zest/bindings/Run';
 import type { Color } from '../src/color.ts';
 import type {
   AttrDef,
+  BlockMatch,
   CellMarks,
   CursorState,
   Delta,
@@ -83,6 +85,13 @@ type _Attr = Accepts<GenAttrDef, AttrDef>;
  */
 type _HostProfile = Accepts<GenHostProfile, HostProfile>;
 type _HostOffer = Accepts<GenHostOffer, HostOffer>;
+
+/**
+ * A search hit (#527) is exact in both directions and needs no `Filled`:
+ * every option is a plain `null` on the wire, never a skipped key, because
+ * the message is a reply and never rides a delta.
+ */
+type _BlockMatch = Accepts<GenBlockMatch, BlockMatch>;
 
 type _Run = Accepts<Filled<GenRun>, Run>;
 type _Row = Accepts<Filled<GenRowPayload>, RowPayload>;

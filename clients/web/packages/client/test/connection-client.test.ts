@@ -123,3 +123,76 @@ test('a daemon that predates the offer is served exactly as before', async () =>
   assert.equal(offers[0]?.profiles[0]?.tab_color, null);
   client.close();
 });
+
+test('a search is refused before the welcome and sent after it, and its answer arrives decoded', async () => {
+  // Before `welcome` the channel does not exist yet, so a frame written then
+  // would be plaintext on a connection about to be sealed; the boolean is
+  // what lets a caller count "hosts asked" truthfully.
+  const daemon = new FakeDaemon();
+  const answers: string[] = [];
+  const sessions: (number | null)[] = [];
+  const client = new ConnectionClient({
+    dial: daemon.dial,
+    signer: testSigner(),
+    label: 'test',
+    clock: new FakeClock(),
+    events: {
+      onBlockMatches: (reply) => {
+        answers.push(reply.query);
+        for (const m of reply.matches) sessions.push(m.session);
+      },
+      onError: (message) => answers.push(`error:${message}`),
+    },
+  });
+  client.connect();
+  daemon.current.open();
+  await flush();
+  assert.equal(client.searchBlocks('cargo', 40), false, 'not before the welcome');
+  assert.equal(daemon.current.lastOfType('search_blocks'), undefined);
+
+  await daemon.completeHandshake();
+  assert.equal(client.searchBlocks('cargo', 40), true);
+  const sent = daemon.current.lastOfType('search_blocks');
+  assert.deepEqual(sent, { t: 'search_blocks', query: 'cargo', limit: 40 });
+
+  daemon.current.deliver({
+    t: 'block_matches',
+    query: 'cargo',
+    matches: [
+      {
+        host: 'ab'.repeat(32),
+        session: 7,
+        block: 1,
+        title: '',
+        command: 'cargo build',
+        command_truncated: false,
+        cwd: '/',
+        state: { state: 'finished', exit_code: 0 },
+        started_ms: 1,
+        ended_ms: 2,
+        context: null,
+        author: null,
+      },
+      {
+        host: 'ab'.repeat(32),
+        session: null,
+        block: 2,
+        title: '',
+        command: 'cargo test',
+        command_truncated: false,
+        cwd: '/',
+        state: { state: 'finished', exit_code: null },
+        started_ms: null,
+        ended_ms: null,
+        context: null,
+        author: null,
+      },
+    ],
+    truncated: false,
+    sessions: 1,
+  });
+  await flush();
+  assert.deepEqual(answers, ['cargo'], 'the reply reached its own event and not onError');
+  assert.deepEqual(sessions, [7, null], 'a stored row keeps its null session through the decode');
+  client.close();
+});

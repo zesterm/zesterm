@@ -366,6 +366,59 @@ export function parseBlockPayload(v: unknown): BlockPayload {
   };
 }
 
+/**
+ * Every optional defaults; a structurally malformed row still throws.
+ *
+ * `state`, `context` and `author` degrade — `state` to `finished` with no
+ * code, the never-a-green-tick answer — where `parseBlockPayload` throws,
+ * because on this path a throw ends the fleet connection rather than a
+ * frame. What cannot be defaulted (not an object, no `host`, no `block`) is
+ * thrown, and `parseHostMessage`'s `block_matches` arm catches it per row
+ * and drops that row; a caller reaching this directly must do the same.
+ */
+export function parseBlockMatch(v: unknown): BlockMatch {
+  const o = obj(v, 'BlockMatch');
+  const optNum = (key: string): number | null =>
+    o[key] === null || o[key] === undefined ? null : num(o[key], `BlockMatch.${key}`);
+  const optStr = (key: string): string =>
+    o[key] === null || o[key] === undefined ? '' : str(o[key], `BlockMatch.${key}`);
+  let state: BlockState;
+  try {
+    state = parseBlockState(o['state']);
+  } catch {
+    state = { state: 'finished', exit_code: null };
+  }
+  // The optionals too: a context object with a null inside it, or an author
+  // that is not a string, is a row with less to say — never a reason to
+  // drop the connection carrying every other machine's listing.
+  let context: BlockContextPayload | null = null;
+  if (o['context'] !== undefined && o['context'] !== null) {
+    try {
+      context = parseBlockContext(o['context']);
+    } catch {
+      context = null;
+    }
+  }
+  const author = typeof o['author'] === 'string' ? o['author'] : null;
+  return {
+    host: str(o['host'], 'BlockMatch.host'),
+    session: optNum('session'),
+    block: num(o['block'], 'BlockMatch.block'),
+    title: optStr('title'),
+    command: optStr('command'),
+    command_truncated:
+      o['command_truncated'] === undefined
+        ? false
+        : bool(o['command_truncated'], 'BlockMatch.command_truncated'),
+    cwd: optStr('cwd'),
+    state,
+    started_ms: optNum('started_ms'),
+    ended_ms: optNum('ended_ms'),
+    context,
+    author,
+  };
+}
+
 export function parseDelta(v: unknown): Delta {
   const o = obj(v, 'Delta');
   return {
@@ -659,6 +712,53 @@ export interface ErrorMessage {
 }
 
 /**
+ * One command block the host's search matched (#527) — live, or one only
+ * its store remembers (ADR-020).
+ *
+ * The first reply-only tag this client models. Every option is a plain
+ * `null` on the wire — the message never rides a delta — and every reader
+ * here defaults rather than throws: a throw in `parseHostMessage` ends the
+ * fleet connection carrying every other machine's listing.
+ */
+export interface BlockMatch {
+  readonly host: string;
+  /**
+   * `null` for a block whose session is gone and which only a store
+   * remembers: nothing to open. Ids restart at one on every daemon start,
+   * so a dead session's number would name a live stranger.
+   */
+  readonly session: number | null;
+  readonly block: number;
+  readonly title: string;
+  readonly command: string;
+  /** The host cut a stored command at 4 KiB: read it, never re-run it as whole. */
+  readonly command_truncated: boolean;
+  readonly cwd: string;
+  readonly state: BlockState;
+  readonly started_ms: number | null;
+  readonly ended_ms: number | null;
+  readonly context: BlockContextPayload | null;
+  /** 64 lowercase hex, or `null` when the daemon recorded nobody. */
+  readonly author: string | null;
+}
+
+/**
+ * The answer to `search_blocks`. `query` echoes the question — the only
+ * correlation there is; a reply for a query the palette has typed past is
+ * dropped by comparing it. A refusal is this message with `error` set, never
+ * an `error` message (that is what an *old* daemon says).
+ */
+export interface BlockMatchesMessage {
+  readonly t: 'block_matches';
+  readonly query: string;
+  readonly matches: readonly BlockMatch[];
+  readonly truncated: boolean;
+  /** Live sessions scanned; `0` with no matches is "nothing to search". */
+  readonly sessions: number;
+  readonly error: string;
+}
+
+/**
  * A message this client does not model, kept rather than thrown.
  *
  * The daemon may be newer, and `zest-proto`'s own test
@@ -685,6 +785,7 @@ export type HostMessage =
   | Attention
   | ProgressMessage
   | ErrorMessage
+  | BlockMatchesMessage
   | UnknownMessage;
 
 /**
@@ -712,6 +813,7 @@ export const isExited = modeled<Exited>('exited');
 export const isAttention = modeled<Attention>('attention');
 export const isProgress = modeled<ProgressMessage>('progress');
 export const isErrorMessage = modeled<ErrorMessage>('error');
+export const isBlockMatches = modeled<BlockMatchesMessage>('block_matches');
 
 /**
  * An unknown cause reads as `bell` rather than throwing.
@@ -879,6 +981,28 @@ export function parseHostMessage(v: unknown): HostMessage {
             ? null
             : parseSessionAddr(o['session']),
         message: str(o['message'], 'error.message'),
+      };
+    case 'block_matches':
+      return {
+        t,
+        query: str(o['query'], 'block_matches.query'),
+        // Row by row, dropping one that will not read rather than the
+        // reply — or the connection: a malformed row from one machine is
+        // one row fewer, never every other machine's listing.
+        matches:
+          o['matches'] === undefined || o['matches'] === null
+            ? []
+            : arr(o['matches'], 'block_matches.matches').flatMap((m) => {
+                try {
+                  return [parseBlockMatch(m)];
+                } catch {
+                  return [];
+                }
+              }),
+        truncated: o['truncated'] === undefined ? false : bool(o['truncated'], 'block_matches.truncated'),
+        sessions: o['sessions'] === undefined ? 0 : num(o['sessions'], 'block_matches.sessions'),
+        // `skip_serializing_if = "String::is_empty"`: absent is the success case.
+        error: o['error'] === undefined ? '' : str(o['error'], 'block_matches.error'),
       };
     default:
       return { t, raw: o };

@@ -25,8 +25,10 @@
  */
 
 import type { ClientSigner } from '@zesterm/auth';
-import type { Dial } from '@zesterm/client';
+import { ConnectionClient, type ConnectionEvents, type Dial } from '@zesterm/client';
 import type { HostFacts, SessionEntry } from '@zesterm/control';
+
+import { blockSearchStore, type BlockSearchView } from './block-search.ts';
 
 import type { HostChoice } from './chrome-model.ts';
 import { createSessionOverDataPlane, type CreateSpec } from './create-session.ts';
@@ -123,7 +125,29 @@ export interface HostSource {
    * them is how "we cannot reach it" gets drawn as "it has nothing".
    */
   factsOf(hostId: string): HostFacts | null;
+  /**
+   * Ask every machine this shell is *connected* to for the blocks matching
+   * `query` (#530). Returns how many were actually asked — a frame that did
+   * not go out is not a host searched, and the query row prints this number.
+   */
+  searchBlocks(query: string): number;
+  /** The search as it stands; a reactive read the palette's render makes. */
+  blockSearch(): BlockSearchView;
+  /** Release anything the source holds open, on the shell's unmount. */
+  close(): void;
 }
+
+/**
+ * The connection the loopback path opens for its search, as much of a
+ * `ConnectionClient` as it needs — a seam so a test can hand in a fake.
+ */
+export interface SearchLink {
+  connect(): void;
+  close(): void;
+  searchBlocks(query: string, limit: number): boolean;
+}
+
+export type OpenSearch = (dial: Dial, events: ConnectionEvents) => SearchLink;
 
 /**
  * The loopback path: one machine, the directory's own.
@@ -136,7 +160,23 @@ export function localHostSource(
   directory: DirectoryReader,
   signer: ClientSigner,
   relay: RelayAccess | null = null,
+  openSearch: OpenSearch = (dial, events) =>
+    new ConnectionClient({ dial, signer, label: 'zesterm-web', events }),
 ): HostSource {
+  // The browser holds no connection to its own daemon on this path — the
+  // sidecar owns that one and projects it through the actor — so the search
+  // opens one of its own: lazily, on the first question, and kept for the
+  // shell's life. Not one per query (an Ed25519 signature and an X25519
+  // agreement per keystroke), and not opened on ⌘K (a handshake exactly when
+  // the person starts typing). The device key is the one the terminal already
+  // attaches with over the same plane, so pairing is already done.
+  const search = blockSearchStore();
+  let link: { hostId: string; client: SearchLink } | null = null;
+  // The question asked before the handshake finished. ⌘K asks for the newest
+  // blocks on the way in, and on this path that is the very call that opens
+  // the connection — so the frame cannot go out yet, and without this the
+  // palette would show no fleet rows until the person typed.
+  let pending: string | null = null;
   const own = (): { id: string; label: string; dial: Dial | null } | null => {
     const dir = directory();
     if (dir.kind !== 'ready' || dir.view.host === null) return null;
@@ -182,6 +222,41 @@ export function localHostSource(
       const dir = directory();
       if (dir.kind !== 'ready' || dir.view.host?.id !== hostId) return null;
       return dir.view.facts;
+    },
+    searchBlocks: (query) => {
+      const host = own();
+      let asked = 0;
+      search.ask(query, (q, limit) => {
+        if (host === null || host.dial === null) return 0;
+        if (link === null || link.hostId !== host.id) {
+          link?.client.close();
+          const hostId = host.id;
+          const client = openSearch(host.dial, {
+            onBlockMatches: (reply) => search.answer(hostId, reply),
+            onConnection: (state) => {
+              // The channel exists now: the question that could not go out
+              // goes out, as the question still being asked.
+              if (state.phase !== 'connected' || pending === null) return;
+              const held = pending;
+              pending = null;
+              search.ask(held, (hq, hl) => (client.searchBlocks(hq, hl) ? 1 : 0));
+            },
+          });
+          link = { hostId, client };
+          client.connect();
+        }
+        // `false` while the handshake is still running: held, and sent
+        // when the welcome lands.
+        asked = link.client.searchBlocks(q, limit) ? 1 : 0;
+        pending = asked === 0 ? q : null;
+        return asked;
+      });
+      return asked;
+    },
+    blockSearch: () => search.view(),
+    close: () => {
+      link?.client.close();
+      link = null;
     },
     create: (hostId, spec) => {
       const host = own();
@@ -287,5 +362,11 @@ export function liveHostSource(live: LiveDirectory, relay: RelayAccess | null): 
     // machine is not connected, so an unreachable one refuses rather than
     // hangs.
     create: (hostId, spec) => live.createSession(hostId, spec),
+    // The directory holds the watches and the store both; the search rides
+    // the per-machine connections it already keeps open.
+    searchBlocks: (query) => live.searchBlocks(query),
+    blockSearch: () => live.blockSearch(),
+    // `Fleet` closes the directory itself; nothing here is held separately.
+    close: () => {},
   };
 }

@@ -10,17 +10,19 @@
 
 import type { ClientSigner } from '@zesterm/auth';
 import {
-  decode,
-  encodeClientMessageBody,
-  encodeFrame,
-  FrameReader,
-  isErrorMessage,
-  isSessions,
-  parseHostMessage,
+  type BlockMatchesMessage,
   type ClientMessage,
+  FrameReader,
   type HostOffer,
   type SessionAddr,
   type SessionInfo,
+  decode,
+  encodeClientMessageBody,
+  encodeFrame,
+  isBlockMatches,
+  isErrorMessage,
+  isSessions,
+  parseHostMessage,
 } from '@zesterm/proto';
 
 import { type Clock, systemClock, type TimerHandle } from './clock.ts';
@@ -53,6 +55,13 @@ export interface ConnectionEvents {
   onWelcome?(host: { readonly id: string; readonly label: string }): void;
   onConnection?(state: ConnectionState): void;
   onError?(message: string): void;
+  /**
+   * The daemon answered a `search_blocks` (#527). Host-scoped — it names no
+   * session — so it belongs to this connection rather than a
+   * `SessionClient`. The echoed `query` is the correlation; there is no
+   * pending map, which is the native app's parked-slot shape.
+   */
+  onBlockMatches?(reply: BlockMatchesMessage): void;
 }
 
 export interface ConnectionClientOptions {
@@ -290,9 +299,26 @@ export class ConnectionClient {
       if (msg.offer !== null) this.#events.onHostOffer?.(msg.offer);
       return;
     }
+    if (isBlockMatches(msg)) {
+      this.#events.onBlockMatches?.(msg);
+      return;
+    }
     if (isErrorMessage(msg)) {
       this.#events.onError?.(msg.message);
     }
+  }
+
+  /**
+   * Ask this machine which of its command blocks match `query` (#527).
+   * Returns whether the frame went out: before `welcome` the channel does
+   * not exist yet, and a frame written then would be plaintext on a
+   * connection about to be sealed. A caller counting "hosts asked" needs
+   * the truth, not the intent.
+   */
+  searchBlocks(query: string, limit: number): boolean {
+    if (!this.#connected) return false;
+    this.#send({ t: 'search_blocks', query, limit });
+    return true;
   }
 
   #send(msg: ClientMessage): void {

@@ -542,6 +542,17 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       digit (only the digit: the program decides what it means). Touch
       only, or where the key bar is on; a mouse click on output still means
       "focus". `optionOf` in `blocks-pane-model.ts`, #421.
+- [x] **⌘K searches the fleet's blocks** (#530, PR 3 of #526). The same
+      `search_blocks`/`block_matches` pair as the native app, and the first
+      reply-only tag the web client models — `parseBlockMatch` defaults and
+      never throws, because a throw in `parseHostMessage` ends the fleet
+      connection. Loopback holds one long-lived search connection (the
+      sidecar owns the daemon connection; a handshake per keystroke was the
+      alternative), hosted rides the per-machine watches and asks only the
+      online ones; `host-messages.json` pins a reply's null-versus-absent
+      spelling against `rmp_serde`'s real bytes. The count is hosts that
+      answered; a stored block's ⏎ runs in the active tab; a cut command
+      runs nowhere.
 - [x] **Part 4 — it opens on the device.** Part 1's synchronous `focus()`
       was a no-op on a real iPad: the textarea is focused at mount, and iOS
       opens the keyboard only for a focus *change* in the gesture. A touch on
@@ -698,9 +709,6 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       Protocol & daemon. A stored command longer than 4 KiB is cut and says
       so (`command_truncated`), and the palette shows it without letting ⏎
       re-run half a script.
-- [ ] **The browser palette** (PR 3 of #526): `block_matches` would be the
-      first reply-only tag the web client models; one long-lived search
-      connection on loopback, the per-machine watches on the hosted path.
 
 **Deliberately not built:** no chat sidebar; no agent loop of our own
 (harnesses improve monthly and a terminal shipping an inferior one ages badly —
