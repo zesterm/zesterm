@@ -384,6 +384,18 @@ export function parseBlockMatch(v: unknown): BlockMatch {
   } catch {
     state = { state: 'finished', exit_code: null };
   }
+  // The optionals too: a context object with a null inside it, or an author
+  // that is not a string, is a row with less to say — never a reason to
+  // drop the connection carrying every other machine's listing.
+  let context: BlockContextPayload | null = null;
+  if (o['context'] !== undefined && o['context'] !== null) {
+    try {
+      context = parseBlockContext(o['context']);
+    } catch {
+      context = null;
+    }
+  }
+  const author = typeof o['author'] === 'string' ? o['author'] : null;
   return {
     host: str(o['host'], 'BlockMatch.host'),
     session: optNum('session'),
@@ -398,9 +410,8 @@ export function parseBlockMatch(v: unknown): BlockMatch {
     state,
     started_ms: optNum('started_ms'),
     ended_ms: optNum('ended_ms'),
-    context:
-      o['context'] === undefined || o['context'] === null ? null : parseBlockContext(o['context']),
-    author: o['author'] === undefined || o['author'] === null ? null : str(o['author'], 'BlockMatch.author'),
+    context,
+    author,
   };
 }
 

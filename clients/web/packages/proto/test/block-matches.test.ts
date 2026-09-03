@@ -82,6 +82,16 @@ test('an unknown state reads as finished with no code, and never throws', () => 
   assert.deepEqual(missing.state, { state: 'finished', exit_code: null });
 });
 
+test('a malformed context or author reads as null, and never throws', () => {
+  // The same rule as `state`: every optional degrades. A context whose
+  // branch is a null, or an author that is a number, is a row with less to
+  // say — not a dropped fleet connection.
+  const m = parseBlockMatch({ ...LIVE, context: { branch: null }, author: 7 });
+  assert.equal(m.context, null);
+  assert.equal(m.author, null);
+  assert.equal(m.command, LIVE.command, 'and the rest of the row survives');
+});
+
 test('a refusal is still a block_matches, with its reason and no rows', () => {
   const msg = parseHostMessage({
     t: 'block_matches',

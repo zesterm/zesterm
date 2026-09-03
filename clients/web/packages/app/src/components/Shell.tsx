@@ -320,11 +320,14 @@ export const Shell = component<{
     const attached: AttachedTabBlocks[] = [];
     for (const [tabId, hooks] of termHooks) {
       const tab = store.tabs.tabs.find((t) => t.id === tabId);
-      if (tab === undefined) continue;
+      // A tab always has its primary pane; one without is not a session to
+      // dedupe against, and an empty id would key its blocks wrongly.
+      const pane = tab?.panes[0];
+      if (tab === undefined || pane === undefined) continue;
       attached.push({
         tabId,
         hostId: tab.hostId,
-        sessionId: tab.panes[0]?.sessionId ?? '',
+        sessionId: pane.sessionId,
         hostLabel: labels[tab.hostId] ?? shortHostId(tab.hostId),
         blocks: hooks.blocks(),
       });
