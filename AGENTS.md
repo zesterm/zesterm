@@ -1011,6 +1011,24 @@ you need before you trip on it.
 
 ### App UI
 
+- **A pure merge that invents empty facts hides a live join, and the dev LAN
+  is exactly the network that cannot show it.** `merge_account`'s append arm
+  minted a `FleetHost` with `sessions: default()` and `offer: None` under a
+  comment asserting "nothing has connected to this machine" — which another
+  thread falsified: the supervisor's watcher had connected through the relay
+  and filled `state.sessions`/`state.offers`, and the snapshot joined those
+  maps only into the *discovery* rows built earlier. So a machine only the
+  account knows — the relay-only case the tunnel exists for — had its live
+  session list and published profiles dropped by every snapshot, while the
+  same machine on the dev LAN (an mDNS row) worked, which is how it shipped.
+  Sessions still *appeared* to work because an open tab's sidebar group is
+  tab-derived — labelled by the Welcome's hostname, not the account's label,
+  which is the tell the two sources had diverged. The join now runs once,
+  after every source has contributed rows (`build_snapshot`,
+  `zest-app/src/fleet.rs`); the test drives a host present only in the
+  account listing. When a row builder cannot know a fact, leave the field
+  empty *and make sure someone downstream owns filling it* — a comment
+  claiming the fact does not exist is how nobody does. (#537)
 - **A UI text entry must never invent its own key handling.** An entry that
   `return`s before the keymap table swallows every chord that reaches it, and
   the guard that makes a chord "not text" is the same guard that eats ⌘V —

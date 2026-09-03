@@ -2336,7 +2336,9 @@ fn launcher_overlay(
         // saying the same thing in the same treatment.
         LauncherRow::Group { .. } => GROUP_HEADER_H * s,
         LauncherRow::Divider => LAUNCHER_DIVIDER_H * s,
-        LauncherRow::RunOnHost | LauncherRow::ManageProfiles { .. } => LAUNCHER_ACTION_H * s,
+        LauncherRow::Note { .. } | LauncherRow::RunOnHost | LauncherRow::ManageProfiles { .. } => {
+            LAUNCHER_ACTION_H * s
+        }
     };
     let content_h: f32 = LAUNCHER_HEAD_H * s
         + launcher.rows.iter().map(&row_h).sum::<f32>()
@@ -2436,6 +2438,23 @@ fn launcher_overlay(
             continue;
         }
 
+        // A note is context under its header, not a row to land on: drawn
+        // faint, `continue` before the selection wash and the hit region,
+        // exactly as the header above it (#537).
+        if let LauncherRow::Note { text } = row {
+            out.texts.push(TextRun {
+                text: text.clone(),
+                pos: [rect[0] + 12.0 * s, baseline_in(rect[1], rh, UI_CHORD * s)],
+                max_width: (rect[2] - 24.0 * s).max(0.0),
+                color: colors.text_faint,
+                clip: panel,
+                px: UI_CHORD * s,
+                bold: false,
+                tracking: 0.0,
+            });
+            continue;
+        }
+
         let selected = i == launcher.selected;
         let hovered = hover == Some(HitRegion::LauncherRow(i));
         // Selected rows read accentSoft, hovered ones selSoft (§1) — the
@@ -2447,9 +2466,9 @@ fn launcher_overlay(
         }
 
         match row {
-            // Both handled above, before the selection wash and the hit
-            // region — neither is a row you can land on.
-            LauncherRow::Divider | LauncherRow::Group { .. } => {}
+            // All handled above, before the selection wash and the hit
+            // region — none is a row you can land on.
+            LauncherRow::Divider | LauncherRow::Group { .. } | LauncherRow::Note { .. } => {}
             LauncherRow::Profile { name, command, host_label, default, digit, active, accent } => {
                 // Glyph tile: the row's accent on a 12%-alpha wash of it —
                 // the same recipe as the tab chips, so a profile looks like

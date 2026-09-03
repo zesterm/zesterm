@@ -82,6 +82,23 @@ the history behind them is in closed issues and PRs.
       composite our own chrome, so it is ours to have. Phase 2 (#521) is the
       configure story: an *effective/inert* chip in the generated field row,
       so a setting that does nothing yet says why.
+- [x] **A relay-only machine's profiles reach the `+` menu, without a Fleet
+      screen visit** (#537). Two starvations stacked: the snapshot joined the
+      watchers' sessions/offer maps only into discovery rows, so a machine
+      only the account knows — reached through the tunnel, invisible to
+      mDNS, the case the relay exists for — had its watcher's data dropped
+      by every snapshot (`merge_account`'s append arm cannot know it, and
+      nothing after it looked; one join now runs after the merge, for every
+      row); and the account watch started only when the Fleet screen was
+      shown, so until then the machine did not exist at all — the status bar
+      counted "1 hosts online" and the menu was local-only for the whole
+      run. The watch now starts on the loopback offer's `has_account_token`,
+      which arrives keychain-free, so a loopback-only machine still never
+      touches the keychain — and `watch_account` became idempotent at the
+      model, closing the two-windows-two-watchers edge below on the way. An
+      enrolled online machine whose watcher has not answered yet shows a
+      header and a faint "connecting…" line instead of nothing: the silence
+      is what let a broken join read as a feature that does not exist.
 - [ ] Multi-window, the rest of #489 after #490 (the windows), #497 (a
       second launch opens in the running one) and #501 (a tab moved to a new
       window, from the palette): drag-out — a chip dragged past the strip's
@@ -93,8 +110,7 @@ the history behind them is in closed issues and PRs.
       (#524). Known edges: closing the last
       window quits on macOS too (winit 0.30 exposes no Dock-reopen hook; an
       `NSApplicationDelegate` is a bounded follow-up), a Wayland restore is
-      size-only (no global coordinates), two windows on the Fleet screen run
-      two account watchers (idempotent, so merely wasteful), a `--new-tab`
+      size-only (no global coordinates), a `--new-tab`
       into an *existing* window cannot be raised on Wayland (winit 0.30 takes
       an activation token only for a new window), and Windows Terminal's
       `useAnyExisting` — the same window per virtual desktop — has no
