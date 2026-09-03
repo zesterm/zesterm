@@ -32,6 +32,7 @@ import { sliceBlocks, type BlockPayload } from '@zesterm/proto';
 import { resolveTerminalPalette, type Theme } from '@zesterm/theme';
 import type { SessionEntry } from '@zesterm/control';
 
+import { sessionName } from '../chrome-model.ts';
 import { fitGrid } from '../grid-fit.ts';
 import { predictKeyOf, predictKeysOfText } from '../predict-key.ts';
 import { currentTheme, themeStore } from '../state/theme.ts';
@@ -103,6 +104,11 @@ export const TerminalView = component<{
   theme: Theme;
   /** The tab chip owns the visible title now; this is how it learns it. */
   onTitle?: (title: string) => void;
+  /**
+   * What this session last ran, off its blocks — the chip's first choice of
+   * name, ahead of the OSC title.
+   */
+  onCommand?: (command: string) => void;
   /** Link health surfaces on the tab, not on a status bar the design removed. */
   onLink?: (link: LinkState) => void;
   /** The palette's seam; called with null on unmount so the shell's map stays honest. */
@@ -183,6 +189,21 @@ export const TerminalView = component<{
     });
   };
 
+  /**
+   * Name this session, everywhere it is named.
+   *
+   * One function because the two facts arrive on different events — the
+   * command on `onBlocksChanged`, the OSC title on `onTitle` — and the
+   * precedence between them has to be the same either way. `sessionName`
+   * returns empty for a session that has said nothing, which is where the
+   * browser tab's own default belongs; the chip's is `shell`.
+   */
+  const nameTab = (command: string, title: string): void => {
+    const name = sessionName(command, title);
+    document.title = name === '' ? 'zesterm' : `${name} — zesterm`;
+    ctx.props.onCommand?.(command);
+  };
+
   // Constructed in setup, not onMounted: both panes take it as a prop, and
   // the first render happens before mount. Nothing here touches the DOM —
   // the socket opens in connect(), below.
@@ -201,12 +222,16 @@ export const TerminalView = component<{
         else scheduleModel();
       },
       onBlocksChanged: () => {
+        // Outside the alt-screen guard on purpose: a `vim` tab still has a
+        // command, and it is the *model* rebuild that the guard is about.
+        // Fires on the keyframe too, so a tab is named the moment it attaches.
+        nameTab(client.grid.lastCommand(), client.grid.title);
         if (!client.grid.altScreen) scheduleModel();
       },
       onTitle: (title) => {
         // The tab chip owns the visible title now (the in-pane header is
         // gone); the document title keeps naming the browser tab.
-        document.title = title === '' ? 'zesterm' : `${title} — zesterm`;
+        nameTab(client.grid.lastCommand(), title);
         ctx.props.onTitle?.(title);
       },
       onConnection: (state) => {

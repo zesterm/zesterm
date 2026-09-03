@@ -8,6 +8,7 @@ import {
   activate,
   openSingleton,
   groupByHost,
+  setCommand,
   setLink,
   setTitle,
   type Tab,
@@ -19,6 +20,7 @@ function tab(id: string, over: Partial<Tab> = {}): Tab {
     id,
     kind: 'session',
     title: id,
+    command: '',
     hostId: 'studio',
     cwd: '~',
     color: null,
@@ -172,4 +174,19 @@ test('setLink flips only the named tab and no-ops by reference otherwise', () =>
   );
   assert.equal(cut.tabs.find((t) => t.id === 'b')?.link, 'live', 'only the cut tab degrades');
   assert.equal(setLink(s, 'a', 'live'), s, 'an unchanged link must not cause a re-render');
+});
+
+test('a command arriving off the blocks renames its tab', () => {
+  const s = withTabs(tab('a'), tab('b'));
+  const named = setCommand(s, 'a', 'cargo build');
+  assert.equal(named.tabs[0]?.command, 'cargo build');
+  assert.equal(named.tabs[1]?.command, '', 'only the tab named is touched');
+});
+
+test('setCommand is a no-op by reference, so no signal fires', () => {
+  // Same contract as setTitle: a keyframe restates the blocks on every
+  // reconnect, and a new object each time would repaint the whole strip.
+  const s = setCommand(withTabs(tab('a')), 'a', 'cargo build');
+  assert.equal(setCommand(s, 'a', 'cargo build'), s, 'an unchanged command');
+  assert.equal(setCommand(s, 'nope', 'x'), s, 'an unknown id');
 });

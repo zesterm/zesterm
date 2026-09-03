@@ -39,6 +39,105 @@ pub fn tab_accent(identity: Option<&ProfileIdentity>, host_slot: usize) -> Accen
     }
 }
 
+/// A session nobody has named.
+///
+/// One constant because this was six string literals across the app and one
+/// more in the web client, and a fallback spelled differently in two places
+/// is two fallbacks.
+pub const UNNAMED_SESSION: &str = "shell";
+
+/// The longest label anything keeps.
+///
+/// Far beyond what any chip can show (~30 characters at the 168px basis), so
+/// it never truncates anything a person would see. It exists because chrome
+/// text is re-shaped on *every presented frame* with no shaping cache
+/// (`ui_text::emit_ui_run`): without a bound, one pasted multi-kilobyte
+/// command would pay for itself sixty times a second for as long as its tab
+/// is open.
+const MAX_LABEL_BYTES: usize = 512;
+
+/// What a session is called, in one place.
+///
+/// Precedence: **the last command the shell told us about, then the OSC 0/2
+/// title, then [`UNNAMED_SESSION`]**. The command wins because a tab you left
+/// an hour ago has to answer "what did I run here", which a title of `zsh` —
+/// or, under the default macOS zsh, the same cwd as every other tab — never
+/// did. And it *keeps* the finished command until the next one starts: a chip
+/// that reverts the moment a build ends is a chip that forgets the thing you
+/// came back to read.
+///
+/// This is what [`zest_config::profiles::TabTitle::FromShell`] should always
+/// have meant; the other two variants are still unapplied (see ROADMAP).
+#[must_use]
+pub fn session_label(command: &str, osc_title: &str) -> String {
+    let name = session_name(command, osc_title);
+    if name.is_empty() {
+        UNNAMED_SESSION.to_string()
+    } else {
+        name
+    }
+}
+
+/// The precedence without the fallback: empty when the session has said
+/// nothing about itself.
+///
+/// The OS titlebar wants this one — its default is the application's name,
+/// not `shell` — and it is the only caller that has a better answer than
+/// [`UNNAMED_SESSION`] to fall back to.
+fn session_name(command: &str, osc_title: &str) -> String {
+    let command = one_line(command);
+    if !command.is_empty() {
+        return command;
+    }
+    one_line(osc_title)
+}
+
+/// [`session_label`] over a live terminal: both facts under the one lock the
+/// caller already holds.
+#[must_use]
+pub fn terminal_label(term: &zest_core::Terminal) -> String {
+    session_label(command_of(term), term.title())
+}
+
+/// [`session_name`] over a live terminal — empty when unnamed.
+#[must_use]
+pub fn terminal_name(term: &zest_core::Terminal) -> String {
+    session_name(command_of(term), term.title())
+}
+
+fn command_of(term: &zest_core::Terminal) -> &str {
+    term.blocks().last_command().map_or("", |b| b.command.as_str())
+}
+
+/// Flatten text that will be drawn as a single line.
+///
+/// Both inputs need it and for the same reason: `OSC 633;E` un-escapes `\x0a`,
+/// so a multiline command is an ordinary VS Code-integration case, and an
+/// `OSC 2` title is whatever a program chose to send. Control bytes become
+/// spaces — the `tabs::sanitize` rule, which exists because text drawn from
+/// elsewhere must not carry an escape back into the pane reporting it — and
+/// runs of whitespace collapse so `for f in *; do` does not arrive with the
+/// newline's worth of indentation after it.
+fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    let mut space = false;
+    for c in text.chars() {
+        if c.is_control() || c.is_whitespace() {
+            space = !out.is_empty();
+            continue;
+        }
+        if out.len() + usize::from(space) + c.len_utf8() > MAX_LABEL_BYTES {
+            break;
+        }
+        if space {
+            out.push(' ');
+            space = false;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// How reachable a tab's host currently looks.
 ///
 /// A projection of `zest_mesh::Presence` so the chrome does not grow a mesh
@@ -87,7 +186,8 @@ pub enum TabKind {
 pub struct TabModel {
     pub addr: SessionAddr,
     pub kind: TabKind,
-    /// Already derived: OSC title, else cwd basename, else "shell".
+    /// Already derived by [`session_label`]: the last command, else the OSC
+    /// title, else `shell`.
     pub title: String,
     /// The machine's display name ("studio"). Layout composes the chip's
     /// `host · cwd` line and the sidebar's grouping from this.
@@ -1284,6 +1384,108 @@ mod tests {
             background_dim: None,
             title: zest_config::TabTitle::FromShell,
         }
+    }
+
+    #[test]
+    fn a_session_is_named_by_what_it_last_ran() {
+        // The precedence table. The command wins because a tab you left an
+        // hour ago has to answer "what did I run here" -- under the default
+        // macOS zsh the OSC title is the cwd, so without this every tab in a
+        // window reads the same.
+        let cases = [
+            ("cargo build", "~/dev/zesterm", "cargo build"),
+            ("", "~/dev/zesterm", "~/dev/zesterm"),
+            // A blank command is not a name; the title still is.
+            ("   ", "~/dev/zesterm", "~/dev/zesterm"),
+            ("cargo build", "", "cargo build"),
+            ("", "", UNNAMED_SESSION),
+            // ...and neither is a blank title.
+            ("", "  \t ", UNNAMED_SESSION),
+        ];
+        for (command, title, want) in cases {
+            assert_eq!(
+                session_label(command, title),
+                want,
+                "session_label({command:?}, {title:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unnamed_session_leaves_the_os_titlebar_to_its_own_default() {
+        // The one caller with a better answer than "shell": a window with
+        // nothing to say is called zesterm, which is why the precedence and
+        // the fallback are two functions.
+        assert!(session_name("", "").is_empty());
+        assert_eq!(session_name("", "~/dev"), "~/dev");
+    }
+
+    #[test]
+    fn a_multiline_command_stays_one_line() {
+        // Not theoretical: OSC 633;E un-escapes \x0a, so a multiline command
+        // is an ordinary VS Code-integration case. A raw newline in a chip
+        // draws a second line over the strip; a raw escape drawn back into a
+        // pane would repaint it.
+        let label = session_label("for f in *; do\n  echo $f\r\ndone", "");
+        assert_eq!(label, "for f in *; do echo $f done");
+        assert!(
+            !label.chars().any(char::is_control),
+            "no control byte survives into a label: {label:?}"
+        );
+    }
+
+    #[test]
+    fn a_pasted_script_is_cut_on_a_char_boundary() {
+        // Chrome text is re-shaped every presented frame with no cache, so
+        // the bound is a per-frame cost guard, not a display decision -- it
+        // sits far beyond anything a chip can show.
+        let long = "\u{e9}".repeat(4096);
+        let label = session_label(&long, "");
+        assert!(label.len() <= MAX_LABEL_BYTES, "bounded: {}", label.len());
+        assert!(
+            label.chars().all(|c| c == '\u{e9}'),
+            "cut on a character boundary, never mid-codepoint"
+        );
+    }
+
+    #[test]
+    fn terminal_label_reads_the_block_then_the_title() {
+        // The whole lifecycle over a real parser, because the rule is about
+        // *which* block answers and that is decided by OSC 133 alone.
+        let mut term = zest_core::Terminal::new(80, 24, 100);
+        term.advance(b"\x1b]2;~/dev/zesterm\x07");
+        assert_eq!(terminal_label(&term), "~/dev/zesterm", "no blocks yet");
+
+        term.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cargo build\x1b]133;C\x07\r\n");
+        assert_eq!(terminal_label(&term), "cargo build", "while it runs");
+
+        term.advance(b"   Compiling zest-app\r\n\x1b]133;D;0\x07");
+        assert_eq!(
+            terminal_label(&term),
+            "cargo build",
+            "and after it finishes -- a chip that reverts forgets the thing \
+             you came back to read"
+        );
+
+        term.advance(b"\x1b]133;A\x07$ ");
+        assert_eq!(
+            terminal_label(&term),
+            "cargo build",
+            "the prompt after it names nothing, so the command still stands"
+        );
+
+        term.advance(b"\x1b]133;B\x07cargo test\x1b]133;C\x07\r\n");
+        assert_eq!(terminal_label(&term), "cargo test", "until the next one starts");
+    }
+
+    #[test]
+    fn a_connecting_tab_still_reads_its_profile() {
+        // A pane that has not connected has no blocks, and the profile name
+        // was written into it as an OSC 2 (`tabs::PendingSession`). The
+        // command precedence must not turn that into "shell".
+        let mut term = zest_core::Terminal::new(80, 24, 0);
+        term.advance(b"\x1b]2;Ubuntu\x07");
+        assert_eq!(terminal_label(&term), "Ubuntu");
     }
 
     #[test]

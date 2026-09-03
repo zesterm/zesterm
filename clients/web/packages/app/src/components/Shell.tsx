@@ -43,6 +43,7 @@ import {
   closeTab,
   NO_TABS,
   openTab,
+  setCommand,
   setLink,
   setTitle,
   type Tab,
@@ -185,6 +186,9 @@ export const Shell = component<{
       id,
       kind: 'session',
       title: e.title,
+      // A listing says what a session is called and nothing about what it
+      // ran; the command arrives with this tab's first keyframe.
+      command: '',
       hostId: e.host,
       cwd: e.cwd,
       color: null,
@@ -524,6 +528,7 @@ export const Shell = component<{
             signer={device.signer}
             theme={theme}
             onTitle={(title: string) => (store.tabs = setTitle(store.tabs, id, title))}
+            onCommand={(command: string) => (store.tabs = setCommand(store.tabs, id, command))}
             onLink={(link) => (store.tabs = setLink(store.tabs, id, link))}
             register={(hooks: TerminalHooks | null) => {
               if (hooks === null) termHooks.delete(id);

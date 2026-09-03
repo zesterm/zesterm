@@ -29,13 +29,71 @@ export const MONO_FAMILY = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace'
  */
 export const GRID_FONT_SIZE = 13;
 
+/** A session nobody has named. Mirrors `model::UNNAMED_SESSION`. */
+export const UNNAMED_SESSION = 'shell';
+
 /**
- * A tab chip shows its title ONLY — host and cwd live in the tooltip and the
- * vertical sidebar/header, which have room for them (design §1). An untitled
- * session reads as `shell`, never as a blank chip.
+ * The longest label anything keeps — a guard, not a display decision.
+ *
+ * Far past what a 34px chip can show, so nothing a person reads is ever cut
+ * by it; it exists so one pasted multi-kilobyte command cannot reach the DOM
+ * on every model rebuild. Code points here where `model::MAX_LABEL_BYTES` is
+ * bytes: JS has no cheap byte length, and a bound this far out of sight does
+ * not have to agree to the character.
  */
-export function chipTitle(tab: Pick<Tab, 'title'>): string {
-  return tab.title === '' ? 'shell' : tab.title;
+const MAX_LABEL_CHARS = 512;
+
+/**
+ * What a session is called: **its last command, then its OSC title, then
+ * `shell`** — never a blank chip.
+ *
+ * The command wins for the reason the native client's `model::session_label`
+ * gives: a tab you left an hour ago has to answer "what did I run here", and
+ * a title of `zsh` — or, under the default macOS zsh, the same cwd as every
+ * other tab — never did. A tab chip shows this ONLY; host and cwd live in the
+ * tooltip and the vertical sidebar, which have room for them (design §1).
+ *
+ * `command` is optional because the ⌘K rows pass a `SessionEntry`: a listing
+ * carries a title and nothing about what ran.
+ */
+export function chipTitle(tab: Pick<Tab, 'title'> & { readonly command?: string }): string {
+  const name = sessionName(tab.command ?? '', tab.title);
+  return name === '' ? UNNAMED_SESSION : name;
+}
+
+/**
+ * The precedence without the fallback — empty when the session has said
+ * nothing about itself. The browser tab wants this one: its default is the
+ * application's name, not `shell`.
+ */
+export function sessionName(command: string, title: string): string {
+  return oneLine(command) || oneLine(title);
+}
+
+/**
+ * Flatten text that will be drawn as a single line.
+ *
+ * Both inputs need it: OSC 633;E un-escapes `\x0a`, so a multiline command is
+ * an ordinary VS Code-integration case, and an OSC 2 title is whatever a
+ * program chose to send. Iterates code points, never `length` — an astral
+ * emoji is two UTF-16 units and slicing between them makes a lone surrogate.
+ */
+function oneLine(text: string): string {
+  const out: string[] = [];
+  let space = false;
+  for (const c of text) {
+    if (/[\s\u0000-\u001f\u007f]/u.test(c)) {
+      space = out.length > 0;
+      continue;
+    }
+    if (out.length + (space ? 1 : 0) >= MAX_LABEL_CHARS) break;
+    if (space) {
+      out.push(' ');
+      space = false;
+    }
+    out.push(c);
+  }
+  return out.join('');
 }
 
 /** A host id is 64 hex chars; twelve are enough to tell machines apart on screen. */
@@ -49,7 +107,7 @@ export function shortHostId(id: string): string {
  * host the directory has not named yet is still identifiable.
  */
 export function chipTooltip(
-  tab: Pick<Tab, 'title' | 'hostId' | 'cwd'>,
+  tab: Pick<Tab, 'title' | 'hostId' | 'cwd'> & { readonly command?: string },
   hostLabel?: string,
 ): string {
   const host = hostLabel ?? shortHostId(tab.hostId);
