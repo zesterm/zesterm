@@ -827,6 +827,20 @@ you need before you trip on it.
   last delta", so stopping on the exit needs a bounded drain after it. Both were
   found by driving the built binary by hand. (#274)
 
+- **A full-screen program's `2J` deleted every block on the primary screen,
+  because one line read the grid *field* where the rest read the accessor.**
+  `erase_in_display` rightly invalidates the blocks a clear erased (line ids
+  survive an erase and the shell reuses them), but it took the top line from
+  `self.grid` -- the primary, whichever screen is live -- while every other
+  line in the function goes through `self.grid()`, the active one. So vim,
+  less or Claude Code opening on the alt screen and clearing it wiped the
+  primary's block index, and the shell came back with its output still on
+  screen and no rails. Blocks wholly above the viewport survived, so a long
+  session reads as "the last screenful lost its rails". The MCP `blocks` tool
+  told it from eviction in one read: a single fresh prompt block beside
+  `authoritative_from: 0`. A `Terminal` has two grids and `self.grid` is
+  never wrong to *type*, which is the whole trap. (#539)
+
 ### Linux
 
 - **A backend named in the ladder but not compiled in is invisible, and reads

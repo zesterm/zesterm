@@ -650,6 +650,29 @@ mod block_band_tests {
     }
 
     #[test]
+    fn a_full_screen_program_has_no_rails_and_leaving_it_brings_them_back() {
+        // The alt screen is a separate grid whose ids restart at zero, so a
+        // primary block would land on whatever alt rows collide with it --
+        // the shell's history drawn down a program's UI. And the program's
+        // own `ESC[2J` on that screen erases no primary row, so the exit
+        // restores every rail with the screen it restores. (#539)
+        let c = colors();
+        let mut t = session();
+        t.advance(b"\x1b[?1049h\x1b[2J\x1b[Hvim\r\n");
+        assert!(t.in_alt_screen());
+        assert!(
+            App::block_bands(&c, &t, None, false).is_empty(),
+            "no block is drawn over a full-screen program"
+        );
+        t.advance(b"\x1b[?1049l");
+        assert_eq!(
+            App::block_bands(&c, &t, None, false).len(),
+            4,
+            "leaving the program brings every rail back: its clear touched nothing on the primary screen"
+        );
+    }
+
+    #[test]
     fn the_wash_belongs_to_the_output_and_a_selection_overrides_its_tint() {
         let c = colors();
         let t = session();

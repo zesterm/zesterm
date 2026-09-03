@@ -1121,6 +1121,39 @@ fn a_clear_leaves_the_blocks_that_scrolled_out_of_reach() {
 }
 
 #[test]
+fn a_clear_on_the_alt_screen_leaves_the_primary_screens_blocks_alone() {
+    // Claude Code, vim, less and htop all open on the alternate screen and
+    // clear it with `ESC[2J`. That clear touches no primary row -- the alt
+    // grid is a separate buffer -- yet the erase read the *primary* grid's
+    // top line and invalidated every block on or below it, so leaving the
+    // program brought the old prompt and its output back with no rails. What
+    // scrolled wholly above the viewport survived, which on a long session
+    // reads as "the last screenful lost its rails". (#539)
+    let mut t = Terminal::new(20, 4, 100);
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nout\r\n\x1b]133;D;0\x07");
+    t.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07cl\x1b]133;C\x07\r\n");
+    let before = t.blocks().blocks().to_vec();
+    let floor = t.blocks().authoritative_from();
+    assert_eq!(before.len(), 2, "a finished command and the one launching the program");
+
+    t.advance(b"\x1b[?1049h\x1b[2J\x1b[Hfull-screen program\x1b[?1049l");
+    assert!(!t.in_alt_screen(), "the program has exited");
+    assert_eq!(
+        t.blocks().blocks(),
+        &before[..],
+        "a clear of the alternate screen erased no primary row, so no block describes anything else now"
+    );
+    assert_eq!(t.blocks().authoritative_from(), floor, "and nothing was announced as gone");
+
+    // The program's exit is the launching command finishing, in its own block.
+    t.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let blocks = t.blocks().blocks();
+    assert_eq!(blocks.len(), 3, "the launcher's block closed and a fresh prompt followed");
+    assert_eq!(blocks[1].command, "cl");
+    assert_eq!(blocks[1].state, zest_core::BlockState::Finished { exit_code: Some(0) });
+}
+
+#[test]
 fn csi_3j_clears_scrollback_and_2j_does_not() {
     // ED 2 clears the screen and ED 3 also clears scrollback -- xterm's and
     // Windows Terminal's reading, and the one pwsh asks for: `Clear-Host`

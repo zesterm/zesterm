@@ -501,11 +501,21 @@ impl TermState {
                 // every keystroke (PSReadLine repaints with `ESC[J` constantly),
                 // and invalidating there would delete the block being typed
                 // into over and over.
-                if let Some(first) = self.grid.active_line_id_at(0) {
-                    self.blocks.erase_screen(first);
+                //
+                // And only on the primary screen. Blocks describe primary rows
+                // and the alt screen is a separate grid, so a full-screen
+                // program's opening `2J` -- vim, less, Claude Code, all of
+                // them -- erases nothing a block is anchored to. Reading
+                // `self.grid` here, the primary regardless of which screen is
+                // live, is what deleted every on-screen block behind such a
+                // program and handed the shell back with no rails. (#539)
+                if self.alt_grid.is_none() {
+                    if let Some(first) = self.grid.active_line_id_at(0) {
+                        self.blocks.erase_screen(first);
+                    }
+                    self.prompt_end = None;
+                    self.pending_command = None;
                 }
-                self.prompt_end = None;
-                self.pending_command = None;
                 // A cleared screen is all blank tail, so a restate debt left
                 // owing would let the next grow pull history straight back onto
                 // the screen the user just cleared. Modes 2 and 3 only, for the
