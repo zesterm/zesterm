@@ -408,6 +408,13 @@ struct Inner {
     /// triggers are per window — the Fleet screen, and now any window whose
     /// local offer says the machine is enrolled — but the loop is the model's,
     /// and two of them would poll the control plane twice about one account.
+    ///
+    /// Holding the sender here also pins the loop's lifetime to the model's:
+    /// `account_loop`'s disconnect arms can no longer fire while the model
+    /// lives, so dropping every window's `AccountPoke` no longer ends the
+    /// watcher. That is the point, not a loss — the listing feeds the shared
+    /// fleet, and the model dies with the process anyway. The drop-exit arms
+    /// stay for the tests, which drive `account_loop` with a channel they own.
     account_poke: parking_lot::Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
 
