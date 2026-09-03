@@ -1499,6 +1499,19 @@ success, which is the failure class this crate spends the most effort avoiding.
 `input` therefore has `text` and `paste` as separate arguments, mirroring the web
 client's `text.ts` and `paste.ts`, and infers nothing. (#344)
 
+**And a paste carries a path when it cannot carry the thing itself.** A picture
+on the clipboard has no spelling in a byte stream: no program reads a PNG off a
+pty. What every program already understands is the path a drag-and-drop would
+have handed it, so ⌘V writes the image to a file and pastes that (#532). The
+alternative — send the bracketed markers with an *empty* payload, which is what
+Windows Terminal happens to do and what at least one agent answers by reading the
+clipboard itself — was rejected on the same ground as inferring the boundary from
+the mode: it is one program's undocumented convention, it is gated to two of the
+three platforms, and a shell on the other side is left holding nothing. The
+corollary is that a session whose shell runs on another machine must refuse
+rather than name a local path, because the failure there is not an error but a
+*different file*.
+
 ### The trap this ADR was written after
 
 `HostMessage::Exited { code: Option<i32> }` existed on the wire from protocol 2

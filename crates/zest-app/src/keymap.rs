@@ -322,6 +322,12 @@ pub static BINDINGS: &[Binding] = &[
     // The clipboard family. Blocks (o/r) share the chord because they are the
     // same kind of thing — the desktop acting on the terminal — and because
     // it is the chord the encoder already refuses to pass to the shell.
+    //
+    // `Mods::Clipboard` is Super *or* Ctrl+Shift, so plain Ctrl+V is not one
+    // of these and 0x16 keeps reaching the program — which some of them use as
+    // their own "read the clipboard yourself" key (#532). The paste row covers
+    // a picture as well as text; the label stays "Paste" because it is
+    // rendered in the palette.
     b(Mods::Clipboard, ChordKey::Char("c"), Action::Copy, "C", "Copy", Category::Clipboard),
     b(Mods::Clipboard, ChordKey::Char("v"), Action::Paste, "V", "Paste", Category::Clipboard),
     b(
@@ -834,6 +840,21 @@ mod tests {
         // query pastes into the query, which is why the field is consulted
         // first (AGENTS.md § App UI).
         assert_eq!(action_for(&char_key("v"), SUPER), Some(Action::Paste));
+    }
+
+    #[test]
+    fn plain_ctrl_v_is_not_a_chord_so_0x16_still_reaches_the_program() {
+        // Ctrl+V is an agent's own image-paste key on macOS and Linux (Alt+V on
+        // Windows), and it works by reading the system clipboard itself when
+        // it sees SYN. `Mods::Ctrl` rows do exist -- Ctrl+Tab is one -- so a
+        // future row on "v" would take the key away from every program that
+        // wants it, and the symptom would be a feature that silently stopped
+        // working in one terminal only.
+        assert_eq!(action_for(&char_key("v"), CTRL), None, "Ctrl+V belongs to the program, not to us");
+        assert_eq!(action_for(&char_key("v"), ModifiersState::empty()), None);
+        // ...while the two spellings that *are* ours stay ours.
+        assert_eq!(action_for(&char_key("v"), SUPER), Some(Action::Paste));
+        assert_eq!(action_for(&char_key("V"), CTRL_SHIFT), Some(Action::Paste));
     }
 
     #[test]

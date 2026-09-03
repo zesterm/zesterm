@@ -250,6 +250,45 @@ fn modes_the_frontend_must_know_about_are_tracked() {
     assert!(m.mouse_enabled());
 }
 
+// The three below are the whole encoding contract a pasted *file path* has to
+// satisfy. It became load-bearing when a picture on the clipboard started being
+// pasted as the path of a PNG written for it (#532): the consumer on the other
+// side splits the payload on newlines and reads what is between the brackets,
+// so a stray CR would submit a prompt instead of naming a file. `encode_paste`
+// had no direct test before — zest-mcp's defers here by name.
+
+#[test]
+fn a_pasted_path_is_bracketed_when_the_program_asked() {
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"\x1b[?2004h");
+    assert_eq!(
+        t.encode_paste("/tmp/zesterm-paste-1.png"),
+        b"\x1b[200~/tmp/zesterm-paste-1.png\x1b[201~".to_vec(),
+        "a program in bracketed-paste mode tells a paste from typing by the markers"
+    );
+}
+
+#[test]
+fn a_pasted_path_without_the_mode_is_just_the_path() {
+    let t = Terminal::new(10, 2, 0);
+    assert_eq!(
+        t.encode_paste("/tmp/zesterm-paste-1.png"),
+        b"/tmp/zesterm-paste-1.png".to_vec(),
+        "markers nobody asked for are printed as text"
+    );
+}
+
+#[test]
+fn a_pasted_path_carries_no_line_ending() {
+    let mut t = Terminal::new(10, 2, 0);
+    t.advance(b"\x1b[?2004h");
+    let bytes = t.encode_paste("/tmp/zesterm-paste-1.png");
+    assert!(
+        !bytes.contains(&b'\r') && !bytes.contains(&b'\n'),
+        "a CR in the payload runs the line: the paste would submit a prompt rather than name a file"
+    );
+}
+
 #[test]
 fn synchronized_output_is_reported_to_the_host() {
     let mut t = Terminal::new(10, 2, 0);

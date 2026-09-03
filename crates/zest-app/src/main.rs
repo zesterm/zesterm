@@ -23,6 +23,7 @@ mod keymap;
 mod launch;
 mod launcher;
 mod motion;
+mod paste_image;
 mod pipeline_cache;
 mod platform;
 mod process;

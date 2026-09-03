@@ -32,7 +32,11 @@ the shell outlives the window.
 Mouse: drag to select, double-click a word (paths and identifiers stay whole),
 triple-click a line, Alt-drag for a rectangle. Ctrl+Shift+C / Ctrl+Shift+V copy
 and paste; right-click copies when there is a selection and pastes otherwise;
-middle-click pastes.
+middle-click pastes. When the clipboard holds a *picture* rather than text,
+Ctrl+Shift+V (⌘V on macOS) writes it to a file and pastes the path — which is
+what dropping the image on the window would have delivered, so a shell, an
+editor and an agent all get something they can open. Middle-click is unaffected:
+it pastes the selection, which is always text.
 
 The window appears in **~35ms** on Windows (48ms on macOS) and the shell prompt
 is on the first frame. Measure with the built binary, not `cargo run` — cargo's

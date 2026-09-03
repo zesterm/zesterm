@@ -226,6 +226,29 @@ the history behind them is in closed issues and PRs.
       and many compositors do not offer it.
 - [ ] Linux packaging.
 
+### Input
+
+- [x] **A picture on the clipboard is pasted as a path** (#532). ⌘V used to
+      send *nothing at all* when the clipboard held an image: `get_text` fails
+      on an image-only clipboard, and the program never learned a paste had
+      happened. It now writes a PNG into a private per-user directory —
+      `temp_dir()/zesterm-<uid>/pasted-images` on unix, where `/tmp` is shared,
+      and `temp_dir()/zesterm/pasted-images` on Windows, where `temp_dir()` is
+      already inside the user's profile; 0700 from birth, pruned at 24h and 32
+      files — and pastes the escaped absolute path. A path and not the
+      bytes because no program reads a PNG off a pty, whereas a path is what a
+      drag-and-drop delivers — so a shell gets an argument, `open` shows the
+      picture, and an agent attaches it. The rejected alternative is in
+      `paste_image.rs`: an *empty* bracketed paste, which is what Windows
+      Terminal happens to send and what one agent answers by reading the
+      clipboard itself — one program's undocumented convention, on two of three
+      platforms, that leaves a shell with nothing. A session whose shell runs on
+      another machine refuses; carrying the bytes there needs a wire message and
+      is not done.
+- [ ] **Drag and drop a file onto the window** (#532's other half).
+      `WindowEvent::DroppedFile` is not handled anywhere; the path plumbing it
+      needs now exists in `paste_image.rs`.
+
 ### Shell integration & blocks
 
 - [ ] **fish, and the shells WSL bash left behind** (#405 landed bash, native

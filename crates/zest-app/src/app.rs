@@ -3784,7 +3784,10 @@ impl App {
     /// Split from [`Self::paste`] rather than parameterised, because the two
     /// gestures answer different questions -- ⌘V means "what did I copy", a
     /// middle click means "what is selected" -- and a flag would make the call
-    /// sites read as the same intent.
+    /// sites read as the same intent. It is also why this one stays text-only
+    /// where [`Self::paste`] does not: PRIMARY *is* the selection, and a
+    /// selection is text -- writing a file to disk on a middle click nobody
+    /// meant is worse than doing nothing.
     fn paste_primary(&mut self) {
         let Some(text) = self.primary_text() else { return };
         let Some(session) = self.tabs.active_source() else { return };
@@ -3793,21 +3796,65 @@ impl App {
         session.terminal().lock().scroll_to_bottom();
     }
 
+    /// The clipboard's text, or -- when it holds only a picture -- the path of
+    /// a PNG written for it (#532).
+    ///
+    /// Text first, so nothing about pasting text changes: a copy from a web
+    /// page carries both text and an image, and the text is what was meant.
+    /// The picture branch is reached exactly where this used to log "nothing
+    /// to paste" and send no bytes at all. [`crate::paste_image`] has the why
+    /// of a path rather than the bytes.
     fn paste(&mut self) {
         let Some(session) = self.tabs.active_source() else { return };
-        let mut clipboard = self.shared.clipboard.borrow_mut();
-        let Some(clipboard) = clipboard.as_mut() else { return };
-        match clipboard.get_text() {
-            Ok(text) if !text.is_empty() => {
-                // The terminal owns the encoding: it knows whether the program
-                // asked for bracketed paste, and it normalizes line endings.
-                let bytes = session.terminal().lock().encode_paste(&text);
-                session.write(bytes);
-                session.terminal().lock().scroll_to_bottom();
+        let Some(text) = self.clipboard_paste_text(&session.origin()) else { return };
+        // The terminal owns the encoding: it knows whether the program asked
+        // for bracketed paste, and it normalizes line endings.
+        let bytes = session.terminal().lock().encode_paste(&text);
+        session.write(bytes);
+        session.terminal().lock().scroll_to_bottom();
+    }
+
+    /// What a paste should send, or `None` when the clipboard has nothing to
+    /// offer this session.
+    ///
+    /// `&self` deliberately: the caller is holding a `&dyn SessionSource`
+    /// borrowed out of `self.tabs`, so a `&mut self` helper would not compile.
+    /// Nothing here needs to mutate the app -- the clipboard handle sits behind
+    /// its own `RefCell`.
+    fn clipboard_paste_text(&self, origin: &crate::source::Origin) -> Option<String> {
+        let image = {
+            let mut clipboard = self.shared.clipboard.borrow_mut();
+            let clipboard = clipboard.as_mut()?;
+            match clipboard.get_text() {
+                Ok(text) if !text.is_empty() => return Some(text),
+                // Both arms fall through. A backend holding a picture may
+                // answer either an error or an empty string, and only one of
+                // the two used to reach the log line below.
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "no text on the clipboard"),
             }
-            Ok(_) => {}
-            Err(e) => tracing::debug!(error = %e, "nothing to paste"),
-        }
+
+            // Before the picture is read, not after: a path names a file on
+            // *this* machine, so a session whose shell runs somewhere else
+            // would only decode a screenshot in order to throw it away. That
+            // it must refuse at all is #434's rule -- a local path either
+            // finds nothing over there or, worse, finds a different file.
+            if origin.is_remote() {
+                tracing::info!(
+                    "this session's shell runs on another machine; a pasted picture \
+                     would name a file it cannot open"
+                );
+                return None;
+            }
+
+            // Copied out, and the borrow released, before any filesystem work:
+            // `Shared::clipboard` is process-wide and every window in this
+            // process reaches it, so a borrow held across a write and an fsync
+            // is one that blocks all of them.
+            clipboard.get_image().ok()?
+        };
+
+        crate::paste_image::text_for_image(&image.bytes, image.width, image.height)
     }
 
     /// Run one table-resolved action.

@@ -606,6 +606,9 @@ mod tests {
         assert_eq!(encode_text("d", true, false), Some(vec![0x04]));
         // Case-insensitive: Ctrl-Shift-C still produces 0x03.
         assert_eq!(encode_text("C", true, false), Some(vec![0x03]));
+        // SYN, and an agent's own image-paste key: it reads the clipboard
+        // itself when it sees this byte, so the terminal must not eat it.
+        assert_eq!(encode_text("v", true, false), Some(vec![0x16]), "Ctrl-V is SYN");
     }
 
     #[test]
