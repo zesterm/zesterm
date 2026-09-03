@@ -44,7 +44,8 @@ pub struct TextRun {
 #[derive(Debug, Default)]
 pub struct ChromeLayout {
     /// The bars that *are* the window surface where they sit — the tab strip,
-    /// the vertical layout's header, the sidebar. Drawn with the blend off
+    /// the vertical layout's header, the sidebar, and the full-pane screens'
+    /// ground, which is a bar the size of a pane. Drawn with the blend off
     /// (`Scene::surface_rects`), so `window.chrome_opacity` is an alpha onto
     /// whatever is behind the window rather than a tint toward the window's
     /// own background. Everything drawn *on* a bar — its hairline, the chips,
@@ -465,7 +466,16 @@ pub fn layout(
         TabsPosition::Top => horizontal(model, colors, m, measure),
         TabsPosition::Left => vertical(model, colors, m, measure),
     };
-    if let Some(panes) = &model.panes {
+    // Not while a screen owns the grid area. A screen's ground is a *surface*
+    // rect (#538), drawn before every `rects` instance — so the pane frames,
+    // header bands and editor bodies this pushes are no longer painted over by
+    // the ground that follows them, they sit on top of the fleet directory.
+    // The frames were always dead pixels behind a screen; what changed is that
+    // drawing them anyway stopped being harmless. This is `pane_is_covered`'s
+    // rule — do not build it, rather than build it and paint over it — reaching
+    // the chrome that frames the grid, the grid itself having been skipped for
+    // the same reason since #253.
+    if let (Some(panes), None, None) = (&model.panes, &model.screen, &model.settings) {
         panes_overlay(panes, model.grid_area, colors, m, measure, &mut out);
     }
     let mut settings_menu_anchor = None;
@@ -3810,6 +3820,98 @@ mod tests {
         assert!(
             left.surface_rects.iter().any(|r| r.rect[3] > 700.0),
             "the sidebar runs the remaining height"
+        );
+    }
+
+    #[test]
+    fn a_screen_replaces_the_split_underneath_it_rather_than_covering_it() {
+        // The hazard #538 introduced and had to close. A screen's ground is a
+        // *surface* rect, drawn before every `rects` instance — so the pane
+        // header bands, frames and editor bodies `panes_overlay` pushes are no
+        // longer painted over by a ground that comes later in the same vec.
+        // Left un-gated they land on top of the fleet directory, which is one
+        // keystroke away: split a tab, then open the fleet screen.
+        //
+        // Asserted as "not drawn", not "drawn and covered", for the reason
+        // `pane_is_covered` gives about the grid itself: an SDF rect's outer
+        // row is antialiased, so even an opaque cover leaks a pixel (#253).
+        let c = colors();
+        let m = metrics(1200.0, 800.0, 1.0);
+        let pane = |focused| super::super::model::PaneModel {
+            kind: super::super::model::PaneKind::Session,
+            host: "local".into(),
+            sub: "~/dev".into(),
+            focused,
+            accent: 0,
+        };
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.panes = Some(vec![pane(true), pane(false)]);
+
+        // The right pane's header band, by the geometry that draws it. A rect
+        // count is no probe here: the screen pushes plenty of its own, so the
+        // total goes *up* while the thing under test disappears.
+        let right = pane_frames(mo.grid_area, m.scale, 2)[1];
+        let band = [right[0], right[1], right[2], PANE_HEADER * m.scale];
+        let (px, py) = (right[0] + right[2] / 2.0, right[1] + right[3] / 2.0);
+
+        let split_only = layout(&mo, &c, &m, &mut measure);
+        assert!(
+            split_only.rects.iter().any(|r| r.rect == band),
+            "the split alone still draws its panes — this is the everyday frame"
+        );
+        assert_eq!(
+            split_only.hit.hit(px, py),
+            Some(HitRegion::Pane(1)),
+            "and the unfocused pane is one click from the keyboard"
+        );
+
+        mo.screen = Some(super::super::model::ScreenModel::Themes {
+            cards: Vec::new(),
+            import_error: None,
+        });
+        let with_screen = layout(&mo, &c, &m, &mut measure);
+        assert!(
+            !with_screen.rects.iter().any(|r| r.rect == band),
+            "a screen replaces the split: the pane header band must not be drawn at all, or it sits on top of the screen"
+        );
+        assert_eq!(
+            with_screen.hit.hit(px, py),
+            Some(HitRegion::ScreenPanel),
+            "and the pane under a screen must not answer a click either"
+        );
+    }
+
+    #[test]
+    fn a_full_pane_screen_writes_the_window_surface_like_a_bar_does() {
+        // The other half of #538: the ground carries `window.chrome_opacity`
+        // and carries it *through the replace pipeline*, which is the only way
+        // an alpha reaches the swapchain. Both halves in one test because
+        // either alone is silently useless — a translucent fill left in
+        // `rects` can only tint toward the window background.
+        let c = colors_at(0.4, 1.0);
+        let m = metrics(1200.0, 800.0, 1.0);
+        let mut mo = model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
+        mo.screen = Some(super::super::model::ScreenModel::Themes {
+            cards: Vec::new(),
+            import_error: None,
+        });
+        let l = layout(&mo, &c, &m, &mut measure);
+
+        let ground = l
+            .surface_rects
+            .iter()
+            .find(|r| r.rect == mo.grid_area)
+            .expect("the screen grounds the whole pane, as a surface");
+        assert!(
+            (ground.fill.0[3] - 0.4).abs() < 1e-6,
+            "the ground carries chrome_opacity verbatim, got {:?}",
+            ground.fill
+        );
+        // The point is that the ground *left* the blended layer, not merely
+        // that a translucent one was added beside an opaque one.
+        assert!(
+            !l.rects.iter().any(|r| r.rect == mo.grid_area),
+            "a whole-pane fill left in the blended layer paints the glass back to opaque"
         );
     }
 

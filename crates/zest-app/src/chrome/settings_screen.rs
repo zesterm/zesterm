@@ -298,9 +298,20 @@ pub fn settings_screen(
 ) -> Option<[f32; 4]> {
     let s = m.scale;
 
-    // Opaque ground over the whole grid area — a screen, not a scrim — and
-    // one swallow region so nothing falls through to the grid beneath.
-    out.rects.push(RectInstance::filled(area, colors.bg_opaque, area));
+    // The ground *is* the window surface where it sits, exactly as the tab
+    // strip is (#522): written rather than blended, so `window.chrome_opacity`
+    // is an alpha onto whatever is behind the window instead of a tint toward
+    // the window background. Blended it could only ever be the latter — the
+    // clear is already `window.opacity`, and compositing onto it is ADR-017's
+    // `1-(1-o)²`. Safe to *replace* because `pane_is_covered` builds no
+    // viewport under a screen; a surface rect erases what it overlaps, so one
+    // over a live grid would cut a hole in it.
+    //
+    // The swallow region below is unchanged and still earns its place: it stops
+    // a click falling through to a region an earlier pass pushed. Which vec the
+    // fill went into is not a fact `ChromeHitMap` knows — it is its own list,
+    // ordered by call, and `hit` walks it in reverse.
+    out.surface_rects.push(RectInstance::filled(area, colors.screen_bg, area));
     out.hit.push(area, HitRegion::SettingsPanel);
 
     rail(model, area, colors, s, measure, out);
@@ -1851,6 +1862,46 @@ mod tests {
             config_path: "~/.config/zesterm/config.toml".into(),
             menu: None,
         }
+    }
+
+    /// The chrome at `chrome_opacity`, the window opaque — the pair that tells
+    /// a ground following the *chrome* from one following the window.
+    fn colors_at(chrome_opacity: f32) -> ChromeColors {
+        let theme = zest_theme::builtin::obsidian();
+        ChromeColors::new(&theme.ui, &theme.effects, chrome_opacity, 1.0)
+    }
+
+    #[test]
+    fn the_ground_is_the_window_surface_at_chrome_opacity() {
+        // #538, per screen: each of the three grounds is its own copy of this
+        // line, so a test through one of them proves nothing about the others.
+        // Both halves matter and neither is enough — a translucent fill left in
+        // `rects` can only tint toward the window background (ADR-017), and a
+        // surface rect at alpha 1 is the opaque slab this replaced.
+        let mut out = ChromeLayout::default();
+        let area = [0.0, 46.0, 1000.0, 700.0];
+        let mo = model(vec![cell_row(SettingsValueCell::Toggle { on: true }, false)]);
+        settings_screen(&mo, area, &colors_at(0.4), &metrics(1000.0, 746.0), &mut measure, &mut out);
+
+        let ground = out
+            .surface_rects
+            .iter()
+            .find(|r| r.rect == area)
+            .expect("the screen grounds the whole pane, and does it as a surface");
+        assert!(
+            (ground.fill.0[3] - 0.4).abs() < 1e-6,
+            "the ground carries chrome_opacity verbatim, got {:?}",
+            ground.fill
+        );
+        assert!(
+            !out.rects.iter().any(|r| r.rect == area),
+            "a whole-pane fill left in the blended layer paints the glass back to opaque"
+        );
+        assert_eq!(
+            out.hit.hit(area[0] + 2.0, area[1] + 2.0),
+            Some(HitRegion::SettingsPanel),
+            "moving the fill must not move the swallow region"
+        );
     }
 
     fn lay(model: &SettingsScreenModel, w: f32, h: f32) -> ChromeLayout {

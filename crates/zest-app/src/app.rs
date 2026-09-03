@@ -11435,9 +11435,23 @@ impl App {
         // the gaps around the chrome bars, the split gutter. Taken from the
         // app's palette rather than a session's, because those pixels belong to
         // no session -- and computed here, before the borrows below.
+        //
+        // Which opacity depends on what owns the pane. `grid_area` excludes
+        // `window.padding` on all four sides, so while a screen is up the ring
+        // around it is the only thing this still paints there -- and a screen
+        // has no grid under it, which makes that ring chrome rather than the
+        // terminal's margin. At `window.opacity` it reads as a frame in the
+        // wrong alpha around a glass Settings. Answered here rather than by
+        // growing the screen's rect: a grown surface rect would overlap the
+        // strip's own and erase it, replace not composite (#538).
         let backdrop = {
             let bg = self.palette.background;
-            zest_render_wgpu::LinearRgba::from_srgb(bg.r, bg.g, bg.b, self.config.opacity)
+            let alpha = if pane_is_covered(self.screen, self.tabs.app_tab_active()) {
+                self.config.chrome_opacity
+            } else {
+                self.config.opacity
+            };
+            zest_render_wgpu::LinearRgba::from_srgb(bg.r, bg.g, bg.b, alpha)
         };
         // Copied out for the same reason as `backdrop`: the block bands are
         // built inside the borrows below, and `ChromeColors` is `Copy`.
