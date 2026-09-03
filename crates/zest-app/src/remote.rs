@@ -589,6 +589,12 @@ impl RemoteSession {
                                     predictor.lock().on_keyframe(k.cursor, k.cols, k.modes.contains(zest_core::Modes::ALT_SCREEN));
                                     pending_ack = Some(seq.0);
                                     mark(&needs_redraw, &wake);
+                                    // A keyframe restates the blocks, so it
+                                    // can rename this tab -- and for a
+                                    // *background* pane it is the only
+                                    // chance, `mark` reaching a frame that
+                                    // consults the active source alone.
+                                    wake(Wakeup::SignalChanged);
                                 }
                                 HostMessage::Update { base, seq, delta, .. } => {
                                     // `--simulated-latency`: the echo is held
@@ -608,6 +614,19 @@ impl RemoteSession {
                                             predictor.lock().reconcile(&delta, now_ms(epoch));
                                             pending_ack = Some(seq.0);
                                             mark(&needs_redraw, &wake);
+                                            // The tab's name and its running
+                                            // dot both come off the blocks,
+                                            // so a delta that carries one is
+                                            // the moment the chrome is stale.
+                                            // `diff_blocks` emits a block only
+                                            // when its payload actually moved
+                                            // and no field of it ticks, so a
+                                            // long build wakes this twice --
+                                            // once at `C`, once at `D` -- and
+                                            // never per chunk of output.
+                                            if !delta.blocks.is_empty() {
+                                                wake(Wakeup::SignalChanged);
+                                            }
                                         }
                                         // Nothing was applied. Ask for a whole
                                         // state rather than carrying on against
@@ -1677,6 +1696,63 @@ mod tests {
             wait_for(|| s.terminal().lock().screen_text().contains("recovered-from-the-desync")),
             "reattached, but nothing typed afterwards comes back; grid:\n{}",
             s.terminal().lock().screen_text()
+        );
+    }
+
+    /// A remote tab is renamed by its blocks, and only by its blocks.
+    ///
+    /// The chrome reads the label off the replica, and nothing else dirties
+    /// it for a pane this window is not looking at — `grid_dirty` consults
+    /// the active source alone. So the reader has to post `SignalChanged`,
+    /// and it has to post it for block movement rather than for output, or a
+    /// long build pays a chrome rebuild per delta.
+    ///
+    /// The markers are written as literal ESC/BEL bytes on purpose:
+    /// `split_command_line` eats a backslash even inside quotes, so a
+    /// `printf '\033[...'` in a `CommandSpec` reaches the shell as the letters
+    /// `033` and colours nothing (#285).
+    #[test]
+    fn a_remote_command_renames_its_tab_without_a_wakeup_per_chunk() {
+        let esc = '\u{1b}';
+        let bel = '\u{7}';
+        // A prompt, a command typed at it, then twenty lines dripped over two
+        // seconds, then the exit — two block movements around a lot of
+        // output. The command text is read off the grid between `B` and `C`,
+        // which is why it is *printed* rather than named in the marker.
+        let script = format!(
+            "/bin/sh -c 'printf \"{esc}]133;A{bel}$ {esc}]133;B{bel}cargo build{esc}]133;C{bel}\"; \
+             echo; i=0; while [ $i -lt 20 ]; do echo drip-$i; sleep 0.1; i=$((i+1)); done; \
+             printf \"{esc}]133;D;0{bel}\"; echo renamed-marker'"
+        );
+
+        let h = Harness::start("label");
+        let signals = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&signals);
+        let s = h.attach(&script, move |w| {
+            if w == Wakeup::SignalChanged {
+                seen.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        assert!(
+            wait_for(|| s.terminal().lock().screen_text().contains("renamed-marker")),
+            "the script never finished; grid was:\n{}",
+            s.terminal().lock().screen_text()
+        );
+        assert!(
+            wait_for(|| {
+                crate::chrome::model::terminal_label(&s.terminal().lock()) == "cargo build"
+            }),
+            "the replica's tab never took the host's command as its name; label was {:?}",
+            crate::chrome::model::terminal_label(&s.terminal().lock())
+        );
+
+        let n = signals.load(Ordering::Relaxed);
+        assert!(n >= 1, "a block that moved must wake the chrome");
+        assert!(
+            n <= 8,
+            "twenty deltas of output arrived; only the block movements may \
+             wake the chrome, and this saw {n} wakeups"
         );
     }
 

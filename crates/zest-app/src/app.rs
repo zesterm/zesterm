@@ -4586,13 +4586,13 @@ impl App {
                                     .iter()
                                     .take(FLEET_CARD_SESSIONS)
                                     .map(|info| {
-                                        let title = info.title.trim();
                                         crate::chrome::model::FleetSessionRow {
-                                            title: if title.is_empty() {
-                                                "shell".into()
-                                            } else {
-                                                title.to_string()
-                                            },
+                                            // As in the ⌘K rows: a listing
+                                            // says nothing about what ran.
+                                            title: crate::chrome::model::session_label(
+                                                "",
+                                                &info.title,
+                                            ),
                                             // Home-shortened for this machine
                                             // only — another machine's home is
                                             // unknowable from here.
@@ -6582,7 +6582,7 @@ impl App {
                 let (title, cwd, running, progress) = {
                     let term = tab.source().terminal();
                     let term = term.lock();
-                    let title = term.title().trim().to_string();
+                    let title = crate::chrome::model::terminal_label(&term);
                     // A remote terminal's cwd never crosses the wire directly;
                     // its blocks do, and each carries the cwd it ran in.
                     let cwd = if term.cwd().is_empty() {
@@ -6593,7 +6593,6 @@ impl App {
                     let running = term.blocks().last().is_some_and(|b| b.is_running());
                     (title, cwd, running, term.progress())
                 };
-                let title = if title.is_empty() { "shell".to_string() } else { title };
                 let origin = match tab.source().origin() {
                     Origin::Daemon { host, local: false } => {
                         // The id is the tab's own address's — all-zero while a
@@ -7563,7 +7562,10 @@ impl App {
                 addr: tab.addr,
                 local: tab.local,
                 dial_hint: tab.dial_hint.clone(),
-                title: tab.source().terminal().lock().title().trim().to_string(),
+                // The same string the chip showed: this is the name a
+                // restored tab wears until its keyframe lands, so anything
+                // else visibly renames every tab for a second.
+                title: crate::chrome::model::terminal_label(&tab.source().terminal().lock()),
             })
             .collect();
         Some(SavedWindow { active, tabs, geometry: self.current_geometry() })
@@ -9100,8 +9102,7 @@ impl App {
                 term.blocks()
                     .blocks()
                     .iter()
-                    .filter(|b| !matches!(b.state, zest_core::BlockState::Prompt))
-                    .filter(|b| !b.command.trim().is_empty())
+                    .filter(|b| b.is_command())
                     .filter(|b| needle.matches(&b.command))
                     .map(|b| {
                         zest_proto::BlockMatch::from_block(
@@ -9184,9 +9185,10 @@ impl App {
 
             if let SessionsState::Fresh(sessions) = &host.sessions {
                 for info in sessions {
-                    let title = info.title.trim();
-                    let title =
-                        if title.is_empty() { "shell".to_string() } else { title.to_string() };
+                    // No command: a listing carries the title and nothing
+                    // about what ran (see `SessionInfo`), so these rows keep
+                    // the one fallback rather than inventing a second.
+                    let title = crate::chrome::model::session_label("", &info.title);
                     if !(matches(&host.label) || matches(&title) || matches(&info.cwd)) {
                         continue;
                     }
@@ -10426,7 +10428,7 @@ impl App {
         let (title, what) = {
             let term = tab.source().terminal();
             let term = term.lock();
-            let title = term.title().trim().to_string();
+            let title = crate::chrome::model::terminal_label(&term);
             let running = term
                 .blocks()
                 .last()
@@ -10439,7 +10441,6 @@ impl App {
             );
             (title, what)
         };
-        let title = if title.is_empty() { "shell".to_string() } else { title };
         let can_detach = !matches!(tab.source().origin(), Origin::InProcess);
         crate::chrome::model::ConfirmCloseModel {
             addr: tab.addr,
@@ -10512,10 +10513,12 @@ impl App {
         // hangs the shell up either way. Say so rather than doing the one
         // thing this action promises not to.
         let in_process = self.tabs.iter().find(|t| t.addr == addr).map(|t| {
-            (matches!(t.source().origin(), Origin::InProcess), t.source().terminal().lock().title().trim().to_string())
+            (
+                matches!(t.source().origin(), Origin::InProcess),
+                crate::chrome::model::terminal_label(&t.source().terminal().lock()),
+            )
         });
         if let Some((true, title)) = in_process {
-            let title = if title.is_empty() { "shell".to_string() } else { title };
             self.refuse_detach(addr, title);
             return;
         }
@@ -12920,7 +12923,7 @@ impl App {
                 let ran_anything = self.tabs.iter().any(|t| {
                     let term = t.source().terminal();
                     let term = term.lock();
-                    term.blocks().blocks().iter().any(|b| !b.command.trim().is_empty())
+                    term.blocks().blocks().iter().any(zest_core::Block::is_command)
                 });
                 if !ran_anything {
                     tracing::warn!(
@@ -15134,7 +15137,7 @@ impl App {
                     let title = self
                         .tabs
                         .active_source()
-                        .map(|s| s.terminal().lock().title().trim().to_string())
+                        .map(|s| crate::chrome::model::terminal_name(&s.terminal().lock()))
                         .unwrap_or_default();
                     if title != self.window_title {
                         if let Some(w) = self.window.as_ref() {

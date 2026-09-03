@@ -10,6 +10,7 @@ import {
   LAUNCHER_WIDTH,
   chipTitle,
   chipTooltip,
+  sessionName,
   factsLine,
   isIconRail,
   launcherAlign,
@@ -48,6 +49,61 @@ test('tabIdOf keeps hosts apart', () => {
 test('an untitled session reads as shell, never a blank chip', () => {
   assert.equal(chipTitle({ title: '' }), 'shell');
   assert.equal(chipTitle({ title: 'vim — main.rs' }), 'vim — main.rs');
+});
+
+test('a chip is named by what the session last ran', () => {
+  // The precedence, mirroring `model::session_label` in zest-app. The command
+  // wins because under the default macOS zsh the OSC title is the cwd, so
+  // without this every tab in a window reads the same.
+  const cases: readonly [string, string, string][] = [
+    ['cargo build', '~/dev/zesterm', 'cargo build'],
+    ['', '~/dev/zesterm', '~/dev/zesterm'],
+    ['   ', '~/dev/zesterm', '~/dev/zesterm'],
+    ['cargo build', '', 'cargo build'],
+    ['', '', 'shell'],
+  ];
+  for (const [command, title, want] of cases) {
+    assert.equal(chipTitle({ title, command }), want, `${command} / ${title}`);
+  }
+  // A ⌘K row passes a listing entry, which carries no command at all.
+  assert.equal(chipTitle({ title: 'zsh' }), 'zsh');
+});
+
+test('a multiline command is flattened before it reaches a chip', () => {
+  // Not theoretical: OSC 633;E un-escapes \x0a, so a multiline command is an
+  // ordinary VS Code-integration case, and a raw newline in a chip draws a
+  // second line over the strip.
+  const label = chipTitle({ title: '', command: 'for f in *; do\n  echo $f\r\ndone' });
+  assert.equal(label, 'for f in *; do echo $f done');
+});
+
+test('C1 controls are stripped too, not only C0', () => {
+  // The rule mirrored here is Rust's `char::is_control()`, which covers C0,
+  // DEL and C1 — and C1 is where a divergence would hide, those being the
+  // single-byte forms of the escape sequences this is stripping. A web client
+  // that kept them would put a control byte in a chip the native one cleans.
+  const label = chipTitle({ title: '', command: 'ls\u0085-la\u009b31m' });
+  assert.equal(label, 'ls -la 31m');
+  assert.ok(
+    ![...label].some((c) => c <= '\u001f' || (c >= '\u007f' && c <= '\u009f')),
+    `no control survives: ${JSON.stringify(label)}`,
+  );
+});
+
+test('a pasted script cannot reach the DOM whole', () => {
+  // A guard, not a display decision — the bound sits far past anything a
+  // 34px chip could show.
+  const label = chipTitle({ title: '', command: 'x'.repeat(10_000) });
+  assert.ok([...label].length <= 512, `bounded: ${[...label].length}`);
+});
+
+test('the browser tab keeps its own default for a session that said nothing', () => {
+  // The one caller with a better answer than 'shell': a page with nothing to
+  // say is called zesterm, which is why the precedence and the fallback are
+  // two functions.
+  assert.equal(sessionName('', ''), '');
+  assert.equal(sessionName('', '~/dev'), '~/dev');
+  assert.equal(sessionName('cargo test', '~/dev'), 'cargo test');
 });
 
 test('host and cwd live in the tooltip — the chip shows title only', () => {

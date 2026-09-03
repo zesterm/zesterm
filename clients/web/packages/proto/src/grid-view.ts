@@ -200,6 +200,24 @@ export class GridView {
   }
 
   /**
+   * The command this session last ran — what its tab is named after.
+   *
+   * The mirror of `BlockIndex::last_command` in `zest-core`, and deliberately
+   * NOT `blocks.at(-1)`: the host re-anchors a trailing prompt and clears its
+   * `command`, so from the moment a command finishes until the next one
+   * starts — most of a session's life — the tail block names nothing. Empty
+   * when this session has run nothing the host told us about, which is every
+   * shell without integration.
+   */
+  lastCommand(): string {
+    for (let i = this.blocks.length - 1; i >= 0; i -= 1) {
+      const b = this.blocks[i] as BlockPayload;
+      if (b.state.state !== 'prompt' && b.command.trim() !== '') return b.command;
+    }
+    return '';
+  }
+
+  /**
    * Insert or replace a block, keeping the list ascending by id — `decode.rs`'s
    * `upsert_block`, binary search and all. A list that drifted out of order
    * would still *contain* the right blocks while answering "which block is

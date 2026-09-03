@@ -159,6 +159,18 @@ impl Block {
         matches!(self.state, BlockState::Running)
     }
 
+    /// Whether this block ran something.
+    ///
+    /// A `Prompt` block is somebody typing, and a blank `command` is a marker
+    /// with no text behind it — pwsh brackets an empty Enter that way (#193).
+    /// Neither is history, so neither is a search hit and neither names a tab.
+    /// The rule was written out by hand at each of its call sites until it was
+    /// three copies; it lives here because it is a fact about a block.
+    #[must_use]
+    pub fn is_command(&self) -> bool {
+        !matches!(self.state, BlockState::Prompt) && !self.command.trim().is_empty()
+    }
+
     /// Whether the command reported a non-zero status.
     ///
     /// A block that finished without reporting one is *not* failed. See
@@ -222,6 +234,21 @@ impl BlockIndex {
     #[must_use]
     pub fn last(&self) -> Option<&Block> {
         self.blocks.last()
+    }
+
+    /// The most recent block that ran something — what this session last did.
+    ///
+    /// Deliberately not [`Self::last`]: [`Self::begin_prompt`] re-anchors a
+    /// trailing prompt and clears its `command`, so from the moment a command
+    /// finishes until the next one starts — which is most of a session's life,
+    /// and exactly when somebody looks at a tab strip — the tail block names
+    /// nothing. A reverse scan for the same reason [`Self::block_at`] is
+    /// linear: the answer is one or two blocks from the end in every session
+    /// with shell integration, and the alternative is a cached id that every
+    /// mutator would have to remember to move.
+    #[must_use]
+    pub fn last_command(&self) -> Option<&Block> {
+        self.blocks.iter().rev().find(|b| b.is_command())
     }
 
     /// Begin a block at a prompt (OSC 133;A).
@@ -472,6 +499,68 @@ mod tests {
         assert!(b.contains(25));
         assert!(b.contains(40));
         assert!(!b.contains(41));
+    }
+
+    #[test]
+    fn last_command_is_not_last_when_a_prompt_is_showing() {
+        // The whole reason `last_command` exists. Between a `D` and the next
+        // `C` — most of a session's life, and precisely when somebody reads a
+        // tab strip — the tail block is a prompt naming nothing.
+        let mut idx = index_with_one_finished_block();
+        idx.begin_prompt(41, "/home".into());
+        assert!(
+            matches!(idx.last().expect("a prompt").state, BlockState::Prompt),
+            "the tail is the prompt"
+        );
+        assert_eq!(
+            idx.last_command().map(|b| b.command.as_str()),
+            Some("cargo build"),
+            "what the session last did outlives the prompt that followed it"
+        );
+    }
+
+    #[test]
+    fn a_re_anchored_prompt_never_names_a_tab() {
+        // An empty Enter or a redraw re-emits `A` with no `C`; `begin_prompt`
+        // moves the trailing prompt and clears its `command` (#193). Neither
+        // the moved block nor its cleared text may displace the real answer.
+        let mut idx = index_with_one_finished_block();
+        idx.begin_prompt(41, "/home".into());
+        idx.begin_prompt(42, "/home".into());
+        idx.begin_prompt(43, "/home".into());
+        assert_eq!(idx.blocks().len(), 2, "re-anchored, not appended");
+        assert_eq!(idx.last_command().map(|b| b.command.as_str()), Some("cargo build"));
+    }
+
+    #[test]
+    fn a_blank_command_is_not_one() {
+        // pwsh brackets an empty Enter with `C`/`D`, so a finished block with
+        // nothing in it is ordinary. It must not blank the tab that the real
+        // command before it named.
+        let mut idx = index_with_one_finished_block();
+        idx.begin_prompt(41, "/home".into());
+        idx.begin_output(42, "   ".into(), None, None);
+        idx.finish(42, Some(0), None);
+        assert!(!idx.last().expect("the blank block").is_command());
+        assert_eq!(idx.last_command().map(|b| b.command.as_str()), Some("cargo build"));
+    }
+
+    #[test]
+    fn a_running_command_outranks_the_one_before_it() {
+        let mut idx = index_with_one_finished_block();
+        idx.begin_prompt(41, "/home".into());
+        idx.begin_output(42, "cargo test".into(), None, None);
+        assert_eq!(idx.last_command().map(|b| b.command.as_str()), Some("cargo test"));
+    }
+
+    #[test]
+    fn an_erased_index_names_nothing() {
+        // `cls` deletes the blocks it wiped, so the session has no last
+        // command to report — the label must fall back rather than keep
+        // showing a command whose output is gone.
+        let mut idx = index_with_one_finished_block();
+        idx.erase_screen(0);
+        assert!(idx.last_command().is_none());
     }
 
     #[test]

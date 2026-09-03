@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 
 import { GridView, NO_LINE } from '../src/grid-view.ts';
 import { expandRow, rowText } from '../src/cells.ts';
-import type { AttrDef, Delta, RowPayload } from '../src/wire.ts';
+import type { AttrDef, BlockPayload, BlockState, Delta, RowPayload } from '../src/wire.ts';
 
 function row(line: number, text: string): RowPayload {
   return {
@@ -321,4 +321,89 @@ test('an erase outside the row is a no-op', () => {
     ops: [{ op: 'erase', top: 1, left: 0, bottom: 0, right: 1, attr: 0 }],
   });
   assert.deepEqual(v.rows, before);
+});
+
+/**
+ * Which block names a session — the mirror of `BlockIndex::last_command` in
+ * `crates/zest-core/src/blocks.rs`, whose tests are these tests. The two are
+ * one rule in two languages and change together.
+ */
+function blk(
+  id: number,
+  state: BlockState,
+  command: string,
+): BlockPayload {
+  return {
+    id,
+    prompt_line: id * 10,
+    output_line: state.state === 'prompt' ? null : id * 10 + 1,
+    end_line: state.state === 'finished' ? id * 10 + 5 : null,
+    state,
+    command,
+    cwd: '/',
+  };
+}
+
+const RAN = { state: 'finished', exit_code: 0 } as const;
+
+test('the last command is not the last block when a prompt is showing', () => {
+  // The whole reason `lastCommand` exists: between a command finishing and
+  // the next one starting — most of a session's life — the tail block is a
+  // prompt, and the host clears its command when it re-anchors it.
+  const v = new GridView();
+  v.applyDelta({
+    blocks: [blk(0, RAN, 'cargo build'), blk(1, { state: 'prompt' }, '')],
+    attrs: [],
+    ops: [],
+  });
+  assert.equal(v.lastCommand(), 'cargo build');
+});
+
+test('a blank command never names a session', () => {
+  // pwsh brackets an empty Enter with C/D, so a finished block with nothing
+  // in it is ordinary — it must not blank the tab.
+  const v = new GridView();
+  v.applyDelta({
+    blocks: [blk(0, RAN, 'cargo build'), blk(1, RAN, '   ')],
+    attrs: [],
+    ops: [],
+  });
+  assert.equal(v.lastCommand(), 'cargo build');
+});
+
+test('a running command outranks the one before it', () => {
+  const v = new GridView();
+  v.applyDelta({
+    blocks: [blk(0, RAN, 'cargo build'), blk(1, { state: 'running' }, 'cargo test')],
+    attrs: [],
+    ops: [],
+  });
+  assert.equal(v.lastCommand(), 'cargo test');
+});
+
+test('a session that has run nothing names nothing', () => {
+  // Every shell without integration, and every session before its first
+  // command — the chip falls back to the OSC title there.
+  const v = new GridView();
+  assert.equal(v.lastCommand(), '');
+  v.applyDelta({ blocks: [blk(0, { state: 'prompt' }, '')], attrs: [], ops: [] });
+  assert.equal(v.lastCommand(), '');
+});
+
+test('a keyframe that drops the blocks drops the name with them', () => {
+  // `cls` erases the rows a block described, so the host restates from a
+  // lower id and the command goes with it.
+  const v = new GridView();
+  v.applyDelta({ blocks: [blk(0, RAN, 'cargo build')], attrs: [], ops: [] });
+  assert.equal(v.lastCommand(), 'cargo build');
+  v.applyKeyframe({
+    cols: 80,
+    rows_data: [],
+    attrs: [],
+    cursor: { row: 0, col: 0, visible: true, shape: 0 },
+    modes: 0,
+    blocks: [],
+    blocks_from: 0,
+  });
+  assert.equal(v.lastCommand(), '');
 });

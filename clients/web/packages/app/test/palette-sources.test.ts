@@ -38,6 +38,7 @@ function tab(over: Partial<Tab> & { id: string }): Tab {
   return {
     kind: 'session',
     title: 'zsh',
+    command: '',
     hostId: 'h1',
     cwd: '~/dev',
     color: null,

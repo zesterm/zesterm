@@ -26,6 +26,13 @@ export interface Tab {
   readonly id: string;
   readonly kind: TabKind;
   readonly title: string;
+  /**
+   * What this session last ran, from its blocks — the chip's first choice of
+   * name (`chipTitle`). Kept beside the OSC title rather than overwriting it
+   * so the precedence lives in one place, exactly as the native client keeps
+   * both facts on the terminal. Empty for a shell with no integration.
+   */
+  readonly command: string;
   readonly hostId: string;
   readonly cwd: string;
   readonly color: string | null;
@@ -93,6 +100,20 @@ export function setTitle(state: TabsState, id: string, title: string): TabsState
   if (tab === undefined || tab.title === title) return state;
   return {
     tabs: state.tabs.map((t) => (t.id === id ? { ...t, title } : t)),
+    activeId: state.activeId,
+  };
+}
+
+/**
+ * The session's last command arriving off its blocks. Same no-op contract as
+ * `setTitle`: a background tab is not attached, so it simply keeps the name it
+ * had — which is also what "keeps showing it until the next one starts" means.
+ */
+export function setCommand(state: TabsState, id: string, command: string): TabsState {
+  const tab = state.tabs.find((t) => t.id === id);
+  if (tab === undefined || tab.command === command) return state;
+  return {
+    tabs: state.tabs.map((t) => (t.id === id ? { ...t, command } : t)),
     activeId: state.activeId,
   };
 }

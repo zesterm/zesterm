@@ -33,6 +33,25 @@ use crate::fair_mutex::FairMutex;
 /// the lock long enough to drop frames even with a fair mutex.
 const PARSE_CHUNK: usize = 64 * 1024;
 
+/// What the chrome's view of a session's blocks depends on.
+///
+/// The tab's name ([`crate::chrome::model::terminal_label`]) and its running
+/// dot both come off the block index, and neither is redrawn by ordinary
+/// output damage — the frame's `grid_dirty` check consults the *active*
+/// source alone. So the reader has to say when it moved, and this is the
+/// cheapest thing that says it exactly.
+///
+/// [`zest_core::BlockIndex::last`] rather than `last_command`: it is O(1),
+/// and it is a strict superset — `begin_prompt` re-anchors a trailing prompt
+/// without changing its id or its state, so somebody typing at a prompt moves
+/// nothing, and a hundred megabytes of output inside one running block moves
+/// nothing either. A command costs three wakeups: `C`, `D`, and the prompt
+/// after it.
+#[must_use]
+fn label_key(term: &Terminal) -> Option<(zest_core::BlockId, zest_core::BlockState)> {
+    term.blocks().last().map(|b| (b.id, b.state))
+}
+
 /// What the app thread needs to be woken for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wakeup {
@@ -134,13 +153,18 @@ pub enum Wakeup {
     /// means the first no longer matters — and the pane drops an answer whose
     /// path is not the one it is waiting for.
     FileContentsReady,
-    /// A session's `OSC 9;4` progress moved.
+    /// A session changed something only the chrome shows: its `OSC 9;4`
+    /// progress, or which command it is running — which is also its name.
     ///
     /// Carries nothing: the value is already on that tab's terminal, where
     /// the chrome reads it beside the title. Its own variant rather than
     /// `Redraw` for [`Wakeup::Attention`]'s reason — a background tab's
     /// redraw reaches a frame that finds nothing to draw and skips, and the
     /// indicator lives in the chrome.
+    ///
+    /// Two producers, one for each kind of pane: the local reader below when
+    /// [`label_key`] moves, and `remote`'s reader on a progress message, a
+    /// keyframe, or a delta carrying blocks.
     SignalChanged,
 }
 
@@ -231,6 +255,7 @@ impl Session {
                 .name("zest-pty-reader".into())
                 .spawn(move || {
                     let mut buf = vec![0u8; PARSE_CHUNK];
+                    let mut labelled = None;
                     loop {
                         let n = match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
@@ -240,7 +265,7 @@ impl Session {
                         // Unfair acquire: this thread is the one in a tight
                         // loop, so it must never barge ahead of a renderer that
                         // is already waiting.
-                        let events = {
+                        let (events, key) = {
                             let mut term = terminal.lock_unfair();
                             // The parser has no clock (`no_std`); the reader
                             // is where wall time and bytes meet, so blocks
@@ -251,8 +276,12 @@ impl Session {
                                     .map_or(0, |d| d.as_millis() as u64),
                             );
                             term.advance(&buf[..n]);
-                            term.take_events()
+                            (term.take_events(), label_key(&term))
                         };
+                        if key != labelled {
+                            labelled = key;
+                            wake(Wakeup::SignalChanged);
+                        }
 
                         // Replies go straight back to the pty. Dropping them
                         // hangs whatever asked -- a DSR or an OSC 11 background
@@ -498,6 +527,56 @@ mod tests {
 
         assert!(woken.load(Ordering::Relaxed) > 0, "the app was never woken");
         assert!(session.is_dirty());
+    }
+
+    /// The chrome's invalidation must cost a command, not a chunk.
+    ///
+    /// A tab's name and its running dot come off the blocks, and nothing else
+    /// dirties the chrome for a *background* tab — but waking on every read
+    /// would put a per-chunk cost on the one thing this terminal promises to
+    /// keep free (0% GPU while idle, and a flood that still renders). This is
+    /// the test that holds the middle: three transitions per command, and the
+    /// output between them free.
+    #[test]
+    fn label_key_moves_once_per_command_not_once_per_chunk() {
+        struct Watch {
+            term: Terminal,
+            labelled: Option<(zest_core::BlockId, zest_core::BlockState)>,
+            moves: usize,
+        }
+        impl Watch {
+            fn feed(&mut self, bytes: &[u8]) {
+                self.term.advance(bytes);
+                let key = label_key(&self.term);
+                if key != self.labelled {
+                    self.labelled = key;
+                    self.moves += 1;
+                }
+            }
+        }
+        let term = Terminal::new(80, 24, 100);
+        let mut w = Watch { labelled: label_key(&term), term, moves: 0 };
+
+        w.feed(b"\x1b]133;A\x07$ ");
+        assert_eq!(w.moves, 1, "the first prompt opens a block");
+
+        // Typing, and a redraw that re-emits `A` — the #193 path. Neither is
+        // a new block, so neither is a wakeup.
+        w.feed(b"cargo");
+        w.feed(b" build");
+        w.feed(b"\r\x1b]133;A\x07$ cargo build");
+        assert_eq!(w.moves, 1, "typing at a prompt renames nothing");
+
+        w.feed(b"\x1b]133;B\x07cargo build\x1b]133;C\x07\r\n");
+        assert_eq!(w.moves, 2, "the command starting is a rename");
+
+        for _ in 0..500 {
+            w.feed(b"   Compiling something\r\n");
+        }
+        assert_eq!(w.moves, 2, "500 chunks of output inside one block are free");
+
+        w.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(w.moves, 3, "finishing stops the running dot");
     }
 
     /// The wakeup latch is what stops a flood drowning the event loop.

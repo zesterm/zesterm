@@ -143,7 +143,12 @@ the history behind them is in closed issues and PRs.
       field and the push behind it landed with #416 (`Registry`'s coalesced
       pulse also ends the stale-`title`/`cwd` watcher problem); what remains
       is the client-side dot/spinner on rows for sessions this window is not
-      attached to.
+      attached to. The *command* belongs in the same slice: since #533 a tab
+      is named by what it last ran, but those rows are for sessions this
+      window is not attached to, and `SessionInfo` carries `busy` — whether —
+      and nothing about what. Adding the what is additive and reaches ~13
+      consumers across the three projects, which is why it waits for the
+      dot rather than riding a title change.
 
 ### Input
 
@@ -251,6 +256,29 @@ the history behind them is in closed issues and PRs.
 
 ### Shell integration & blocks
 
+- [x] **A tab is named by the last command it ran** (#533). Precedence, in one
+      place (`chrome::model::session_label`, mirrored by `chipTitle` in the web
+      client): the last command the shell reported, then the OSC 0/2 title,
+      then `shell`. It *keeps* the finished command until the next one starts —
+      a chip that reverts the moment a build ends forgets the thing you came
+      back to read — and it is the last block that **ran something**, not the
+      last block (`BlockIndex::last_command`): `begin_prompt` re-anchors a
+      trailing prompt and clears its command, so for most of a session's life
+      the tail names nothing. Under the alternate screen the chip reads `vim`
+      rather than vim's own title, deliberately: the shell emits `133;C` before
+      the exec, and `ssh box` beating `user@box: ~` is the same trade.
+      A shell with no integration is unchanged — the OSC title still names it.
+      The invalidation is the other half: a background tab's chrome is dirtied
+      by nothing (`grid_dirty` consults the active source alone), so both
+      readers post `Wakeup::SignalChanged` when the blocks move — the local one
+      off `session::label_key`, the remote one off a keyframe or a delta
+      carrying blocks. Three wakeups per command, none per chunk of output, and
+      `TabModel.running`'s identical staleness goes with it. Open: the ⌘K and
+      fleet-card **session** rows still show the OSC title, because a listing
+      carries no command — see the `SessionInfo.busy` item under Windows chrome
+      — and `TabTitle::{ProfileName, Custom}` are still parsed, published and
+      never applied (`session_label` is what `FromShell` should always have
+      meant).
 - [ ] **fish, and the shells WSL bash left behind** (#405 landed bash, native
       and through `wsl.exe -d <distro> -- bash`). fish is deliberately
       unwritten: it cannot be *seen working* on the machines this is built on,
