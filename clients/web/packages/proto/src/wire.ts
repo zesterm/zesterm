@@ -367,10 +367,14 @@ export function parseBlockPayload(v: unknown): BlockPayload {
 }
 
 /**
- * Defaults, never throws, for a field this reply may carry from a newer or
- * an older host. `state` degrades to `finished` with no code — the never-a-
- * green-tick answer — where `parseBlockPayload` throws, because a throw
- * here ends the connection rather than a frame.
+ * Every optional defaults; a structurally malformed row still throws.
+ *
+ * `state`, `context` and `author` degrade — `state` to `finished` with no
+ * code, the never-a-green-tick answer — where `parseBlockPayload` throws,
+ * because on this path a throw ends the fleet connection rather than a
+ * frame. What cannot be defaulted (not an object, no `host`, no `block`) is
+ * thrown, and `parseHostMessage`'s `block_matches` arm catches it per row
+ * and drops that row; a caller reaching this directly must do the same.
  */
 export function parseBlockMatch(v: unknown): BlockMatch {
   const o = obj(v, 'BlockMatch');

@@ -92,8 +92,9 @@ export function blockSearchStore(): BlockSearchStore {
   const state = signal<{
     query: string;
     asked: number;
+    answered: number;
     answers: Readonly<Record<string, readonly BlockHit[]>>;
-  }>({ query: '', asked: 0, answers: {} });
+  }>({ query: '', asked: 0, answered: 0, answers: {} });
 
   // `hits` must be reference-stable between answers: the palette reads it on
   // every keystroke, and a watch that compares by reference would otherwise
@@ -105,10 +106,15 @@ export function blockSearchStore(): BlockSearchStore {
     ask(query, fanout) {
       state.query = query;
       state.answers = {};
+      state.answered = 0;
       state.asked = fanout(query, BLOCK_SEARCH_LIMIT);
     },
     answer(hostId, reply) {
       if (reply.query !== state.query) return;
+      // Counted here rather than as `Object.keys(answers).length` per
+      // read: the view is read on every keystroke. A host answering twice
+      // for one query (it cannot, but) replaces its rows and counts once.
+      if (!(hostId in state.answers)) state.answered += 1;
       state.answers = {
         ...state.answers,
         [hostId]: reply.matches.map((m) => blockHitOf(hostId, m)),
@@ -125,7 +131,7 @@ export function blockSearchStore(): BlockSearchStore {
         query: state.query,
         hits: flattened,
         hostsAsked: state.asked,
-        hostsAnswered: Object.keys(answers).length,
+        hostsAnswered: state.answered,
       };
     },
   };

@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ClientSigner } from '@zesterm/auth';
+import type { ConnectionEvents } from '@zesterm/client';
 import type { DirectoryView, HostFacts, SessionEntry } from '@zesterm/control';
 
 import type { DirectorySource, DirectoryStatus } from '../src/directory-source.ts';
@@ -530,4 +531,31 @@ test('the loopback search opens nothing until the directory is ready, then one c
 
   source.close();
   assert.equal(opened[0]?.closes, 1, 'the shell’s unmount closes what the source opened');
+});
+
+test('a question asked before the welcome is sent when the welcome lands', () => {
+  // ⌘K asks for the newest blocks on the way in, and on loopback that very
+  // call opens the connection — so the frame cannot go out yet. Without a
+  // re-send the palette shows no fleet rows until the person types.
+  const opened: FakeSearchLink[] = [];
+  const captured: { events: ConnectionEvents | null } = { events: null };
+  const source = localHostSource(reading({ kind: 'ready', view: VIEW }), SIGNER, null, (_dial, ev) => {
+    captured.events = ev;
+    const link = new FakeSearchLink();
+    opened.push(link);
+    return link;
+  });
+  assert.equal(source.searchBlocks(''), 0, 'the frame could not go out yet');
+  assert.equal(source.blockSearch().hostsAsked, 0);
+  const events = captured.events;
+  assert.ok(events, 'the connection was opened');
+
+  opened[0]!.connected = true;
+  events.onConnection?.({ phase: 'connected' });
+  assert.deepEqual(opened[0]?.searches, [{ query: '', limit: 40 }], 'the held question went out on the welcome');
+  assert.equal(source.blockSearch().hostsAsked, 1, 'and the count says so');
+
+  // A later question replaces the held one; nothing is re-sent twice.
+  events.onConnection?.({ phase: 'connected' });
+  assert.equal(opened[0]?.searches.length, 1, 'a second welcome has nothing held');
 });

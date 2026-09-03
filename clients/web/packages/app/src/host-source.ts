@@ -172,6 +172,11 @@ export function localHostSource(
   // attaches with over the same plane, so pairing is already done.
   const search = blockSearchStore();
   let link: { hostId: string; client: SearchLink } | null = null;
+  // The question asked before the handshake finished. ⌘K asks for the newest
+  // blocks on the way in, and on this path that is the very call that opens
+  // the connection — so the frame cannot go out yet, and without this the
+  // palette would show no fleet rows until the person typed.
+  let pending: string | null = null;
   const own = (): { id: string; label: string; dial: Dial | null } | null => {
     const dir = directory();
     if (dir.kind !== 'ready' || dir.view.host === null) return null;
@@ -228,13 +233,22 @@ export function localHostSource(
           const hostId = host.id;
           const client = openSearch(host.dial, {
             onBlockMatches: (reply) => search.answer(hostId, reply),
+            onConnection: (state) => {
+              // The channel exists now: the question that could not go out
+              // goes out, as the question still being asked.
+              if (state.phase !== 'connected' || pending === null) return;
+              const held = pending;
+              pending = null;
+              search.ask(held, (hq, hl) => (client.searchBlocks(hq, hl) ? 1 : 0));
+            },
           });
           link = { hostId, client };
           client.connect();
         }
-        // `false` while the handshake is still running: the first
-        // keystrokes' answer is simply the next keystroke's.
+        // `false` while the handshake is still running: held, and sent
+        // when the welcome lands.
         asked = link.client.searchBlocks(q, limit) ? 1 : 0;
+        pending = asked === 0 ? q : null;
         return asked;
       });
       return asked;
