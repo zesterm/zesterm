@@ -17,9 +17,11 @@
 //! undocumented convention, it is gated to two of the three platforms, and it
 //! leaves a shell holding nothing.
 //!
-//! Everything below takes bytes and a directory as parameters and no `arboard`
-//! type appears in this module, which is what lets every test run on a CI
-//! machine with no clipboard and no display server.
+//! Every function below takes bytes and a directory as parameters, and none of
+//! them names an `arboard` type -- the caller destructures the clipboard's
+//! `ImageData` and passes the pieces in. That is what lets the unit tests run
+//! on a CI machine with no clipboard and no display server. The one test that
+//! does open a real clipboard is `#[ignore]`d for exactly that reason.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

@@ -231,9 +231,11 @@ the history behind them is in closed issues and PRs.
 - [x] **A picture on the clipboard is pasted as a path** (#532). ⌘V used to
       send *nothing at all* when the clipboard held an image: `get_text` fails
       on an image-only clipboard, and the program never learned a paste had
-      happened. It now writes a PNG into a private per-user directory
-      (`temp_dir()/zesterm-<uid>/pasted-images`, 0700 from birth, pruned at 24h
-      and 32 files) and pastes the escaped absolute path. A path and not the
+      happened. It now writes a PNG into a private per-user directory —
+      `temp_dir()/zesterm-<uid>/pasted-images` on unix, where `/tmp` is shared,
+      and `temp_dir()/zesterm/pasted-images` on Windows, where `temp_dir()` is
+      already inside the user's profile; 0700 from birth, pruned at 24h and 32
+      files — and pastes the escaped absolute path. A path and not the
       bytes because no program reads a PNG off a pty, whereas a path is what a
       drag-and-drop delivers — so a shell gets an argument, `open` shows the
       picture, and an agent attaches it. The rejected alternative is in
