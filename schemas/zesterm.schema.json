@@ -80,7 +80,7 @@
         },
         {
           "const": "acrylic",
-          "description": "Acrylic blur. Undocumented on Windows; best-effort on Linux.",
+          "description": "Acrylic blur. Undocumented on Windows; no effect on Linux, where no\nWayland protocol offers a blur material.",
           "type": "string"
         },
         {

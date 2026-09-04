@@ -390,6 +390,9 @@ pub fn profiles_screen(
                     control_right,
                     control_top,
                     measure,
+                    // The profiles editor has no capability gating of its
+                    // own; a swatch's own `inert` still applies inside.
+                    false,
                 );
                 if let Some(a) = anchor {
                     menu_anchor = Some(a);
@@ -959,7 +962,7 @@ mod tests {
             value,
             provenance: None,
             restart: false,
-            inert: false,
+            inert: crate::chrome::model::Inert::No,
             modified,
         }
     }

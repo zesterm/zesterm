@@ -659,8 +659,8 @@ pub fn settings_screen(
                 if *restart {
                     chip("needs a restart".into(), colors.pill_warn_text, Some(colors.pill_warn_bg));
                 }
-                if *inert {
-                    chip("not applied yet".into(), colors.text_faint, None);
+                if let Some(text) = inert.label() {
+                    chip(text.into(), colors.text_faint, None);
                 }
 
                 // The control column: right-aligned beside the text, or on
@@ -683,6 +683,7 @@ pub fn settings_screen(
                     control_right,
                     control_top,
                     measure,
+                    inert.is_inert(),
                 );
                 if let Some(a) = anchor {
                     menu_anchor = Some(a);
@@ -711,13 +712,23 @@ pub(super) fn draw_control(
     right: f32,
     top: f32,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    // `inert`: the row refuses edits, so this control takes no clicks.
+    //
+    // Dimming alone would be a lie the pointer could disprove -- the tag and
+    // the banner shipped first while every hit region was still pushed, so an
+    // "unsupported" toggle flipped and wrote to the config. Suppressing the
+    // regions is what enforces it; the wash is only how it looks.
+    inert: bool,
 ) -> Option<[f32; 4]> {
     let mono = 12.0 * s;
     let mut menu_anchor = None;
+    // One place, so a new arm cannot forget: an inert control is drawn at 35%
+    // and pushes nothing.
+    let dim = |c: LinearRgba| if inert { super::layout::washed(c, 0.35) } else { c };
     match value {
         SettingsValueCell::Toggle { on } => {
             let track = [right - TOGGLE_W * s, top, TOGGLE_W * s, TOGGLE_H * s];
-            let fill = if *on { colors.accent } else { colors.line };
+            let fill = dim(if *on { colors.accent } else { colors.line });
             out.rects.push(RectInstance::rounded(track, TOGGLE_H * s / 2.0, fill, clip));
             let knob_d = 16.0 * s;
             let knob_x = if *on {
@@ -725,7 +736,7 @@ pub(super) fn draw_control(
             } else {
                 track[0] + 3.0 * s
             };
-            let knob = if *on { colors.bg_opaque } else { colors.text_inactive };
+            let knob = dim(if *on { colors.bg_opaque } else { colors.text_inactive });
             out.rects.push(RectInstance::rounded(
                 [knob_x, track[1] + 3.0 * s, knob_d, knob_d],
                 knob_d / 2.0,
@@ -733,7 +744,9 @@ pub(super) fn draw_control(
                 clip,
             ));
             if let Some(hit) = intersect(track, clip) {
-                out.hit.push(hit, HitRegion::SettingsToggle(row));
+                if !inert {
+                        out.hit.push(hit, HitRegion::SettingsToggle(row));
+                    }
             }
         }
         SettingsValueCell::Segmented { options, selected } => {
@@ -746,19 +759,21 @@ pub(super) fn draw_control(
             let boxr = [right - total, top, total, SEG_H * s];
             out.rects.push(RectInstance {
                 radii: [9.0 * s; 4],
-                border: colors.line,
+                border: dim(colors.line),
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+                ..RectInstance::filled(boxr, dim(colors.panel_bg), clip)
             });
             let mut x = boxr[0] + 3.0 * s;
             for (j, (option, w)) in options.iter().zip(&widths).enumerate() {
                 let seg = [x, boxr[1] + 3.0 * s, *w, boxr[3] - 6.0 * s];
                 let chosen = *selected == Some(j);
                 if chosen {
-                    out.rects.push(RectInstance::rounded(seg, 7.0 * s, colors.accent_soft, clip));
+                    out.rects.push(RectInstance::rounded(seg, 7.0 * s, dim(colors.accent_soft), clip));
                 }
                 if let Some(hit) = intersect(seg, clip) {
-                    out.hit.push(hit, HitRegion::SettingsSegment(row, j));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::SettingsSegment(row, j));
+                    }
                 }
                 let tw = measure(option, DESC_PX * s, false, 0.0);
                 out.texts.push(TextRun {
@@ -778,12 +793,14 @@ pub(super) fn draw_control(
             let pill = [right - SELECT_W * s, top, SELECT_W * s, SELECT_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
-                border: colors.line,
+                border: dim(colors.line),
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(pill, colors.panel_bg, clip)
+                ..RectInstance::filled(pill, dim(colors.panel_bg), clip)
             });
-            if let Some(hit) = intersect(pill, clip) {
-                out.hit.push(hit, HitRegion::SettingsSelect(row));
+            if !inert {
+                if let Some(hit) = intersect(pill, clip) {
+                    out.hit.push(hit, HitRegion::SettingsSelect(row));
+                }
             }
             out.texts.push(TextRun {
                 text: value.clone(),
@@ -820,14 +837,16 @@ pub(super) fn draw_control(
             ];
             out.settings_tracks.push((row, track));
             let grab = [track[0] - 7.0 * s, top - 6.0 * s, track[2] + 14.0 * s, 26.0 * s];
-            if let Some(hit) = intersect(grab, clip) {
-                out.hit.push(hit, HitRegion::SettingsSlider(row));
+            if !inert {
+                if let Some(hit) = intersect(grab, clip) {
+                    out.hit.push(hit, HitRegion::SettingsSlider(row));
+                }
             }
-            out.rects.push(RectInstance::rounded(track, 2.0 * s, colors.line, clip));
+            out.rects.push(RectInstance::rounded(track, 2.0 * s, dim(colors.line), clip));
             out.rects.push(RectInstance::rounded(
                 [track[0], track[1], track[2] * frac.clamp(0.0, 1.0), track[3]],
                 2.0 * s,
-                colors.accent,
+                dim(colors.accent),
                 clip,
             ));
             let knob = 14.0 * s;
@@ -839,7 +858,7 @@ pub(super) fn draw_control(
                     knob,
                 ],
                 knob / 2.0,
-                colors.text_active,
+                dim(colors.text_active),
                 clip,
             ));
             let tw = measure(text, mono, false, 0.0);
@@ -860,14 +879,16 @@ pub(super) fn draw_control(
             let boxr = [right - w, top, w, STEP_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
-                border: colors.line,
+                border: dim(colors.line),
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+                ..RectInstance::filled(boxr, dim(colors.panel_bg), clip)
             });
             for (up, x) in [(false, boxr[0]), (true, boxr[0] + w - STEP_BTN * s)] {
                 let btn = [x, boxr[1], STEP_BTN * s, boxr[3]];
                 if let Some(hit) = intersect(btn, clip) {
-                    out.hit.push(hit, HitRegion::SettingsStep(row, up));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::SettingsStep(row, up));
+                    }
                 }
                 // ASCII plus on purpose: U+FF0B resolves to nothing in the shipped
                 // stacks and renders as tofu (measured in the screenshot pass).
@@ -919,12 +940,14 @@ pub(super) fn draw_control(
             let boxr = [right - CONTROL_W * s, top, CONTROL_W * s, INPUT_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
-                border: colors.line,
+                border: dim(colors.line),
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+                ..RectInstance::filled(boxr, dim(colors.panel_bg), clip)
             });
             if let Some(hit) = intersect(boxr, clip) {
-                out.hit.push(hit, HitRegion::SettingsSelect(row));
+                if !inert {
+                        out.hit.push(hit, HitRegion::SettingsSelect(row));
+                    }
             }
             let ink = if *placeholder { colors.text_faint } else { colors.text_active };
             out.texts.push(TextRun {
@@ -998,7 +1021,7 @@ pub(super) fn draw_control(
                 radii: [8.0 * s; 4],
                 border: if *error { colors.pill_warn_text } else { colors.accent },
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+                ..RectInstance::filled(boxr, dim(colors.panel_bg), clip)
             });
             let color = if *error { colors.pill_warn_text } else { colors.text_active };
             text_entry(
@@ -1025,12 +1048,14 @@ pub(super) fn draw_control(
                 let item = [x, ry, w, LIST_ROW_H * s];
                 out.rects.push(RectInstance {
                     radii: [8.0 * s; 4],
-                    border: colors.line,
+                    border: dim(colors.line),
                     border_width: HAIRLINE * s,
-                    ..RectInstance::filled(item, colors.panel_bg, clip)
+                    ..RectInstance::filled(item, dim(colors.panel_bg), clip)
                 });
                 if let Some(hit) = intersect(item, clip) {
-                    out.hit.push(hit, HitRegion::SettingsListItem(row, j));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::SettingsListItem(row, j));
+                    }
                 }
                 let ink = if face.fallback { colors.text_faint } else { colors.text_active };
                 out.texts.push(TextRun {
@@ -1080,9 +1105,11 @@ pub(super) fn draw_control(
             let mut chip_right = right;
             let add_w = measure("+ tag", 11.0 * s, false, 0.0) + 20.0 * s;
             let add = [right - add_w, top, add_w, CHIP_H * s];
-            dashed_border(&mut out.rects, add, s, colors.line, clip);
+            dashed_border(&mut out.rects, add, s, dim(colors.line), clip);
             if let Some(hit) = intersect(add, clip) {
-                out.hit.push(hit, HitRegion::SettingsListAdd(row));
+                if !inert {
+                        out.hit.push(hit, HitRegion::SettingsListAdd(row));
+                    }
             }
             out.texts.push(TextRun {
                 text: "+ tag".into(),
@@ -1104,7 +1131,7 @@ pub(super) fn draw_control(
                 if chip[0] < col_left {
                     break;
                 }
-                out.rects.push(RectInstance::rounded(chip, 7.0 * s, colors.accent_soft, clip));
+                out.rects.push(RectInstance::rounded(chip, 7.0 * s, dim(colors.accent_soft), clip));
                 out.texts.push(TextRun {
                     text: tag.clone(),
                     pos: [chip[0] + 9.0 * s, baseline_in(chip[1], chip[3], 11.0 * s)],
@@ -1117,7 +1144,9 @@ pub(super) fn draw_control(
                 });
                 let xr = [chip[0] + w - xw - 12.0 * s, chip[1], xw + 12.0 * s, chip[3]];
                 if let Some(hit) = intersect(xr, clip) {
-                    out.hit.push(hit, HitRegion::SettingsListRemove(row, j));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::SettingsListRemove(row, j));
+                    }
                 }
                 out.texts.push(TextRun {
                     text: "\u{d7}".into(),
@@ -1141,15 +1170,17 @@ pub(super) fn draw_control(
             let pill = [right - SELECT_W * s, top, SELECT_W * s, SELECT_H * s];
             out.rects.push(RectInstance {
                 radii: [8.0 * s; 4],
-                border: colors.line,
+                border: dim(colors.line),
                 border_width: HAIRLINE * s,
-                ..RectInstance::filled(pill, colors.panel_bg, clip)
+                ..RectInstance::filled(pill, dim(colors.panel_bg), clip)
             });
-            if let Some(hit) = intersect(pill, clip) {
-                out.hit.push(hit, HitRegion::SettingsSelect(row));
+            if !inert {
+                if let Some(hit) = intersect(pill, clip) {
+                    out.hit.push(hit, HitRegion::SettingsSelect(row));
+                }
             }
             let dot_d = 6.0 * s;
-            let dot_color = if *online { colors.success } else { colors.text_faint };
+            let dot_color = dim(if *online { colors.success } else { colors.text_faint });
             out.rects.push(RectInstance::rounded(
                 [pill[0] + 11.0 * s, pill[1] + (pill[3] - dot_d) / 2.0, dot_d, dot_d],
                 dot_d / 2.0,
@@ -1224,11 +1255,18 @@ pub(super) fn draw_control(
                     tracking: 0.0,
                 });
                 if let Some(hit) = intersect(cell, clip) {
-                    out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                    }
                 }
             }
         }
-        SettingsValueCell::AccentSwatches { selected, inert } => {
+        SettingsValueCell::AccentSwatches { selected, inert: swatches_inert } => {
+            // Two reasons a swatch can be dead -- the host owns the accent
+            // (§12), or the whole row is unsupported here -- and either is
+            // enough. Named apart rather than shadowing, so the arm cannot
+            // silently answer only one of them.
+            let inert = inert || *swatches_inert;
             // Six swatches from the window theme's accent roster — the same
             // roster the tab chips resolve `tab_color` against, so what is
             // picked here is what the chip draws.
@@ -1243,7 +1281,7 @@ pub(super) fn draw_control(
                 );
                 // Dimmed to 35% AND inert while the host decides (§12): no
                 // hit region, so the swatch cannot act while looking unable.
-                let ink = if *inert { super::layout::washed(ink, 0.35) } else { ink };
+                let ink = if inert { super::layout::washed(ink, 0.35) } else { ink };
                 out.rects.push(RectInstance::rounded(cell, 5.0 * s, ink, clip));
                 if *selected == Some(j) && !inert {
                     out.rects.push(RectInstance {
@@ -1295,7 +1333,9 @@ pub(super) fn draw_control(
                     tracking: 0.0,
                 });
                 if let Some(hit) = intersect(cell, clip) {
-                    out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                    if !inert {
+                        out.hit.push(hit, HitRegion::ProfilesChoice(row, j));
+                    }
                 }
             }
         }
@@ -1907,8 +1947,21 @@ mod tests {
             value,
             provenance: None,
             restart: false,
-            inert: false,
+            inert: crate::chrome::model::Inert::No,
             modified,
+        }
+    }
+
+    fn inert_cell_row(value: SettingsValueCell) -> SettingsRowModel {
+        SettingsRowModel::Setting {
+            label: "Backdrop".into(),
+            key: "window.backdrop".into(),
+            description: "Platform backdrop material.".into(),
+            value,
+            provenance: None,
+            restart: false,
+            inert: crate::chrome::model::Inert::Unsupported,
+            modified: false,
         }
     }
 
@@ -2500,5 +2553,117 @@ mod tests {
             stray.len(),
             stray.first()
         );
+    }
+
+    /// The claim `Inert` makes is that the control cannot be operated, and a
+    /// tag alone does not make that true: the first cut of #476 dimmed nothing
+    /// and suppressed nothing, so an "unsupported" toggle still flipped and
+    /// still wrote. Sweeping the surface is the only check that would have
+    /// caught it -- asserting on the model would just restate the flag.
+    #[test]
+    fn an_unsupported_control_answers_no_click_anywhere() {
+        for value in [
+            SettingsValueCell::Toggle { on: false },
+            SettingsValueCell::Select { value: "none".into() },
+            SettingsValueCell::Segmented { options: vec!["A".into(), "B".into()], selected: Some(0) },
+            SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
+            SettingsValueCell::Stepper { text: "12".into() },
+        ] {
+            let m = model(vec![inert_cell_row(value.clone())]);
+            let l = lay(&m, 1100.0, 720.0);
+            for x in (0..1100).step_by(3) {
+                for y in (46..766).step_by(3) {
+                    if matches!(
+                        l.hit.hit(x as f32, y as f32),
+                        Some(
+                            HitRegion::SettingsToggle(_)
+                                | HitRegion::SettingsSegment(..)
+                                | HitRegion::SettingsSelect(_)
+                                | HitRegion::SettingsSlider(_)
+                                | HitRegion::SettingsStep(..)
+                                | HitRegion::SettingsListItem(..)
+                        )
+                    ) {
+                        panic!("({x},{y}): an unsupported {value:?} answered a click");
+                    }
+                }
+            }
+        }
+    }
+
+    /// ...and the other half of the same claim: it has to *look* unable.
+    ///
+    /// A row that refuses clicks while drawing at full strength is a control
+    /// that appears to work and does nothing, which is worse than either. The
+    /// first cut applied `dim` per shape rather than to an arm's whole
+    /// output, so the Select washed its border and not its fill and the
+    /// slider stayed bright throughout — both invisible to the click sweep
+    /// above, because suppression and appearance are separate halves of one
+    /// claim.
+    ///
+    /// Matched by geometry rather than by index: the shapes stay where they
+    /// are and only their colours move, while a selection ring exists in one
+    /// layout and not the other.
+    #[test]
+    fn an_unsupported_control_is_drawn_dimmer_than_a_live_one() {
+        for value in [
+            SettingsValueCell::Toggle { on: true },
+            SettingsValueCell::Select { value: "none".into() },
+            SettingsValueCell::Segmented { options: vec!["A".into(), "B".into()], selected: Some(0) },
+            SettingsValueCell::Slider { frac: 0.5, text: "0.5".into() },
+            SettingsValueCell::Stepper { text: "12".into() },
+            SettingsValueCell::TagList { tags: vec!["cwd".into()] },
+        ] {
+            let live = lay(&model(vec![cell_row(value.clone(), false)]), 1100.0, 720.0);
+            let inert = lay(&model(vec![inert_cell_row(value.clone())]), 1100.0, 720.0);
+            let mut compared = 0;
+            for l in &live.rects {
+                // The control column only. Every cell draws its control
+                // against the right edge, while the panel's own furniture --
+                // the rail, the dividers, a row background -- starts left of
+                // centre and is identical in both layouts by design: it is
+                // the row that is inert, not the panel around it.
+                if l.rect[0] < 550.0 {
+                    continue;
+                }
+                // Only shapes that carry colour, and only where the inert
+                // layout draws the same shape.
+                if l.fill.0[3] == 0.0 && l.border.0[3] == 0.0 {
+                    continue;
+                }
+                let Some(i) = inert.rects.iter().find(|i| i.rect == l.rect) else { continue };
+                compared += 1;
+                assert!(
+                    i.fill != l.fill || i.border != l.border,
+                    "an unsupported {value:?} draws a shape at {:?} in exactly the live \
+                     colours (fill {:?}, border {:?}); the row refuses clicks while \
+                     looking like it takes them",
+                    l.rect,
+                    l.fill,
+                    l.border
+                );
+            }
+            assert!(
+                compared > 0,
+                "no shape of {value:?} was compared, so this proves nothing about it"
+            );
+        }
+    }
+
+    /// ...and the converse, so the suppression cannot quietly disable every
+    /// control in the panel.
+    #[test]
+    fn a_supported_control_still_answers() {
+        let m = model(vec![cell_row(SettingsValueCell::Toggle { on: false }, false)]);
+        let l = lay(&m, 1100.0, 720.0);
+        let mut found = false;
+        for x in (0..1100).step_by(2) {
+            for y in (46..766).step_by(2) {
+                if matches!(l.hit.hit(x as f32, y as f32), Some(HitRegion::SettingsToggle(_))) {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "a live toggle must still be clickable");
     }
 }
