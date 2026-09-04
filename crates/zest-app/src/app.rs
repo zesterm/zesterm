@@ -12402,15 +12402,25 @@ impl App {
     /// does not drag the window's own furniture with it.
     /// What this process can actually deliver, for the settings form.
     ///
-    /// Every field is observed rather than assumed. `transparency` reads the
-    /// `alpha_mode` the surface was *configured* with, which is the only thing
-    /// that knows whether `alpha_mode_for` had to fall back -- on Windows it is
-    /// adapter-dependent (ADR-003) and on X11 it follows the window's visual.
-    /// Before a surface exists there is nothing to report, and claiming a limit
-    /// we have not seen would grey out a control that turns out to be fine.
+    /// Every field is observed rather than assumed. `transparency` asks
+    /// `alpha_mode_for` -- the same function the surface is configured
+    /// through -- what this surface's *supported* modes would give a window
+    /// that wanted alpha, so the form and the surface cannot disagree about
+    /// what the adapter can do (it is adapter-dependent on Windows, ADR-003,
+    /// and follows the visual on X11).
+    ///
+    /// Deliberately **not** the currently configured `alpha_mode`: that is
+    /// `Opaque` whenever both opacities are 1.0, which is the ordinary state
+    /// of a window nobody has made translucent yet. Reading it would report
+    /// "this machine cannot do transparency" to everyone who had not already
+    /// turned it on -- greying out the very control they were reaching for.
+    ///
+    /// Before a surface exists there is nothing to report, and claiming a
+    /// limit we have not seen would grey out a control that turns out to be
+    /// fine.
     fn capabilities(&self) -> crate::platform::Capabilities {
         let transparency = self.gpu.as_ref().is_none_or(|g| {
-            g.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque || self.config.opacity >= 1.0
+            alpha_mode_for(true, &g.alpha_modes) != wgpu::CompositeAlphaMode::Opaque
         });
         crate::platform::Capabilities {
             transparency,

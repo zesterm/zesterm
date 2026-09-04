@@ -182,7 +182,12 @@ impl Capabilities {
     pub fn honours(&self, key: &str) -> bool {
         match key {
             "window.backdrop" => self.backdrop,
-            "window.opacity" => self.transparency,
+            // Both opacities, because they are one capability: each is an
+            // alpha this surface either composites or does not
+            // (`Config::translucent_surface` reads them together for exactly
+            // that reason). Listing only one would leave the chrome's slider
+            // live on a surface that cannot honour it.
+            "window.opacity" | "window.chrome_opacity" => self.transparency,
             _ => true,
         }
     }
@@ -206,13 +211,15 @@ impl Capabilities {
         }
         if !self.transparency {
             out.push(
-                "`window.opacity` is ignored: this surface cannot composite per-pixel alpha, \
-                 so the window is opaque whatever the value says.",
+                "`window.opacity` and `window.chrome_opacity` are ignored: this surface \
+                 cannot composite per-pixel alpha, so the window is opaque whatever they \
+                 say.",
             );
         } else if !self.live_opacity {
             out.push(
-                "`window.opacity` applies at the next launch: the visual carrying the alpha \
-                 is chosen when the window is created, and X11 cannot swap it afterwards.",
+                "`window.opacity` and `window.chrome_opacity` apply at the next launch: the \
+                 visual carrying the alpha is chosen when the window is created, and X11 \
+                 cannot swap it afterwards.",
             );
         }
         (!out.is_empty()).then(|| out.join(" "))
@@ -234,13 +241,40 @@ mod capability_tests {
         assert!(opaque.window_notice().is_some_and(|t| t.contains("window.opacity")));
     }
 
+    /// Both opacity keys are one capability, and the banner names both.
+    ///
+    /// `window.chrome_opacity` arrived after this sweep was written (#522) and
+    /// is an alpha onto the same surface: a build that refused one and left
+    /// the other live would grey out the window slider while the chrome
+    /// slider sat there doing nothing.
+    #[test]
+    fn both_opacities_stand_or_fall_together() {
+        let opaque = Capabilities { transparency: false, ..Capabilities::default() };
+        assert!(!opaque.honours("window.opacity"));
+        assert!(!opaque.honours("window.chrome_opacity"));
+        let notice = opaque.window_notice().expect("a surface with no alpha has something to say");
+        assert!(notice.contains("window.chrome_opacity"), "the banner names both: {notice}");
+
+        let live = Capabilities::default();
+        assert!(live.honours("window.opacity") && live.honours("window.chrome_opacity"));
+
+        let x11 = Capabilities { live_opacity: false, ..Capabilities::default() };
+        assert!(
+            x11.window_notice().is_some_and(|t| t.contains("window.chrome_opacity")),
+            "and so does the relaunch sentence"
+        );
+    }
+
     /// The two opacity sentences are mutually exclusive: a surface that cannot
     /// composite alpha at all must not also be told it will work next launch.
     #[test]
     fn an_opaque_surface_is_not_promised_a_relaunch() {
         let c = Capabilities { transparency: false, live_opacity: false, backdrop: true };
         let t = c.window_notice().expect("something is ignored");
-        assert!(t.contains("is ignored"), "{t}");
+        // "ignored", not the whole clause: the sentence names both opacity
+        // keys and so reads plural, and this test is about which of the two
+        // sentences appears rather than how either is worded.
+        assert!(t.contains("ignored"), "{t}");
         assert!(!t.contains("next launch"), "an opaque surface gains nothing by relaunching: {t}");
     }
 
