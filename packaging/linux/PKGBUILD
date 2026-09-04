@@ -1,5 +1,15 @@
 # Maintainer: Andreas Ekdahl <andy@ekdahls.net>
-pkgname=zesterm
+#
+# A **VCS package**, built from the repository rather than from a release
+# tarball, because there is no release: the repo carries no tags, so
+# `archive/refs/tags/v$pkgver.tar.gz` is a 404 and this file would describe a
+# package nobody could build. `-git` is the Arch spelling for that, and
+# `provides`/`conflicts` keep it exclusive with the tagged package this
+# becomes once there is a version to tag.
+_pkgname=zesterm
+pkgname=zesterm-git
+# Replaced by pkgver() below; makepkg keeps this only until the checkout
+# exists to compute the real one from.
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="GPU-accelerated themable terminal, and a fleet"
@@ -19,32 +29,41 @@ optdepends=('vulkan-swrast: software Vulkan, for a machine with no GPU driver'
             'gnome-keyring: credential store for the daemon identity'
             'ttf-jetbrains-mono-nerd: the default font stack'\''s Nerd Font glyphs'
             'noto-fonts-emoji: colour emoji')
-makedepends=('cargo')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+makedepends=('cargo' 'git')
 options=('!lto')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
+# No tags to describe, so the revision count and the short hash — the
+# conventional form for a VCS package that has never been released.
+pkgver() {
+  cd "$_pkgname"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
 prepare() {
-  cd "$pkgname-$pkgver"
+  cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release --workspace
 }
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo test --frozen --workspace
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$_pkgname"
   # Three binaries, not one: the window is a client of its own daemon, and
   # zest-mcp is how an agent harness reaches the same sessions.
   for b in zesterm zest-daemon zest-mcp; do

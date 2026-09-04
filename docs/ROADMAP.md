@@ -185,9 +185,11 @@ the history behind them is in closed issues and PRs.
       an installed desktop file and a mismatch is invisible until someone
       notices a blank square. The Vulkan *driver* is an optdepend, not a
       dependency: the loader is required, a driver is the user's, and the GL
-      rung serves a machine with no Vulkan at all. Deliberately not a release
-      pipeline — AppImage, flatpak, `.deb` and a tag trigger are a distribution
-      decision, and this is the "can a Linux user install it" one.
+      rung serves a machine with no Vulkan at all. A `-git` package, building
+      the repository: there is nothing tagged to download, so a tarball source
+      would name a URL that 404s. Deliberately not a release pipeline —
+      AppImage, flatpak, `.deb` and a tag trigger are a distribution decision,
+      and this is the "can a Linux user install it" one.
 
 ### Shell integration & blocks
 

@@ -121,7 +121,9 @@ cargo xtask check-spawn
 
 ## Packaging
 
-`packaging/linux/` carries an Arch `PKGBUILD`, a desktop entry and an icon. The
+`packaging/linux/` carries an Arch `PKGBUILD` (a `-git` package: it builds the
+repository, since there is nothing tagged to download), a desktop entry and an
+icon. The
 entry's `StartupWMClass` and `Icon` must both equal `platform::APP_ID`: on
 Wayland the taskbar icon is found by matching the window's `app_id` against an
 installed desktop file, so a mismatch means no icon and nothing to point at.

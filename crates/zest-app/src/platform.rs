@@ -10,9 +10,11 @@
 /// rules -- Hyprland's `windowrule`, KWin's -- have nothing to match on either.
 ///
 /// One lowercase spelling for both, matching the binary and the window title.
-/// A desktop entry does not exist yet (Linux packaging is still open on #9);
-/// when it does, its basename, its `Icon=` and its `StartupWMClass=` must all
-/// be this string, or the icon lookup finds nothing.
+/// `packaging/linux/zesterm.desktop` is the other end of it: its basename, its
+/// `Icon=` and its `StartupWMClass=` must all be this string, or the icon
+/// lookup finds nothing. `the_app_id_and_the_desktop_entry_agree` reads the
+/// entry at compile time so a rename on one side is a build failure rather
+/// than a missing icon.
 /// Deliberately *not* X11's capitalized
 /// convention (`("zesterm", "Zesterm")`): Hyprland matches `class:` against the
 /// app_id for a Wayland window and against WM_CLASS's *class* for an XWayland
