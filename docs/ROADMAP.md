@@ -165,8 +165,17 @@ the history behind them is in closed issues and PRs.
       twin's Ctrl+Shift form, so `⌘⇧F` is `⌘F`'s own Windows spelling and `⌘G`
       is spent by Open file… — ⏎/⇧⏎ inside the bar step instead, and `⌘⇧F` is
       unavailable to a future fleet search too. Design §14.
-      Remote panes say `local only`: nothing asks a host for scrollback yet, so
-      the count describes what crossed the wire rather than the session.
+      **And it searches the session, not the part of it that arrived** (#545):
+      a keyframe is a viewport, so every tab is a replica whose history lives
+      on its daemon, and the app sent no `RequestScrollback` at all — ⌘F
+      covered the screen plus whatever had scrolled since, the ordinary state
+      after a reattach, while scrolling up pinned at the same row. The bar now
+      pulls a page per frame while it is open, saying `fetching history…`
+      until the host is drained or this replica is as full as its own
+      scrollback limit; a scroll to the top pulls one too. A page un-banks
+      exactly the lines it names before prepending — #313's rule the other way
+      round — because a replica banks its own blank rows at attach (#341) and
+      their ids collide with the host's oldest history.
 - [ ] Kitty flags 4 (alternate keys) and 16 (associated text). 4 needs the
       base-layout key, which winit exposes through a trait that does not cover
       Wayland — a platform-capability question, not a table to fill in. 16 is

@@ -825,9 +825,14 @@ needed: searching the fleet's history *is* the ⌘K palette (§6).
   lines must not yank the view off the match somebody just stepped to.
 - `Esc` closes and leaves the grid's own selection alone. §3 forbids two things
   lit at once, and escaping a search must not also undo a drag.
-- On a **remote** pane the bar says `local only`: nothing asks the host for
-  scrollback yet, so the grid holds what crossed the wire and the count
-  describes this window's copy rather than the session.
+- The bar **pulls the session's history while it is open** (#545), a page per
+  frame, and says `fetching history…` until nothing is in flight — so the
+  count climbs to the whole session instead of describing the part that
+  happened to arrive. Every pane is a replica (the window is a client of its
+  own daemon) and a keyframe is a viewport, so without this a search after a
+  reattach covers the screen and whatever has scrolled since. Scrolling to the
+  top of what is held pulls a page too. The note is what this window is
+  *doing*; there is no "complete", which only the host could claim.
 
 Implemented by `crates/zest-app/src/find.rs` (the pure state),
 `crates/zest-app/src/chrome/layout.rs` (`find_bar_overlay`, this geometry),
