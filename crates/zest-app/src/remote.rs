@@ -915,6 +915,20 @@ impl RemoteSession {
                             let mut term = terminal.lock_unfair();
                             applier.apply_keyframe(&mut term, &keyframe, seq);
                         }
+                        // The reattach applies its keyframe here rather than
+                        // through the arm above, so the history pull has to
+                        // be restarted here too — and *both* flags, unlike
+                        // the arm: a request that was on the old link will
+                        // never be answered, so an in-flight mark left set
+                        // stalls the pull for the life of the window.
+                        // The reattach applies its keyframe here rather than
+                        // through the arm above, so the history pull has to
+                        // be restarted here too — and *both* flags, unlike
+                        // the arm: a request that was on the old link will
+                        // never be answered, so an in-flight mark left set
+                        // stalls the pull for the life of the window.
+                        history.in_flight.store(false, Ordering::Release);
+                        history.drained.store(false, Ordering::Release);
                         predictor.lock().on_keyframe(keyframe.cursor, keyframe.cols, keyframe.modes.contains(zest_core::Modes::ALT_SCREEN));
                         pending_ack = Some(seq);
                         frames = carried;
@@ -1511,8 +1525,18 @@ mod tests {
             addr: SessionAddr,
             wake: impl Fn(Wakeup) + Send + 'static,
         ) -> RemoteSession {
+            self.attach_addr_dialling(&self.path.clone(), addr, wake)
+        }
+
+        /// The same, over a socket that can be cut.
+        fn attach_addr_dialling(
+            &self,
+            socket: &str,
+            addr: SessionAddr,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
             let identity = Arc::new(ClientIdentity::generate().expect("client key"));
-            let path = self.path.clone();
+            let path = socket.to_string();
             let dial: Dialer = Box::new(move || {
                 let stream =
                     zest_daemon::connect(&path).map_err(|e| RemoteError::Io(e.to_string()))?;
@@ -2642,6 +2666,56 @@ mod tests {
             term.grid().scrollback_limit(),
             "it should stop exactly full -- neither short of the limit nor asking for \
              pages it would immediately drop"
+        );
+    }
+
+    /// A reattach restarts the pull, and the restart really completes.
+    ///
+    /// The redial applies its keyframe outside the streaming loop, so a reset
+    /// written only in that arm leaves a reconnected window with `drained`
+    /// still set — the pull never resumes, and ⌘F is back to searching what
+    /// happened to arrive. The in-flight mark matters just as much and is
+    /// quieter: a request that was on the old link is never answered, so a
+    /// mark left set stalls the pull for the life of the window. Asserted as
+    /// two states in order, because each catches one of those and neither
+    /// catches both.
+    #[test]
+    fn a_reattach_restarts_the_history_pull() {
+        use crate::source::HistoryState;
+        const LINES: usize = 60;
+        let h = Harness::start("backfill-redial");
+        let link = Link::new(&h.path, "backfill-redial");
+
+        let watcher = h.attach(&printing(LINES), |_| {});
+        let addr = watcher.addr();
+        let host = h.registry.get(addr.session).expect("the daemon has the session");
+        assert!(
+            wait_for(|| host.scrollback(0, 500).0.len() >= LINES - 6),
+            "the session never printed its history"
+        );
+        drop(watcher);
+
+        let reader = h.attach_addr_dialling(&link.path, addr, |_| {});
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Settled)),
+            "the first pull never settled"
+        );
+        assert!(
+            reader.terminal().lock().grid().scrollback_len() >= LINES - 6,
+            "precondition: the first pull brought the history"
+        );
+
+        link.cut();
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Fetching)),
+            "after a reattach the pull must ask again: the keyframe may hand out history \
+             this replica never held, and a window that concluded the host was drained \
+             before the link changed would never find out"
+        );
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Settled)),
+            "and the request it sent must actually be answered -- settling again is what \
+             separates a live pull from an in-flight mark left over from the dead link"
         );
     }
 
