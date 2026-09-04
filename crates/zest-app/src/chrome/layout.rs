@@ -280,10 +280,12 @@ const FIND_RADIUS: f32 = 10.0;
 const FIND_INSET: f32 = 8.0;
 const FIND_BUTTON: f32 = 22.0;
 const FIND_GLYPH: &str = "⌕";
-/// Said rather than left to be inferred: a remote pane's grid holds only what
-/// crossed the wire, so the count describes this window's copy and not the
-/// session. Nothing asks the host for its scrollback yet.
-const FIND_LOCAL_NOTE: &str = "local only";
+/// Said rather than left to be inferred: the bar is pulling the session's
+/// history off its host a page at a time (#545), so the count is still
+/// growing and a small number must not read as "this was never run here".
+/// Absent once nothing is in flight — this window can say what it is doing,
+/// where "complete" would be a claim only the host could make.
+const FIND_FETCHING_NOTE: &str = "fetching history…";
 
 /// Baseline that vertically centres a run of `px`-sized text in a band.
 /// 0.72·px approximates the ascent above baseline for the faces we ship;
@@ -1687,8 +1689,8 @@ fn find_bar_overlay(
     } else {
         measure(&model.count, UI_STATUS * s, false, 0.0) + pad
     };
-    let note_w = if model.local_only {
-        measure(FIND_LOCAL_NOTE, UI_STATUS * s, false, 0.0) + pad
+    let note_w = if model.fetching_history {
+        measure(FIND_FETCHING_NOTE, UI_STATUS * s, false, 0.0) + pad
     } else {
         0.0
     };
@@ -1800,13 +1802,13 @@ fn find_bar_overlay(
         clip: panel,
     });
 
-    if model.local_only {
+    if model.fetching_history {
         right -= note_w;
         out.texts.push(TextRun {
             px: UI_STATUS * s,
             bold: false,
             tracking: 0.0,
-            text: FIND_LOCAL_NOTE.to_string(),
+            text: FIND_FETCHING_NOTE.to_string(),
             pos: [right, text_baseline(m, y, h)],
             max_width: note_w,
             color: colors.text_faint,
@@ -6502,7 +6504,7 @@ mod tests {
             count: count.into(),
             empty,
             case_sensitive: false,
-            local_only: false,
+            fetching_history: false,
         }
     }
 
@@ -6571,20 +6573,30 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_session_says_the_search_was_local() {
-        // A remote pane's grid holds only what crossed the wire, so the count
-        // describes this window's copy rather than the session. Saying nothing
-        // would let a small number read as "this command was never run here".
+    fn a_search_still_pulling_history_says_so() {
+        // The count is still growing while pages land, and a small number
+        // that is about to change would otherwise read as "this command was
+        // never run here" (#545).
         let m = metrics(1200.0, 800.0, 1.0);
         let mut model =
             model(vec![tab(1, TabOrigin::Local, TabPresence::Online)], TabsPosition::Top);
         let mut find = find_model("1 of 3", false);
-        find.local_only = true;
+        find.fetching_history = true;
         model.find = Some(find);
         let l = layout(&model, &colors(), &m, &mut measure);
         assert!(
-            l.texts.iter().any(|t| t.text == FIND_LOCAL_NOTE),
-            "the bar admits the count is only what this window received"
+            l.texts.iter().any(|t| t.text == FIND_FETCHING_NOTE),
+            "the bar says the count is still growing"
+        );
+
+        let mut settled = find_model("1 of 3", false);
+        settled.fetching_history = false;
+        model.find = Some(settled);
+        let l = layout(&model, &colors(), &m, &mut measure);
+        assert!(
+            !l.texts.iter().any(|t| t.text == FIND_FETCHING_NOTE),
+            "and stops saying it once nothing is in flight -- a note that never \
+             clears is one nobody reads"
         );
     }
 
