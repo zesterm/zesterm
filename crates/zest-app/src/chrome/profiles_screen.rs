@@ -95,10 +95,20 @@ pub fn profiles_screen(
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
     out: &mut ChromeLayout,
 ) -> Option<[f32; 4]> {
-    // Opaque ground over the whole grid area — a screen, not a scrim — and
-    // one swallow region so nothing falls through to what is beneath (the
-    // grid, or an open Settings tab's content).
-    out.rects.push(RectInstance::filled(area, colors.bg_opaque, area));
+    // The ground *is* the window surface where it sits, exactly as the tab
+    // strip is (#522): written rather than blended, so `window.chrome_opacity`
+    // is an alpha onto whatever is behind the window instead of a tint toward
+    // the window background. Blended it could only ever be the latter — the
+    // clear is already `window.opacity`, and compositing onto it is ADR-017's
+    // `1-(1-o)²`. Safe to *replace* because `pane_is_covered` builds no
+    // viewport under a screen; a surface rect erases what it overlaps, so one
+    // over a live grid would cut a hole in it.
+    //
+    // The swallow region below is unchanged and still earns its place: it stops
+    // a click falling through to a region an earlier pass pushed. Which vec the
+    // fill went into is not a fact `ChromeHitMap` knows — it is its own list,
+    // ordered by call, and `hit` walks it in reverse.
+    out.surface_rects.push(RectInstance::filled(area, colors.screen_bg, area));
     out.hit.push(area, HitRegion::ScreenPanel);
 
     rail(model, area, colors, s, measure, out);
@@ -404,7 +414,11 @@ fn rail(
     out: &mut ChromeLayout,
 ) {
     let w = (RAIL_W * s).min(area[2] * 0.4);
-    out.rects.push(RectInstance::filled([area[0], area[1], w, area[3]], colors.block_header_bg, area));
+    // A surface, like the ground it continues (#538) — and pushed after it, so
+    // the replace pipeline simply hands this strip over. Safe in either order
+    // regardless: the content column starts right of the rail and the rows are
+    // clipped to stop at the footer, so nothing in `rects` overlaps either one.
+    out.surface_rects.push(RectInstance::filled([area[0], area[1], w, area[3]], colors.screen_rail_bg, area));
     out.rects.push(RectInstance::filled(
         [area[0] + w - HAIRLINE * s, area[1], HAIRLINE * s, area[3]],
         colors.hairline_soft,
@@ -851,7 +865,11 @@ fn footer(
     out: &mut ChromeLayout,
 ) {
     let bar = [content[0], footer_y, content[2], ss::FOOTER_H * s];
-    out.rects.push(RectInstance::filled(bar, colors.block_header_bg, content));
+    // A surface, like the ground it continues (#538) — and pushed after it, so
+    // the replace pipeline simply hands this strip over. Safe in either order
+    // regardless: the content column starts right of the rail and the rows are
+    // clipped to stop at the footer, so nothing in `rects` overlaps either one.
+    out.surface_rects.push(RectInstance::filled(bar, colors.screen_rail_bg, content));
     out.rects.push(RectInstance::filled(
         [bar[0], bar[1], bar[2], HAIRLINE * s],
         colors.hairline_soft,
@@ -1068,6 +1086,57 @@ mod tests {
             })
         });
         assert!(!leaked, "the base pass must not draw the menu — base texts would paint over it");
+    }
+
+    /// The chrome at `chrome_opacity`, the window opaque — the pair that tells
+    /// a ground following the *chrome* from one following the window.
+    fn colors_at(chrome_opacity: f32) -> ChromeColors {
+        let theme = zest_theme::builtin::obsidian();
+        ChromeColors::new(&theme.ui, &theme.effects, chrome_opacity, 1.0)
+    }
+
+    #[test]
+    fn the_ground_is_the_window_surface_at_chrome_opacity() {
+        // #538, per screen: each of the three grounds is its own copy of this
+        // line, so a test through one of them proves nothing about the others.
+        // Both halves matter and neither is enough — a translucent fill left in
+        // `rects` can only tint toward the window background (ADR-017), and a
+        // surface rect at alpha 1 is the opaque slab this replaced.
+        let mut out = ChromeLayout::default();
+        let area = [0.0, 46.0, 1100.0, 720.0];
+        profiles_screen(&model(true), area, &colors_at(0.4), None, 1.0, &mut measure, &mut out);
+
+        let ground = out
+            .surface_rects
+            .iter()
+            .find(|r| r.rect == area)
+            .expect("the screen grounds the whole pane, and does it as a surface");
+        assert!(
+            (ground.fill.0[3] - 0.4).abs() < 1e-6,
+            "the ground carries chrome_opacity verbatim, got {:?}",
+            ground.fill
+        );
+        assert!(
+            !out.rects.iter().any(|r| r.rect == area),
+            "a whole-pane fill left in the blended layer paints the glass back to opaque"
+        );
+        // The rail is the ground continuing one tone down, so it is a surface
+        // too — and at the same alpha, or it reads as a solid column between a
+        // glass sidebar and glass content.
+        assert!(
+            out.surface_rects.len() >= 2,
+            "the ground and the rail are both surfaces, got {}",
+            out.surface_rects.len()
+        );
+        assert!(
+            out.surface_rects.iter().all(|r| (r.fill.0[3] - 0.4).abs() < 1e-6),
+            "every surface a screen pushes carries the one chrome alpha"
+        );
+        assert_eq!(
+            out.hit.hit(area[0] + 2.0, area[1] + 2.0),
+            Some(HitRegion::ScreenPanel),
+            "moving the fill must not move the swallow region"
+        );
     }
 
     fn lay(model: &ProfilesScreenModel, w: f32, h: f32) -> ChromeLayout {

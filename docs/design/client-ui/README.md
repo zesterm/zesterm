@@ -123,6 +123,39 @@ everything shares one atlas (per `docs/CONTRACTS.md`).
 - Shadows: window `0 24px 70px rgba(0,0,0,.6)`; palette `0 30px 80px rgba(0,0,0,.65)`; phone `0 20px 50px rgba(0,0,0,.55)`. In `zest-app` these come from `ui.shadow` × `effects.chrome_shadow_alpha`.
 - Fixed sizes: title bar 46px (both layouts), tab 34px, sidebar 262px, pane header 28px, palette 620px wide.
 
+### Surfaces and translucency
+
+Two settings, and which one a thing takes is decided by what is behind it, not by
+how big it is. `window.opacity` is the terminal surface — the grid's default-background
+cells and nothing else. `window.chrome_opacity` is everything we composite ourselves:
+the title bar, the sidebar, and the **full-pane screens** (§7 Fleet, §8 Themes,
+§11 Settings, §12 Profiles), whose ground is a bar the size of a pane.
+
+Those surfaces *write* the window's pixels rather than blending onto them, which is
+what makes the setting an opacity instead of a tint — blended over a backdrop
+`window.opacity` has already made opaque, the best it could do is shift the colour
+toward the window background. A screen may do this because nothing of the terminal is
+drawn beneath it; a **floating** panel may not, and stays opaque: the palette, the
+fleet picker, the launcher, the find bar and the file/directory pickers all hover over
+a grid that is still running, and a see-through list over live output is unreadable at
+exactly the moment someone is reading it.
+
+A screen's **rails and footers** are part of that surface rather than objects on it —
+the same background one tone down (`block_header_fill`) — so they carry the chrome
+alpha too. Left opaque they read as a solid column between a glass sidebar and glass
+content, which is a discontinuity, not structure. The same token used *on* a surface
+keeps its opacity: an unfocused pane's header band, the picker's footer, the
+profiles inheritance chips.
+
+Structure on a translucent surface stays full strength — `ui.panel` cards, borders,
+the accent rule, chips, and every glyph. Multiplying 0.25 into a 2px rule does not
+make a window glassy, it deletes the rule. Text is never translucent at all
+(ADR-003).
+
+One consequence worth expecting in a screenshot: a screen's ground stops at the grid
+rectangle, so `window.padding` still frames it. That ring follows the chrome while a
+screen owns the pane, and the window elsewhere.
+
 ---
 
 ## Screens / views

@@ -99,6 +99,38 @@ the history behind them is in closed issues and PRs.
       enrolled online machine whose watcher has not answered yet shows a
       header and a faint "connecting…" line instead of nothing: the silence
       is what let a broken join read as a feature that does not exist.
+- [x] **The full-pane screens are chrome too** (#538). Fleet, Themes, Settings
+      and Profiles kept an opaque ground through #522, so opening Settings
+      turned a glass window solid. Two causes stacked and both had to go: the
+      fill was `bg_opaque` (α pinned at 1), *and* it sat in the blended layer,
+      where ADR-017's `1-(1-o)²` is the ceiling however translucent the fill.
+      Now `screen_bg` = `ui.bg` × `chrome_opacity`, pushed to `surface_rects`.
+      What the old comment claimed — "the grid is still underneath" — had not
+      been true since #253: `pane_is_covered` builds the scene with no viewport
+      at all, which is also what makes replacing safe. The rails and footers
+      go with it — they are the same surface one tone down, and left opaque
+      they read as a solid column between a glass sidebar and glass content —
+      while everything *on* the ground stays opaque structure (cards,
+      dropdowns, and `block_header_fill`'s other callers: an unfocused pane's
+      header band, the picker's footer, the inheritance chips), the same rule
+      that keeps a bar's chips opaque. The floating panels stay opaque for the
+      reason that no longer applies to screens — a palette really does float
+      over a running grid.
+      Two edges paid for here. **A split under a screen had to stop drawing**:
+      `panes_overlay` runs before the screens and pushed pane headers, frames
+      and editor bodies into `rects`, harmless only while a later opaque ground
+      covered them — with the ground drawn first they land *on top* of the
+      fleet directory, one keystroke away (split, then ⌘K). The gate extends
+      `pane_is_covered`'s rule — do not build it, rather than build it and
+      paint over it — to the chrome that frames the grid, the grid itself
+      having been skipped for the same reason since #253. And **the padding
+      ring**:
+      `grid_area` excludes `window.padding`, so `Scene::backdrop` still paints
+      an 8px frame around the screen — it follows `chrome_opacity` while a
+      screen owns the pane, since a ring around a screen with no grid in it is
+      chrome, not the terminal's margin. Answered at the backdrop rather than by
+      growing the rect: a grown surface rect overlaps the strip's own and erases
+      it, replace not composite.
 - [ ] Multi-window, the rest of #489 after #490 (the windows), #497 (a
       second launch opens in the running one) and #501 (a tab moved to a new
       window, from the palette): drag-out — a chip dragged past the strip's

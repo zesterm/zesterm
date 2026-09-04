@@ -67,10 +67,39 @@ pub struct ChromeColors {
     pub info: LinearRgba,
     /// Prompt user segment, third host accent.
     pub magenta: LinearRgba,
-    /// The terminal surface at full alpha, for the full-pane screens: like
-    /// the picker's panel, a see-through fleet directory over a busy grid is
-    /// unreadable at exactly the moment someone is trying to read it.
+    /// The terminal surface at full alpha.
+    ///
+    /// Nothing paints this as a surface any more. Its remaining callers all
+    /// want a *colour* rather than a fill: [`Self::pane_fill`] scales it by a
+    /// profile's opacity, `App::block_bands` solves a wash against it, and the
+    /// settings toggle's knob is drawn in it. An alpha would be wrong for all
+    /// three. The full-pane screens this used to name take
+    /// [`Self::screen_bg`] instead (#538).
     pub bg_opaque: LinearRgba,
+    /// The ground under a full-pane screen — Settings, Profiles, Fleet, Themes.
+    ///
+    /// `window.chrome_opacity`, not the window's: a screen *is* chrome, and it
+    /// is drawn as a surface exactly as the bars are, so this is an alpha onto
+    /// whatever is behind the window rather than a tint toward the window's own
+    /// background — #522's mechanism, reaching the screens it had left out.
+    ///
+    /// Why this may be glass where [`Self::panel_bg`] may not: when a screen
+    /// owns the pane the terminal is not built at all (`pane_is_covered`), so
+    /// there is no busy grid to be see-through over. A panel floats over one
+    /// that is very much still running, and stays opaque for that reason.
+    pub screen_bg: LinearRgba,
+    /// The sunken rails and footers *inside* a full-pane screen, at the same
+    /// alpha as the ground they sit on.
+    ///
+    /// A rail is not a card. `block_header_bg`'s other callers are objects on a
+    /// surface — an unfocused pane's header band, the picker's footer, the
+    /// inheritance chips — and those keep their opacity, like a bar's chips do.
+    /// These two are the screen's *own* background continuing under a different
+    /// tone: left opaque they read as a solid column between a glass sidebar
+    /// and glass content, which is the discontinuity and not the structure.
+    /// Pushed to `surface_rects` after the ground, which replaces rather than
+    /// composites, so a rail simply takes over its own strip of it (#538).
+    pub screen_rail_bg: LinearRgba,
     /// The panel fill for floating chrome (picker, palette, settings).
     pub panel_bg: LinearRgba,
     /// The scrim behind modal chrome.
@@ -185,6 +214,8 @@ impl ChromeColors {
             info: text(ui.info),
             magenta: text(ui.magenta),
             bg_opaque: fill(ui.bg, 1.0),
+            screen_bg: fill(ui.bg, chrome_opacity),
+            screen_rail_bg: fill(zest_theme::derived::block_header_fill(ui), chrome_opacity),
             // The picker floats above translucent chrome, so its panel is
             // always opaque: a see-through session list over a busy grid is
             // unreadable at exactly the moment the user is trying to read.
@@ -223,6 +254,33 @@ mod tests {
         assert!(
             (c.text_active.0[3] - 1.0).abs() < 1e-6,
             "text stays full-alpha regardless of chrome opacity"
+        );
+    }
+
+    #[test]
+    fn a_full_pane_screen_is_glass_but_a_floating_panel_is_not() {
+        // The line between the two, in one test so the pair cannot drift
+        // apart. A screen owns the pane and the terminal is not built under it
+        // (`pane_is_covered`), so it may be glass; the picker floats over a
+        // grid that is still running, so it may not. Stated separately, the
+        // second one is what gets "fixed" to match the first.
+        let c = colors();
+        assert!(
+            (c.screen_bg.0[3] - 0.5).abs() < 1e-6,
+            "a full-pane screen carries chrome_opacity, got {:?}",
+            c.screen_bg
+        );
+        assert!(
+            (c.screen_rail_bg.0[3] - 0.5).abs() < 1e-6,
+            "and so does the rail inside it — it is the same surface, one tone down"
+        );
+        assert!(
+            (c.panel_bg.0[3] - 1.0).abs() < 1e-6,
+            "a panel over a live grid does not"
+        );
+        assert!(
+            (c.block_header_bg.0[3] - 1.0).abs() < 1e-6,
+            "nor do the objects sitting on a surface: pane header band, picker footer, inheritance chips"
         );
     }
 
