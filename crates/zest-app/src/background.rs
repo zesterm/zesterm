@@ -204,11 +204,13 @@ fn load(
 
 /// Whether a file's own bytes say it is a picture.
 ///
-/// Reads the magic bytes and stops: `with_guessed_format` sniffs the header and
-/// `format` answers without decoding a pixel. That matters because the only
-/// caller is the drag-and-drop path, which runs on the UI thread — deciding
-/// "is this a picture" must not cost a 20 MB JPEG decode while the pointer is
-/// still moving. The real decode happens later, when the setting is next read.
+/// Reads [`HEADER`] bytes and stops, and the bound is enforced here rather
+/// than described: this runs on the UI thread while the pointer is still
+/// moving, so deciding "is this a picture" must not cost a 20 MB JPEG decode
+/// — nor a reader that happens to fill an 8 KiB buffer because that is what
+/// its default was. `image::guess_format` matches magic bytes against the
+/// formats this build carries and decodes no pixel. The real decode happens
+/// later, when the setting is next read.
 ///
 /// The **extension is deliberately not consulted**. Something named `.png` that
 /// is really a text file would otherwise be written into the settings and then
@@ -219,15 +221,37 @@ fn load(
 /// if not" found -- `self.format = format.or(self.format)`. So sniffing on top
 /// of `open` can never override a lying extension: a text file named `.png`
 /// comes back as a picture, which is the one answer this function exists to
-/// refuse. `ImageReader::new` starts with no format at all, so the guess is the
-/// only thing that can set one.
+/// refuse. Bytes are the only input here, so the question cannot arise.
 #[must_use]
 pub fn looks_like_an_image(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
     let Ok(file) = std::fs::File::open(path) else { return false };
-    image::ImageReader::new(std::io::BufReader::new(file))
-        .with_guessed_format()
-        .is_ok_and(|r| r.format().is_some())
+    let mut head = [0u8; HEADER];
+    let mut read = 0;
+    let mut reader = file.take(HEADER as u64);
+    // A short read is not the end: a file arriving over a network mount can
+    // answer in pieces, and giving up on the first one would refuse pictures
+    // by timing.
+    loop {
+        match reader.read(&mut head[read..]) {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+        if read == HEADER {
+            break;
+        }
+    }
+    image::guess_format(&head[..read]).is_ok()
 }
+
+/// Bytes read to decide. Every magic number `image` matches lives in the
+/// first few — the longest is an ISO base-media `ftyp` box, well inside this
+/// — and a bound that is stated and enforced is what keeps the answer cheap
+/// on a file that is 20 MB or on a mount that is slow.
+const HEADER: usize = 64;
 
 /// The renderer's placement mode for a settings one.
 #[must_use]
@@ -304,6 +328,17 @@ mod tests {
         assert!(!looks_like_an_image(&fake), "an extension is not evidence");
 
         assert!(!looks_like_an_image(&dir.join("absent.png")), "a missing file is not a picture");
+
+        // Shorter than the header: the read stops at end of file rather than
+        // waiting for bytes that are not coming, and answers no.
+        let stub = dir.join("three-bytes.png");
+        std::fs::write(&stub, b"\x89PN").expect("write");
+        assert!(!looks_like_an_image(&stub), "a truncated header is not a picture");
+
+        // And an empty file, which is what an interrupted copy leaves.
+        let empty = dir.join("empty.png");
+        std::fs::write(&empty, b"").expect("write");
+        assert!(!looks_like_an_image(&empty), "an empty file is not a picture");
 
         // The directory too: it was made for this test, and $TMP is not a
         // place to leave one per run.

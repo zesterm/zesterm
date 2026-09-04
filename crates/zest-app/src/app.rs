@@ -8191,6 +8191,18 @@ impl App {
             self.drop_report(to_profiles, "that path is not valid UTF-8".to_string());
             return;
         };
+        // The same gate the drop path applies, and for the same reason: the
+        // dialog offers "All files" on purpose — a picture whose name says
+        // nothing is exactly what people have — so having been chosen through
+        // it is evidence of nothing. Written unchecked, a file that decodes to
+        // nothing draws nothing, with the setting saying it should.
+        if !crate::background::looks_like_an_image(&chosen) {
+            self.drop_report(
+                to_profiles,
+                format!("{} is not a picture this build can read", chosen.display()),
+            );
+            return;
+        }
         // Through the same write path a typed edit takes, so provenance, the
         // restart ledger and the reload all behave identically -- a picker
         // that wrote the file itself would be a second way to save a setting.
