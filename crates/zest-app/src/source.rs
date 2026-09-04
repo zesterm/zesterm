@@ -149,6 +149,12 @@ pub trait SessionSource {
 
 /// Guessed echo, as the renderer wants it: owned, because the predictor lives
 /// behind the reader thread's lock and a frame must not hold that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredictedEcho {
+    pub cells: Vec<zest_render_wgpu::PredictedCell>,
+    pub caret: (u16, u16),
+}
+
 /// Whether more of this session's history is on its way (#545).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistoryState {
@@ -163,11 +169,6 @@ pub enum HistoryState {
     Fetching,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PredictedEcho {
-    pub cells: Vec<zest_render_wgpu::PredictedCell>,
-    pub caret: (u16, u16),
-}
 
 // Deliberately *not* on this trait: `has_exited`. Nothing calls it — exit
 // arrives as a `Wakeup::Exited` event — and a contract three workstreams build

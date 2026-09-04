@@ -700,9 +700,22 @@ impl RemoteSession {
                                             .filter_map(|r| u64::try_from(r.line).ok())
                                             .collect();
                                         let before = term.grid().scrollback_len();
+                                        let oldest_before = term.grid().oldest_line_id();
                                         term.remote().drop_history(&named);
                                         applier.apply_scrollback(&mut term, &rows_data);
-                                        term.grid().scrollback_len() > before
+                                        // Gained history is the oldest line
+                                        // moving *earlier*; the length is the
+                                        // weaker proxy and can hold still or
+                                        // shrink while the page genuinely
+                                        // reached further back — a page that
+                                        // replaces rows already held, or one
+                                        // this grid had only room for part
+                                        // of. Either signal counts, so a
+                                        // page that filled a gap between held
+                                        // ids without extending the oldest is
+                                        // not read as the host running out.
+                                        term.grid().oldest_line_id() < oldest_before
+                                            || term.grid().scrollback_len() > before
                                     };
                                     // Nothing new means the host has no more
                                     // to give: stop asking. A page that was
@@ -1188,10 +1201,17 @@ impl SessionSource for RemoteSession {
                 .saturating_sub(i64::from(HISTORY_PAGE))
         };
         let session = *self.addr.lock();
+        // Marked *before* the send, and that ordering is the whole of it:
+        // over loopback the reader can answer and clear this flag while this
+        // thread is still between the two statements, and a store afterwards
+        // would leave it set with nothing in flight — the pull stalls after
+        // one page, silently, and only on the fast link.
+        self.history.in_flight.store(true, Ordering::Release);
         // A send that fails means the writer is gone and the supervisor is
         // already redialling; `Settled` is "this window is not fetching",
         // which is true, and the keyframe that ends the redial clears the
-        // drain flag so the pull resumes.
+        // drain flag so the pull resumes. The flag comes back off, or nothing
+        // would ever ask again.
         if self
             .tx
             .send(Outbound::Msg(ClientMessage::RequestScrollback {
@@ -1201,9 +1221,9 @@ impl SessionSource for RemoteSession {
             }))
             .is_err()
         {
+            self.history.in_flight.store(false, Ordering::Release);
             return HistoryState::Settled;
         }
-        self.history.in_flight.store(true, Ordering::Release);
         HistoryState::Fetching
     }
 }
