@@ -761,6 +761,24 @@ you need before you trip on it.
   (`Shared::wanted`): a keyframe, a recovery or a per-session error counts only
   while the session is in the set, and `detach` leaves the set under the same
   lock the reader recovers under, so the orphan is never sent. (#409)
+- **A CSI arm that matches its final byte with `_` for the intermediate runs
+  every private-prefixed sequence as the public one.** Paid for twice in
+  `zest-core`'s `csi_dispatch`: `('u', _)` ran every kitty keyboard push
+  (`CSI > 1 u`) as SCORC, silently, because a cursor restore usually lands
+  where the cursor already is; then `('m', _)` ran xterm's modifyOtherKeys
+  control (`CSI > 4 ; 2 m` on entry, `CSI > 4 m` on exit -- Claude Code
+  brackets its run with both) as SGR 4;2 and SGR 4, so the shell's next prompt
+  came out underlined, and so did a line printed *before* the program ran,
+  because ConPTY's post-alt-screen restatement inherits whatever attribute the
+  terminal is holding. Match `None` where the public form is meant and let the
+  bottom arm ignore the rest; the same loose shape is still on `c` (DA2
+  answered as DA1), `S`/`T` and `t`. (#544)
+  What kept the corpus green: the vim capture disables it as `CSI > 4 ; m`,
+  with a trailing *empty* parameter, which read as SGR is 4 then 0 --
+  underline, then a reset that hides it again. Claude Code sends `CSI > 4 m`
+  with no second parameter, so the underline stays on the template and the
+  shell's next prompt wears it. A recording can contain the trigger for years
+  and assert nothing, when the wrong reading happens to be self-cancelling.
 - **`rmp-serde` writes the narrowest integer that fits**, so a `u64` reaches
   JavaScript as a plain `number` for every realistic value — the bindings say
   `number` via `ts(type = "number")` on each such field (#14), and a new wire
