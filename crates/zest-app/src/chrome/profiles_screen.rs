@@ -414,7 +414,11 @@ fn rail(
     out: &mut ChromeLayout,
 ) {
     let w = (RAIL_W * s).min(area[2] * 0.4);
-    out.rects.push(RectInstance::filled([area[0], area[1], w, area[3]], colors.block_header_bg, area));
+    // A surface, like the ground it continues (#538) — and pushed after it, so
+    // the replace pipeline simply hands this strip over. Safe in either order
+    // regardless: the content column starts right of the rail and the rows are
+    // clipped to stop at the footer, so nothing in `rects` overlaps either one.
+    out.surface_rects.push(RectInstance::filled([area[0], area[1], w, area[3]], colors.screen_rail_bg, area));
     out.rects.push(RectInstance::filled(
         [area[0] + w - HAIRLINE * s, area[1], HAIRLINE * s, area[3]],
         colors.hairline_soft,
@@ -861,7 +865,11 @@ fn footer(
     out: &mut ChromeLayout,
 ) {
     let bar = [content[0], footer_y, content[2], ss::FOOTER_H * s];
-    out.rects.push(RectInstance::filled(bar, colors.block_header_bg, content));
+    // A surface, like the ground it continues (#538) — and pushed after it, so
+    // the replace pipeline simply hands this strip over. Safe in either order
+    // regardless: the content column starts right of the rail and the rows are
+    // clipped to stop at the footer, so nothing in `rects` overlaps either one.
+    out.surface_rects.push(RectInstance::filled(bar, colors.screen_rail_bg, content));
     out.rects.push(RectInstance::filled(
         [bar[0], bar[1], bar[2], HAIRLINE * s],
         colors.hairline_soft,
@@ -1111,6 +1119,18 @@ mod tests {
         assert!(
             !out.rects.iter().any(|r| r.rect == area),
             "a whole-pane fill left in the blended layer paints the glass back to opaque"
+        );
+        // The rail is the ground continuing one tone down, so it is a surface
+        // too — and at the same alpha, or it reads as a solid column between a
+        // glass sidebar and glass content.
+        assert!(
+            out.surface_rects.len() >= 2,
+            "the ground and the rail are both surfaces, got {}",
+            out.surface_rects.len()
+        );
+        assert!(
+            out.surface_rects.iter().all(|r| (r.fill.0[3] - 0.4).abs() < 1e-6),
+            "every surface a screen pushes carries the one chrome alpha"
         );
         assert_eq!(
             out.hit.hit(area[0] + 2.0, area[1] + 2.0),

@@ -140,10 +140,17 @@ fleet picker, the launcher, the find bar and the file/directory pickers all hove
 a grid that is still running, and a see-through list over live output is unreadable at
 exactly the moment someone is reading it.
 
-Structure on a translucent surface stays full strength — `ui.panel` cards, the
-`block_header_fill` rails and footers, borders, the accent rule, chips, and every
-glyph. Multiplying 0.25 into a 2px rule does not make a window glassy, it deletes the
-rule. Text is never translucent at all (ADR-003).
+A screen's **rails and footers** are part of that surface rather than objects on it —
+the same background one tone down (`block_header_fill`) — so they carry the chrome
+alpha too. Left opaque they read as a solid column between a glass sidebar and glass
+content, which is a discontinuity, not structure. The same token used *on* a surface
+keeps its opacity: an unfocused pane's header band, the picker's footer, the
+profiles inheritance chips.
+
+Structure on a translucent surface stays full strength — `ui.panel` cards, borders,
+the accent rule, chips, and every glyph. Multiplying 0.25 into a 2px rule does not
+make a window glassy, it deletes the rule. Text is never translucent at all
+(ADR-003).
 
 One consequence worth expecting in a screenshot: a screen's ground stops at the grid
 rectangle, so `window.padding` still frames it. That ring follows the chrome while a

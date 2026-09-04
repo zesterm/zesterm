@@ -69,11 +69,11 @@ pub struct ChromeColors {
     pub magenta: LinearRgba,
     /// The terminal surface at full alpha.
     ///
-    /// Not a surface anything paints any more: what is left are the callers
-    /// that need a *colour* rather than a fill — [`Self::pane_fill`] scales it
-    /// by a profile's opacity, `App::block_bands` solves a wash against it, and
-    /// the settings toggle's knob is drawn in it. An alpha would be wrong for
-    /// all three. The full-pane screens this used to name take
+    /// Nothing paints this as a surface any more. Its remaining callers all
+    /// want a *colour* rather than a fill: [`Self::pane_fill`] scales it by a
+    /// profile's opacity, `App::block_bands` solves a wash against it, and the
+    /// settings toggle's knob is drawn in it. An alpha would be wrong for all
+    /// three. The full-pane screens this used to name take
     /// [`Self::screen_bg`] instead (#538).
     pub bg_opaque: LinearRgba,
     /// The ground under a full-pane screen — Settings, Profiles, Fleet, Themes.
@@ -88,6 +88,18 @@ pub struct ChromeColors {
     /// there is no busy grid to be see-through over. A panel floats over one
     /// that is very much still running, and stays opaque for that reason.
     pub screen_bg: LinearRgba,
+    /// The sunken rails and footers *inside* a full-pane screen, at the same
+    /// alpha as the ground they sit on.
+    ///
+    /// A rail is not a card. `block_header_bg`'s other callers are objects on a
+    /// surface — an unfocused pane's header band, the picker's footer, the
+    /// inheritance chips — and those keep their opacity, like a bar's chips do.
+    /// These two are the screen's *own* background continuing under a different
+    /// tone: left opaque they read as a solid column between a glass sidebar
+    /// and glass content, which is the discontinuity and not the structure.
+    /// Pushed to `surface_rects` after the ground, which replaces rather than
+    /// composites, so a rail simply takes over its own strip of it (#538).
+    pub screen_rail_bg: LinearRgba,
     /// The panel fill for floating chrome (picker, palette, settings).
     pub panel_bg: LinearRgba,
     /// The scrim behind modal chrome.
@@ -203,6 +215,7 @@ impl ChromeColors {
             magenta: text(ui.magenta),
             bg_opaque: fill(ui.bg, 1.0),
             screen_bg: fill(ui.bg, chrome_opacity),
+            screen_rail_bg: fill(zest_theme::derived::block_header_fill(ui), chrome_opacity),
             // The picker floats above translucent chrome, so its panel is
             // always opaque: a see-through session list over a busy grid is
             // unreadable at exactly the moment the user is trying to read.
@@ -258,8 +271,16 @@ mod tests {
             c.screen_bg
         );
         assert!(
+            (c.screen_rail_bg.0[3] - 0.5).abs() < 1e-6,
+            "and so does the rail inside it — it is the same surface, one tone down"
+        );
+        assert!(
             (c.panel_bg.0[3] - 1.0).abs() < 1e-6,
             "a panel over a live grid does not"
+        );
+        assert!(
+            (c.block_header_bg.0[3] - 1.0).abs() < 1e-6,
+            "nor do the objects sitting on a surface — pane header band, picker              footer, inheritance chips"
         );
     }
 
