@@ -172,7 +172,6 @@ if [ "$install" -eq 1 ]; then
     # `~/.local/bin` because that is the XDG user path every shell already has;
     # overridable for anyone who keeps their tools elsewhere.
     bindir=${ZESTERM_BIN_DIR:-$HOME/.local/bin}
-    mkdir -p "$bindir"
 
     # All three, because they are one system: the window is a client of the
     # daemon, and `zest-mcp` is a second client an agent harness starts by name.
@@ -196,6 +195,11 @@ if [ "$install" -eq 1 ]; then
         echo "zesterm-dev: run --install without --no-build, so every client is the build you just made" >&2
         exit 1
     fi
+
+    # After the check, not before: a refused install must leave the
+    # destination exactly as it found it, and creating the directory is
+    # already a change to it.
+    mkdir -p "$bindir"
 
     # The script by its *source* path, never through $target: this may itself be
     # running through the symlink we are about to replace, and a link to a link
