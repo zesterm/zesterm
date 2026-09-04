@@ -174,20 +174,36 @@ if [ "$install" -eq 1 ]; then
     bindir=${ZESTERM_BIN_DIR:-$HOME/.local/bin}
     mkdir -p "$bindir"
 
+    # All three, because they are one system: the window is a client of the
+    # daemon, and `zest-mcp` is a second client an agent harness starts by name.
+    # Installing only the window is how a current window talks to an old
+    # daemon -- the exact failure this script exists to prevent, and an
+    # invisible one, since everything connects and works.
+    #
+    # So a missing binary is an error rather than a line on the way past, and
+    # it is checked before anything is linked: an install that wires up some
+    # of a set it describes as one system is the half-state nobody inspects.
+    # `zesterm` and `zest-mcp` are already refused above; without this the
+    # third could be skipped while the summary still claimed all four. That is
+    # `--no-build` on a partial build -- an install that says it wired up a
+    # daemon it did not.
+    missing=
+    for b in zesterm zest-daemon zest-mcp; do
+        [ -x "$REPO/target/$dir/$b" ] || missing="${missing:+$missing }$b"
+    done
+    if [ -n "$missing" ]; then
+        echo "zesterm-dev: not built, so not linked: $missing" >&2
+        echo "zesterm-dev: run --install without --no-build, so every client is the build you just made" >&2
+        exit 1
+    fi
+
     # The script by its *source* path, never through $target: this may itself be
     # running through the symlink we are about to replace, and a link to a link
     # to itself is how `--install` stops working the second time.
     ln -sf "$REPO/scripts/zesterm-dev" "$bindir/zesterm-dev"
 
-    # All three, because they are one system: the window is a client of the
-    # daemon, and `zest-mcp` is a second client an agent harness starts by name.
-    # Installing only the window is how a current window talks to an old daemon.
     for b in zesterm zest-daemon zest-mcp; do
-        if [ -x "$REPO/target/$dir/$b" ]; then
-            ln -sf "$REPO/target/$dir/$b" "$bindir/$b"
-        else
-            echo "zesterm-dev: $b is not built; skipping" >&2
-        fi
+        ln -sf "$REPO/target/$dir/$b" "$bindir/$b"
     done
 
     echo "zesterm-dev: linked zesterm-dev, zesterm, zest-daemon, zest-mcp into $bindir"
@@ -220,10 +236,18 @@ fi
 # `fast build from <path> b35560178d292159 255 9123683e 4096 ...`.
 # A wrong answer that exits 0 is worse than no answer, and `||` cannot see it.
 if command -v stat >/dev/null 2>&1; then
-    built=$(stat -c '%y' "$bin" 2>/dev/null | cut -d. -f1) \
-        || built=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$bin" 2>/dev/null)
-    [ -n "${built:-}" ] || built=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$bin" 2>/dev/null)
-    [ -n "${built:-}" ] && echo "zesterm-dev: $dir build from $built"
+    # No pipeline, and that is the point: `stat -c … | cut …` reports *cut's*
+    # exit status, which is 0 even where `stat -c` failed -- so the `||`
+    # fallback below could never run on BSD, and only a second guard hid it.
+    # The fractional seconds come off with parameter expansion instead.
+    if built=$(stat -c '%y' "$bin" 2>/dev/null); then
+        built=${built%%.*}
+    else
+        built=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$bin" 2>/dev/null) || built=
+    fi
+    if [ -n "$built" ]; then
+        echo "zesterm-dev: $dir build from $built"
+    fi
 fi
 
 if [ "$foreground" -eq 1 ]; then
