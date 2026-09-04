@@ -592,9 +592,9 @@ pub struct FindBarModel {
     pub empty: bool,
     /// The `Aa` chip is lit.
     pub case_sensitive: bool,
-    /// This session is remote, so the grid holds only what crossed the wire and
-    /// the count describes less than the session does.
-    pub local_only: bool,
+    /// History is still arriving from the host, so the count is still
+    /// growing (#545).
+    pub fetching_history: bool,
 }
 
 /// A full-pane screen replacing the grid (fleet directory, theme gallery).

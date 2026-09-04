@@ -199,6 +199,9 @@ pub struct RemoteSession {
     dir_listing: Arc<parking_lot::Mutex<Option<crate::session::DirListing>>>,
     /// The parked answer to `ReadFile` (#464), on `dir_listing`'s pattern.
     file_contents: Arc<parking_lot::Mutex<Option<crate::editor::FileReply>>>,
+    /// How far the history backfill has got (#545). Shared with the reader,
+    /// which clears the in-flight flag and decides when the host is drained.
+    history: Arc<HistoryBackfill>,
     /// Shared with the supervisor, which reattaches at whatever size the
     /// window has reached by the time the link comes back -- not the size it
     /// was born with.
@@ -208,6 +211,30 @@ pub struct RemoteSession {
     /// ends rather than racing it.
     writer: Option<std::thread::JoinHandle<()>>,
 }
+
+/// The state of pulling this session's history off its host (#545).
+///
+/// Two flags rather than a queue, because the whole protocol is one page at
+/// a time: ask for the page before the oldest row held, wait for it, ask
+/// again. Atomics rather than a mutex because the reader sets them from its
+/// own thread while the renderer reads them per frame, and there is nothing
+/// to keep consistent between the two.
+#[derive(Default)]
+struct HistoryBackfill {
+    /// A page is on the wire. One at a time: two in flight would both be
+    /// answered from the same oldest row, and the second would be entirely
+    /// duplicates.
+    in_flight: AtomicBool,
+    /// The host answered with nothing this replica did not already hold, so
+    /// there is no more to ask for. Cleared by a keyframe, which is where a
+    /// reattach hands out history that may differ from what was dropped.
+    drained: AtomicBool,
+}
+
+/// Rows per request. The daemon clamps to its own `SCROLLBACK_PAGE` anyway;
+/// matching it means a full page is a full page and the count of round trips
+/// is the count the host expects.
+const HISTORY_PAGE: u32 = 500;
 
 /// Detach when the client goes away.
 ///
@@ -369,6 +396,7 @@ impl RemoteSession {
             Arc::default();
         let file_contents: Arc<parking_lot::Mutex<Option<crate::editor::FileReply>>> =
             Arc::default();
+        let history: Arc<HistoryBackfill> = Arc::default();
 
         let mut applier = Applier::new();
         {
@@ -461,6 +489,7 @@ impl RemoteSession {
             let simulated_latency = simulated_latency();
             let dir_listing = Arc::clone(&dir_listing);
             let file_contents = Arc::clone(&file_contents);
+            let history = Arc::clone(&history);
             std::thread::Builder::new()
                 .name("zest-remote-reader".into())
                 .spawn(move || {
@@ -587,6 +616,12 @@ impl RemoteSession {
                                         applier.apply_keyframe(&mut term, &k, seq.0);
                                     }
                                     predictor.lock().on_keyframe(k.cursor, k.cols, k.modes.contains(zest_core::Modes::ALT_SCREEN));
+                                    // A keyframe is a fresh viewport, and a
+                                    // reattach may bring one whose history
+                                    // this replica has never held -- so
+                                    // whatever was concluded about the
+                                    // host's oldest row no longer holds.
+                                    history.drained.store(false, Ordering::Release);
                                     pending_ack = Some(seq.0);
                                     mark(&needs_redraw, &wake);
                                     // A keyframe restates the blocks, so it
@@ -639,10 +674,59 @@ impl RemoteSession {
                                     }
                                 }
                                 HostMessage::Scrollback { rows_data, attrs, .. } => {
-                                    let mut term = terminal.lock_unfair();
-                                    applier.absorb_attrs(&attrs);
-                                    applier.apply_scrollback(&mut term, &rows_data);
-                                    drop(term);
+                                    let added = {
+                                        let mut term = terminal.lock_unfair();
+                                        applier.absorb_attrs(&attrs);
+                                        // A page names lines this replica may
+                                        // already hold, in two ways. Its own
+                                        // blank rows are banked as history at
+                                        // attach when the keyframe starts
+                                        // beyond them (#341), and they carry
+                                        // ids from zero that collide with the
+                                        // host's *oldest* real history; and
+                                        // the host takes `count` rows at or
+                                        // after `from_line`, where ids have
+                                        // gaps, so a page can spill past the
+                                        // oldest row held here. Un-bank
+                                        // exactly the lines the page names
+                                        // and let the host's copy stand —
+                                        // the keyframe's own rule (#313),
+                                        // applied to history arriving the
+                                        // other way round. Never an id
+                                        // sweep: only what this page carries
+                                        // a replacement for.
+                                        let named: Vec<u64> = rows_data
+                                            .iter()
+                                            .filter_map(|r| u64::try_from(r.line).ok())
+                                            .collect();
+                                        let before = term.grid().scrollback_len();
+                                        let oldest_before = term.grid().oldest_line_id();
+                                        term.remote().drop_history(&named);
+                                        applier.apply_scrollback(&mut term, &rows_data);
+                                        // Gained history is the oldest line
+                                        // moving *earlier*; the length is the
+                                        // weaker proxy and can hold still or
+                                        // shrink while the page genuinely
+                                        // reached further back — a page that
+                                        // replaces rows already held, or one
+                                        // this grid had only room for part
+                                        // of. Either signal counts, so a
+                                        // page that filled a gap between held
+                                        // ids without extending the oldest is
+                                        // not read as the host running out.
+                                        term.grid().oldest_line_id() < oldest_before
+                                            || term.grid().scrollback_len() > before
+                                    };
+                                    // Nothing new means the host has no more
+                                    // to give: stop asking. A page that was
+                                    // entirely rows already held says the
+                                    // same thing one round trip earlier, and
+                                    // a grid that is full is answered by the
+                                    // check before the send rather than here.
+                                    if !added {
+                                        history.drained.store(true, Ordering::Release);
+                                    }
+                                    history.in_flight.store(false, Ordering::Release);
                                     mark(&needs_redraw, &wake);
                                 }
                                 // Returns rather than breaking, so `finish`
@@ -831,6 +915,14 @@ impl RemoteSession {
                             let mut term = terminal.lock_unfair();
                             applier.apply_keyframe(&mut term, &keyframe, seq);
                         }
+                        // The reattach applies its keyframe here rather than
+                        // through the arm above, so the history pull has to
+                        // be restarted here too — and *both* flags, unlike
+                        // the arm: a request that was on the old link will
+                        // never be answered, so an in-flight mark left set
+                        // stalls the pull for the life of the window.
+                        history.in_flight.store(false, Ordering::Release);
+                        history.drained.store(false, Ordering::Release);
                         predictor.lock().on_keyframe(keyframe.cursor, keyframe.cols, keyframe.modes.contains(zest_core::Modes::ALT_SCREEN));
                         pending_ack = Some(seq);
                         frames = carried;
@@ -855,6 +947,7 @@ impl RemoteSession {
             addr: addr_cell,
             dir_listing,
             file_contents,
+            history,
             size: size_cell,
             origin: Origin::Daemon { host: host_label, local },
             writer: Some(writer_thread),
@@ -1091,6 +1184,55 @@ impl SessionSource for RemoteSession {
 
     fn origin(&self) -> Origin {
         self.origin.clone()
+    }
+
+    fn backfill_history(&self) -> crate::source::HistoryState {
+        use crate::source::HistoryState;
+        if self.history.drained.load(Ordering::Acquire) {
+            return HistoryState::Settled;
+        }
+        if self.history.in_flight.load(Ordering::Acquire) {
+            return HistoryState::Fetching;
+        }
+        let from_line = {
+            let term = self.terminal.lock();
+            let grid = term.grid();
+            // As much history as this replica will keep is as much as it can
+            // search: past the limit `push_history` drops what it is handed
+            // from the oldest end, so another page would cost a round trip
+            // to evict the rows it just fetched.
+            if grid.scrollback_len() >= grid.scrollback_limit() {
+                return HistoryState::Settled;
+            }
+            i64::try_from(grid.oldest_line_id())
+                .unwrap_or(i64::MAX)
+                .saturating_sub(i64::from(HISTORY_PAGE))
+        };
+        let session = *self.addr.lock();
+        // Marked *before* the send, and that ordering is the whole of it:
+        // over loopback the reader can answer and clear this flag while this
+        // thread is still between the two statements, and a store afterwards
+        // would leave it set with nothing in flight — the pull stalls after
+        // one page, silently, and only on the fast link.
+        self.history.in_flight.store(true, Ordering::Release);
+        // A send that fails means the writer is gone and the supervisor is
+        // already redialling; `Settled` is "this window is not fetching",
+        // which is true, and the keyframe that ends the redial clears the
+        // drain flag so the pull resumes. The flag comes back off, or nothing
+        // would ever ask again.
+        if self
+            .tx
+            .send(Outbound::Msg(ClientMessage::RequestScrollback {
+                session,
+                from_line,
+                count: HISTORY_PAGE,
+            }))
+            .is_err()
+        {
+            self.history.in_flight.store(false, Ordering::Release);
+            return HistoryState::Settled;
+        }
+        HistoryState::Fetching
     }
 }
 
@@ -1367,6 +1509,58 @@ mod tests {
             wake: impl Fn(Wakeup) + Send + 'static,
         ) -> RemoteSession {
             self.attach_dialling_stalled(socket, command, adopt, Duration::ZERO, wake)
+        }
+
+        /// A *second* client for a session that already exists — the shape a
+        /// reattach has, and the only way to get a replica whose host holds
+        /// history it never streamed.
+        fn attach_addr(
+            &self,
+            addr: SessionAddr,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            self.attach_addr_dialling(&self.path.clone(), addr, wake)
+        }
+
+        /// The same, over a socket that can be cut.
+        fn attach_addr_dialling(
+            &self,
+            socket: &str,
+            addr: SessionAddr,
+            wake: impl Fn(Wakeup) + Send + 'static,
+        ) -> RemoteSession {
+            let identity = Arc::new(ClientIdentity::generate().expect("client key"));
+            let path = socket.to_string();
+            let dial: Dialer = Box::new(move || {
+                let stream =
+                    zest_daemon::connect(&path).map_err(|e| RemoteError::Io(e.to_string()))?;
+                let write = stream.try_clone().map_err(|e| RemoteError::Io(e.to_string()))?;
+                Ok((
+                    Box::new(stream) as Box<dyn Read + Send>,
+                    Box::new(write) as Box<dyn Write + Send>,
+                ))
+            });
+            RemoteSession::attach_existing(
+                dial,
+                addr,
+                &AttachOptions {
+                    identity: &identity,
+                    label: "test",
+                    command: "",
+                    cwd: "",
+                    env: &[],
+                    profile: "",
+                    cols: 40,
+                    rows: 6,
+                    scrollback: 100,
+                    adopt: false,
+                    local: true,
+                    expect_host: None,
+                    on_pending: None,
+                },
+                wake,
+            )
+            .expect("attach to the existing session")
         }
 
         fn attach_dialling_stalled(
@@ -2354,4 +2548,169 @@ mod tests {
             s.terminal().lock().screen_text()
         );
     }
+    /// A shell that prints `n` numbered lines and then stays up, so the
+    /// session outlives the client that watched it print.
+    fn printing(n: usize) -> String {
+        format!(
+            "/bin/sh -c 'i=0; while [ $i -lt {n} ]; do echo line-$i; i=$((i+1)); done; sleep 30'"
+        )
+    }
+
+    /// ⌘F must search the session, not the part of it that happened to
+    /// arrive (#545).
+    ///
+    /// A keyframe is a *viewport*: everything that scrolled past before this
+    /// client attached exists only on the daemon. That is the ordinary state
+    /// of every tab after a reattach — the window is a client of its own
+    /// daemon — and until this the app sent no `RequestScrollback` at all, so
+    /// the search covered the screen and whatever had scrolled since, while
+    /// scrolling up pinned at the same place.
+    ///
+    /// Driven here the way a frame drives it: call, let the page land, call
+    /// again. If the pull never settled this would hang rather than fail,
+    /// which is the honest shape — "it stops" is half the claim.
+    #[test]
+    fn a_fresh_replica_pulls_the_history_it_never_streamed() {
+        const LINES: usize = 60;
+        let h = Harness::start("backfill");
+
+        // The first client watches it print, so the daemon's grid really has
+        // the history before anyone asks for it.
+        let watcher = h.attach(&printing(LINES), |_| {});
+        let addr = watcher.addr();
+        // Asserted on the *daemon's* grid, not this client's, and the
+        // difference is the bug one level down: `SbPush` rides a viewport
+        // move the encoder calls a scroll, and a jump larger than the
+        // viewport deliberately is not one — so a burst of sixty lines
+        // leaves the host holding history no client was ever told about.
+        // That is precisely what there is to pull.
+        let host = h.registry.get(addr.session).expect("the daemon has the session");
+        assert!(
+            wait_for(|| host.scrollback(0, 500).0.len() >= LINES - 6),
+            "the session never printed its history, so nothing after this is about the pull"
+        );
+        drop(watcher);
+
+        // The second attaches after the fact: this is the replica under test.
+        let reader = h.attach_addr(addr, |_| {});
+        let held = || reader.terminal().lock().grid().scrollback_len();
+        assert!(
+            wait_for(|| reader.terminal().lock().grid().total_lines() > 0),
+            "the attach never produced a keyframe"
+        );
+        assert!(
+            held() < LINES / 2,
+            "a keyframe is a viewport, not a history: this replica should start with \
+             almost nothing, and a test that begins full proves nothing. Held {}",
+            held()
+        );
+
+        let query = zest_core::search::Query::smart("line-3");
+        let hits = |q: &zest_core::search::Query| {
+            reader.terminal().lock().grid().search(q, 100).hits.len()
+        };
+        assert_eq!(hits(&query), 0, "precondition: the early lines are not here yet");
+
+        // The frame loop's pump, in a loop.
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), crate::source::HistoryState::Settled)),
+            "the pull never settled: it either never asked, or never learned the host \
+             had run out. Held {} of {LINES}",
+            held()
+        );
+        assert!(
+            held() >= LINES - 6,
+            "the whole session's history should be here, not one page of it. Held {}",
+            held()
+        );
+        assert!(
+            hits(&query) > 0,
+            "a line printed before this client existed is still a line the session ran, \
+             and ⌘F has to find it"
+        );
+    }
+
+    /// The pull stops at what this replica is willing to keep.
+    ///
+    /// Past its own limit `push_history` drops from the oldest end, so more
+    /// pages would cost round trips to evict the rows they just fetched.
+    #[test]
+    fn a_replica_holding_all_it_will_keep_asks_for_no_more() {
+        let h = Harness::start("backfill-full");
+        // The harness attaches with a 100-row scrollback; 200 lines is more
+        // history than this client will hold.
+        let watcher = h.attach(&printing(200), |_| {});
+        let addr = watcher.addr();
+        let host = h.registry.get(addr.session).expect("the daemon has the session");
+        assert!(
+            wait_for(|| host.scrollback(0, 500).0.len() >= 150),
+            "the session never printed enough to fill a replica"
+        );
+        drop(watcher);
+
+        let reader = h.attach_addr(addr, |_| {});
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), crate::source::HistoryState::Settled)),
+            "the pull never settled"
+        );
+        let term = reader.terminal();
+        let term = term.lock();
+        assert_eq!(
+            term.grid().scrollback_len(),
+            term.grid().scrollback_limit(),
+            "it should stop exactly full -- neither short of the limit nor asking for \
+             pages it would immediately drop"
+        );
+    }
+
+    /// A reattach restarts the pull, and the restart really completes.
+    ///
+    /// The redial applies its keyframe outside the streaming loop, so a reset
+    /// written only in that arm leaves a reconnected window with `drained`
+    /// still set — the pull never resumes, and ⌘F is back to searching what
+    /// happened to arrive. The in-flight mark matters just as much and is
+    /// quieter: a request that was on the old link is never answered, so a
+    /// mark left set stalls the pull for the life of the window. Asserted as
+    /// two states in order, because each catches one of those and neither
+    /// catches both.
+    #[test]
+    fn a_reattach_restarts_the_history_pull() {
+        use crate::source::HistoryState;
+        const LINES: usize = 60;
+        let h = Harness::start("backfill-redial");
+        let link = Link::new(&h.path, "backfill-redial");
+
+        let watcher = h.attach(&printing(LINES), |_| {});
+        let addr = watcher.addr();
+        let host = h.registry.get(addr.session).expect("the daemon has the session");
+        assert!(
+            wait_for(|| host.scrollback(0, 500).0.len() >= LINES - 6),
+            "the session never printed its history"
+        );
+        drop(watcher);
+
+        let reader = h.attach_addr_dialling(&link.path, addr, |_| {});
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Settled)),
+            "the first pull never settled"
+        );
+        assert!(
+            reader.terminal().lock().grid().scrollback_len() >= LINES - 6,
+            "precondition: the first pull brought the history"
+        );
+
+        link.cut();
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Fetching)),
+            "after a reattach the pull must ask again: the keyframe may hand out history \
+             this replica never held, and a window that concluded the host was drained \
+             before the link changed would never find out"
+        );
+        assert!(
+            wait_for(|| matches!(reader.backfill_history(), HistoryState::Settled)),
+            "and the request it sent must actually be answered -- settling again is what \
+             separates a live pull from an in-flight mark left over from the dead link"
+        );
+    }
+
 }

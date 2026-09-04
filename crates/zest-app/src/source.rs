@@ -107,6 +107,24 @@ pub trait SessionSource {
         Origin::InProcess
     }
 
+    /// Pull the page of history before the oldest row this session holds,
+    /// and say whether more is coming (#545).
+    ///
+    /// The default is [`HistoryState::Settled`], which is the honest answer
+    /// for an in-process session: the parser writes into this very grid, so
+    /// there is no host holding rows it has not sent. A replica overrides
+    /// it — a keyframe is a *viewport*, so everything that scrolled past
+    /// before this window attached exists only on the daemon, and until
+    /// something asks, ⌘F and a scroll to the top both stop at whatever
+    /// happened to arrive.
+    ///
+    /// Called repeatedly — once a frame while the find bar is open, and on
+    /// a scroll that reaches the top — so it is the implementation's job to
+    /// keep one request in flight and to stop when the host has no more.
+    fn backfill_history(&self) -> HistoryState {
+        HistoryState::Settled
+    }
+
     /// A keystroke is about to be written: guess its echo, if this session
     /// guesses at all. Called *before* `write`, with the key as the keyboard
     /// knew it — the predictor never un-encodes bytes. A local pty never
@@ -136,6 +154,21 @@ pub struct PredictedEcho {
     pub cells: Vec<zest_render_wgpu::PredictedCell>,
     pub caret: (u16, u16),
 }
+
+/// Whether more of this session's history is on its way (#545).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryState {
+    /// Nothing is being fetched: an in-process session, a replica that has
+    /// drained its host, one holding as much as it will keep, or a link
+    /// that is down. Deliberately not called "complete" — this window can
+    /// say what it is *doing*, and only a live link could say what the host
+    /// still has.
+    #[default]
+    Settled,
+    /// A page is on the wire, and another may follow it.
+    Fetching,
+}
+
 
 // Deliberately *not* on this trait: `has_exited`. Nothing calls it — exit
 // arrives as a `Wakeup::Exited` event — and a contract three workstreams build

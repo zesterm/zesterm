@@ -3329,6 +3329,9 @@ impl App {
         field.select_all();
         self.find = Some(field);
         self.run_find();
+        // Start the pull on the way in: the first page is on the wire while
+        // the reader is still typing, rather than after it.
+        self.pump_find_history();
         self.mark_chrome_dirty();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -3358,11 +3361,6 @@ impl App {
             return;
         };
         let session = tab.focused_session().unwrap_or_else(|| tab.source());
-        // A remote pane's grid holds only what has crossed the wire: nothing
-        // asks the host for scrollback today, so the count describes what this
-        // window received rather than what the session has.
-        let local_only =
-            matches!(session.origin(), crate::source::Origin::Daemon { local: false, .. });
         let query = zest_core::search::Query::smart(needle);
         let (found, near) = {
             let term = session.terminal();
@@ -3371,9 +3369,26 @@ impl App {
             (found, term.grid().line_id_at(0))
         };
         self.find_state.case_sensitive = query.case_sensitive;
-        self.find_state.local_only = local_only;
         self.find_state.accept(found, near);
         self.reveal_find_hit();
+    }
+
+    /// Pull another page of the focused pane's history, and record whether
+    /// one is on the wire (#545).
+    ///
+    /// A replica holds only what crossed the wire since it attached, so
+    /// without this ⌘F searches the screen and whatever has scrolled since —
+    /// which is what a session looks like right after a reattach. Driven per
+    /// frame while the bar is open: each page marks the grid dirty, which
+    /// re-runs the search and asks for the next, so the count climbs as the
+    /// history lands and stops when the host has no more.
+    fn pump_find_history(&mut self) {
+        let state = {
+            let Some(tab) = self.tabs.active() else { return };
+            let session = tab.focused_session().unwrap_or_else(|| tab.source());
+            session.backfill_history()
+        };
+        self.find_state.fetching = matches!(state, crate::source::HistoryState::Fetching);
     }
 
     /// Step to the next or previous hit and bring it into view.
@@ -3407,7 +3422,7 @@ impl App {
             count: self.find_state.count_label(field.text().is_empty()),
             empty: self.find_state.hits.is_empty() && !field.text().is_empty(),
             case_sensitive: self.find_state.case_sensitive,
-            local_only: self.find_state.local_only,
+            fetching_history: self.find_state.fetching,
         })
     }
 
@@ -5710,6 +5725,7 @@ impl App {
         let rows = session.terminal().lock().grid().rows();
         let lines = dir * (rows.saturating_sub(1).max(1)) as isize;
         session.terminal().lock().scroll_display(lines);
+        pull_history_at_top(session);
         session.mark_dirty();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -15168,6 +15184,7 @@ impl App {
                 }
 
                 session.terminal().lock().scroll_display(rows);
+                pull_history_at_top(session);
                 // The grid has already moved. The spring carries only the
                 // *visual* debt -- start it that many rows behind and let it
                 // run back to zero -- so the session, the selection and every
@@ -15228,6 +15245,10 @@ impl App {
                 // find bar open.
                 if grid_dirty && self.find.is_some() {
                     self.run_find();
+                    // After the scan, so a page that lands is searched on the
+                    // frame it arrives and the next request goes out behind
+                    // it -- one page in flight, one frame apart.
+                    self.pump_find_history();
                     self.mark_chrome_dirty();
                 }
                 // Integrated once per frame, before the damage test decides
@@ -16045,6 +16066,24 @@ const MAX_WHEEL_ROWS: isize = 10_000;
 /// arrow keys. Extracted so there is exactly one answer: the two used to be
 /// separate literals, and a wheel that scrolled `less` at a different rate to
 /// history is the kind of thing nobody reports and everybody feels.
+/// Ask the host for the page before the oldest row held, once the reader has
+/// scrolled to the top of what this window has (#545).
+///
+/// Without it a replica's scrollback ends wherever the stream happened to
+/// start: the view pins, and the rows above exist only on the daemon. Checked
+/// after the scroll rather than before, so the pull happens on the gesture
+/// that reached the top rather than one gesture later.
+fn pull_history_at_top(session: &dyn crate::source::SessionSource) {
+    let at_top = {
+        let term = session.terminal();
+        let term = term.lock();
+        term.grid().display_offset() >= term.grid().scrollback_len()
+    };
+    if at_top {
+        let _ = session.backfill_history();
+    }
+}
+
 fn wheel_rows(notches: f32, per_notch: usize) -> isize {
     // Saturating, then clamped: `notches` is an accumulated trackpad delta, so
     // neither bound is reachable by scrolling — see `MAX_WHEEL_ROWS` for what

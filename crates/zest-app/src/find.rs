@@ -23,10 +23,10 @@ pub struct FindState {
     pub truncated: bool,
     /// Whether the query was taken case-sensitively, for the `Aa` chip.
     pub case_sensitive: bool,
-    /// This pane's session holds only what crossed the wire — a remote tab has
-    /// no history the host has not sent, so the count describes less than the
-    /// session does and the bar has to say so.
-    pub local_only: bool,
+    /// A page of this session's history is on the wire (#545). The count is
+    /// still growing, so the bar says so rather than letting a number that
+    /// is about to change read as the final answer.
+    pub fetching: bool,
 }
 
 impl FindState {

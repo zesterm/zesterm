@@ -284,6 +284,17 @@ impl Grid {
         self.scrollback_len
     }
 
+    /// How much history this grid is willing to keep.
+    ///
+    /// A replica backfilling from its host reads it to know when to stop
+    /// asking: past this, [`Self::push_history`] drops the oldest rows it
+    /// is handed, so more pages would cost round trips and evict what they
+    /// fetched.
+    #[must_use]
+    pub fn scrollback_limit(&self) -> usize {
+        self.scrollback_limit
+    }
+
     #[must_use]
     pub fn display_offset(&self) -> usize {
         self.display_offset
