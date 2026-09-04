@@ -921,12 +921,6 @@ impl RemoteSession {
                         // the arm: a request that was on the old link will
                         // never be answered, so an in-flight mark left set
                         // stalls the pull for the life of the window.
-                        // The reattach applies its keyframe here rather than
-                        // through the arm above, so the history pull has to
-                        // be restarted here too — and *both* flags, unlike
-                        // the arm: a request that was on the old link will
-                        // never be answered, so an in-flight mark left set
-                        // stalls the pull for the life of the window.
                         history.in_flight.store(false, Ordering::Release);
                         history.drained.store(false, Ordering::Release);
                         predictor.lock().on_keyframe(keyframe.cursor, keyframe.cols, keyframe.modes.contains(zest_core::Modes::ALT_SCREEN));
