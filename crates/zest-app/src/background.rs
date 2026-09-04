@@ -251,7 +251,7 @@ pub fn looks_like_an_image(path: &std::path::Path) -> bool {
 /// first few — the longest is an ISO base-media `ftyp` box, well inside this
 /// — and a bound that is stated and enforced is what keeps the answer cheap
 /// on a file that is 20 MB or on a mount that is slow.
-const HEADER: usize = 64;
+pub const HEADER: usize = 64;
 
 /// The renderer's placement mode for a settings one.
 #[must_use]

@@ -8249,7 +8249,8 @@ impl App {
         // nothing, this line says whether the event arrived at all (a platform
         // question) or arrived and was not claimed (ours).
         tracing::debug!(path = %path.display(), ?target, "file hovered");
-        // The sniff reads sixteen bytes, and this runs once per file per drag
+        // The sniff reads a bounded header (`background::HEADER`), and this
+        // runs once per file per drag
         // *entering* the window -- winit emits nothing at all for `DragOver`,
         // so it cannot run per pointer move even if it wanted to.
         let hint = match target {
