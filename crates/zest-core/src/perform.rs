@@ -162,7 +162,15 @@ impl vte::Perform for TermState {
             ('l', _) => self.set_ansi_modes(params, false),
 
             // --- appearance ---
-            ('m', _) => self.apply_sgr(params),
+            //
+            // `None`, not `_`, for the reason the kitty arms below give:
+            // `CSI > 4 m` is XTMODKEYS (modifyOtherKeys off, which Claude Code
+            // sends on exit), and matched loosely it is SGR 4 -- the shell's
+            // next prompt comes out underlined, and so does whatever ConPTY
+            // restates after the alt screen closes. modifyOtherKeys itself is
+            // not implemented (this terminal speaks kitty), so it falls to the
+            // ignoring arm at the bottom, which is the right answer. (#544)
+            ('m', None) => self.apply_sgr(params),
             // DECSCUSR is `CSI Ps SP q` -- distinguished only by the space
             // intermediate, which is why intermediates are matched on.
             ('q', Some(b' ')) => {

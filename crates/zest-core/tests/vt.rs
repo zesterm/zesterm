@@ -209,6 +209,44 @@ fn sgr_subparameter_underline_styles() {
     assert!(t.grid().cell(0, 2).unwrap().flags.contains(CellFlags::DOUBLE_UNDERLINE));
 }
 
+#[test]
+fn xtmodkeys_is_not_sgr() {
+    // `CSI > 4 ; 2 m` / `CSI > 4 m` are xterm's modifyOtherKeys enable and
+    // disable; Claude Code brackets its whole run with them. Read as SGR 4;2
+    // and SGR 4 they leave underline (and dim) pending for the shell's next
+    // prompt -- and for whatever ConPTY restates once the alt screen closes,
+    // which is how a line printed *before* the program came to be underlined.
+    // The kitty `u` arms paid for the same shape first. (#544)
+    let mut t = Terminal::new(20, 3, 0);
+    t.advance(b"\x1b[>4;2m\x1b[?1049h\x1b[?1049l\x1b[>4mx");
+    assert_eq!(
+        t.grid().cell(0, 0).unwrap().flags,
+        CellFlags::empty(),
+        "modifyOtherKeys is not SGR: nothing it says may become an attribute"
+    );
+    t.advance(b"\x1b[4my");
+    assert!(
+        t.grid().cell(0, 1).unwrap().flags.contains(CellFlags::UNDERLINE),
+        "a plain SGR 4 still underlines"
+    );
+}
+
+#[test]
+fn xtmodkeys_in_vims_spelling_is_ignored_too() {
+    // The corpus's own vim capture disables it as `CSI > 4 ; m` -- with a
+    // trailing *empty* parameter, which read as SGR is 4 then 0: underline,
+    // then a reset that hides it again. That is why `vim-macos.vtrec` carried
+    // this bug for its whole life with every fixture green, and why Claude
+    // Code's spelling (`CSI > 4 m`, no second parameter) is what finally
+    // showed it. Both spellings are the same control and neither is SGR.
+    let mut t = Terminal::new(20, 3, 0);
+    let before = t.seq();
+    t.advance(b"\x1b[>4;m");
+    assert_eq!(t.seq(), before, "a sequence this terminal ignores must wake no subscriber");
+    t.advance(b"x");
+    assert_eq!(t.grid().cell(0, 0).unwrap().flags, CellFlags::empty());
+}
+
 // --- modes ---------------------------------------------------------------
 
 #[test]
