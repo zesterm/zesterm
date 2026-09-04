@@ -272,10 +272,6 @@ the history behind them is in closed issues and PRs.
       the same bug against its traffic lights. `WindowChrome`'s two accessors
       read one variant, so the pair cannot disagree, and the matrix is tested
       over a `Host` parameter rather than `cfg!`.
-- [ ] Linux: transparency via an ARGB visual. **Blur has no portable path** —
-      X11/KWin has `_KDE_NET_WM_BLUR_BEHIND_REGION`, picom needs user rules,
-      Wayland has no protocol. Degrade honestly rather than pretending in the
-      settings UI.
 - [x] **Linux: the clipboard, and the selection middle-click promised** (#477).
       `arboard` was taken with default features, so the Wayland backend was
       never compiled and a session without XWayland had no clipboard at all —
