@@ -63,12 +63,30 @@ mod identity_tests {
         );
 
         // The basename matters as much as the contents: the lookup is
-        // `app_id` -> `<app_id>.desktop`, so a renamed file breaks it silently.
-        assert!(
-            std::path::Path::new("packaging/linux/zesterm.desktop")
-                .file_stem()
-                .is_some_and(|s| s == super::APP_ID),
-            "the entry's basename is what the compositor looks up"
+        // `app_id` -> `<app_id>.desktop`, so a renamed file breaks it
+        // silently.
+        //
+        // Derived from `APP_ID` and read off disk, not compared against a
+        // literal: a literal only restates the `include_str!` path above, so
+        // renaming the file and that path together would keep this green
+        // while a compositor still looked for `zesterm.desktop` and found
+        // nothing. Comparing the bytes closes the last gap — the entry this
+        // test read and the entry packaged under `APP_ID`'s name are then
+        // provably the same file.
+        let packaged = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging/linux")
+            .join(format!("{}.desktop", super::APP_ID));
+        let on_disk = std::fs::read_to_string(&packaged).unwrap_or_else(|e| {
+            panic!(
+                "the compositor looks up `<app_id>.desktop`, so an entry has to be packaged \
+                 under that name: {} ({e})",
+                packaged.display()
+            )
+        });
+        assert_eq!(
+            on_disk, ENTRY,
+            "the entry asserted above must be the one named for APP_ID, or this test is \
+             checking a file nothing installs"
         );
     }
 }
