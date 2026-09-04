@@ -959,10 +959,6 @@ pub enum SettingsValueCell {
     /// A path to a local file: the same input box, plus a `Browse…` button.
     ///
     /// Its own variant rather than a flag on `Text` because the two differ in
-    /// *width* as well as in what they carry — the button takes room the input
-    /// would otherwise have — and `control_height` and `draw_control` are both
-    /// exhaustive, so a variant is what makes the next reader of either notice
-    /// there is a second shape.
     /// A path to a local file: the same input box, plus a `Browse…` button.
     ///
     /// Its own variant rather than a flag on `Text` because the two differ in

@@ -2079,7 +2079,7 @@ mod tests {
         let browse_left = browse_x.iter().copied().min().expect("browse");
         assert!(
             input_right < browse_left,
-            "the input must end before the button starts: input to {input_right},              button from {browse_left}"
+            "the input must end before the button starts: input to {input_right}, button from {browse_left}"
         );
     }
 

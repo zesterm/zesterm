@@ -276,7 +276,11 @@ mod tests {
 
     #[test]
     fn the_image_sniff_reads_bytes_and_not_the_name() {
-        let dir = std::env::temp_dir().join("zesterm-drop-sniff");
+        // Per run, not a fixed name: `cargo test` runs this crate's tests in
+        // parallel, and two runs sharing $TMP -- a second worktree, another
+        // user on the box -- would write and delete each other's fixtures.
+        let dir = std::env::temp_dir()
+            .join(format!("zesterm-drop-sniff-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
         // A one-pixel PNG, byte for byte. Named `.txt` on purpose: the sniff
@@ -301,8 +305,9 @@ mod tests {
 
         assert!(!looks_like_an_image(&dir.join("absent.png")), "a missing file is not a picture");
 
-        let _ = std::fs::remove_file(&real);
-        let _ = std::fs::remove_file(&fake);
+        // The directory too: it was made for this test, and $TMP is not a
+        // place to leave one per run.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1395,7 +1395,8 @@ mod tests {
         );
         assert!(
             matches!(cell_of("window.background_image"), SettingsValueCell::FilePath { .. }),
-            "a local file earns the picker; a plain `path` (shell.cwd) does not, because              that one may name a directory on another machine"
+            "a local file earns the picker; a plain `path` (shell.cwd) does not, because that \
+             one may name a directory on another machine"
         );
         assert!(
             matches!(cell_of("shell.cwd"), SettingsValueCell::Text { .. }),
