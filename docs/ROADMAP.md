@@ -179,14 +179,21 @@ the history behind them is in closed issues and PRs.
       than it sounds: the row loops, the fold row-map, the selection and the
       block bands would all have to accept rows well outside the viewport, and
       `OVERSCAN` would have to grow with whatever replaces the clamp.
-- [ ] Background pictures after #450: the pipeline, the three `window.background_*`
-      keys and their rows in Settings and the profiles editor are in, but the
-      row is a path *text field* — #144's `<image-slot>` drop target and the OS
-      drag-and-drop behind it are still open, and there is no file picker
-      anywhere in `crates/` to build it on. The browser ignores the keys: it
-      cannot read a native host's path, and `painter.ts`'s per-dirty-row
-      `fillRect` of the default background would erase an image layer strip by
-      strip.
+- [ ] Background pictures after #450 and #144: the pipeline, the three
+      `window.background_*` keys, their rows, and **dropping a picture on the
+      Settings or Profiles screen** are in. What is left is the *positional*
+      part — §12's 96px `<image-slot>` as a real target you drop *onto* — which
+      needs our own `IDropTarget` behind a window subclass, because winit
+      discards the drop coordinate (see "Traps already paid for"). The
+      `Browse…` button is a **native** picker (`rfd`), which is right for
+      `window.background_image` — the picture is decoded here and uploaded to
+      this machine's GPU, so the path is local by construction — and would be
+      wrong for `shell.cwd` or a profile's `starting_directory`, which may name
+      a directory on another machine; those stay `Widget::Path` and take no
+      picker until #439/#446 give an in-app, fleet-wide one. The browser
+      ignores the keys: it cannot read a
+      native host's path, and `painter.ts`'s per-dirty-row `fillRect` of the
+      default background would erase an image layer strip by strip.
 - [ ] Render `SessionInfo.busy` in the ⌘K picker and the fleet cards. The
       field and the push behind it landed with #416 (`Registry`'s coalesced
       pulse also ends the stale-`title`/`cwd` watcher problem); what remains

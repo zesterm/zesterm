@@ -5378,6 +5378,7 @@ mod tests {
                         | HitRegion::SettingsCategory(_)
                         | HitRegion::SettingsFilter
                         | HitRegion::SettingsReset(_)
+                        | HitRegion::SettingsBrowse(_)
                         | HitRegion::SettingsEditToml
                         | HitRegion::Resize(_),
                     ) => {}

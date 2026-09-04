@@ -398,7 +398,7 @@ pub struct Window {
     ///
     /// A relative path resolves against the config directory, so a config that
     /// travels with its pictures keeps working on another machine.
-    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "path"))]
+    #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "file-path"))]
     pub background_image: String,
     /// How the picture is placed in the pane.
     #[schemars(extend("x_zest_group" = "Window", "x_zest_widget" = "select"))]

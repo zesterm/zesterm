@@ -758,6 +758,9 @@ impl ApplicationHandler<Wakeup> for Process {
         let now = std::time::Instant::now();
         let mut wake = NextWake::Idle;
         for w in &mut self.windows {
+            // Before the wake calculation, and outside every event's own
+            // dispatch: a modal picker pumps its own loop.
+            w.drain_pending_pick();
             match w.next_wake(now) {
                 // Drawn from here rather than asked for through the window,
                 // because in screenshot mode there is no window to ask: it

@@ -222,6 +222,14 @@ fn scheme_grid(n: usize) -> (usize, usize) {
 
 /// The height of one row's control, in logical px — the row layout and the
 /// scroll math must agree on it, so it is computed once, here.
+/// Width of a file-path row's `Browse…` button.
+///
+/// Wide enough for the label at `DESC_PX` in every built-in theme's UI face,
+/// and taken out of the input beside it rather than added to the row: the
+/// control column is a fixed `CONTROL_W`, and growing it would push every
+/// other row's control out of alignment for the sake of one.
+const BROWSE_W: f32 = 78.0;
+
 pub(super) fn control_height(cell: &SettingsValueCell) -> f32 {
     match cell {
         SettingsValueCell::Toggle { .. } => TOGGLE_H,
@@ -231,7 +239,9 @@ pub(super) fn control_height(cell: &SettingsValueCell) -> f32 {
         SettingsValueCell::Stepper { .. } => STEP_H,
         // Text and its in-flight edit are the §11 input box; ReadOnly stays
         // bare text — a border would promise an edit that does not exist.
-        SettingsValueCell::Text { .. } | SettingsValueCell::Editing { .. } => INPUT_H,
+        SettingsValueCell::Text { .. }
+        | SettingsValueCell::FilePath { .. }
+        | SettingsValueCell::Editing { .. } => INPUT_H,
         SettingsValueCell::ReadOnly { .. } => 18.0,
         // Gaps sit BETWEEN rows and before the add row, not after it —
         // (n+1) rows carry only n gaps, and charging one more here left a
@@ -924,6 +934,59 @@ pub(super) fn draw_control(
                 color: ink,
                 clip,
                 px: mono,
+                bold: false,
+                tracking: 0.0,
+            });
+        }
+        SettingsValueCell::FilePath { text, placeholder } => {
+            // The input keeps the left of the control column and the button
+            // takes the right. Nothing reserves that room automatically, so
+            // the box is narrowed by exactly what the button occupies —
+            // drawing both at `CONTROL_W` overlaps them.
+            let button_w = BROWSE_W * s;
+            let gap = 8.0 * s;
+            let boxr =
+                [right - CONTROL_W * s, top, CONTROL_W * s - button_w - gap, INPUT_H * s];
+            out.rects.push(RectInstance {
+                radii: [8.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(boxr, colors.panel_bg, clip)
+            });
+            if let Some(hit) = intersect(boxr, clip) {
+                out.hit.push(hit, HitRegion::SettingsSelect(row));
+            }
+            let ink = if *placeholder { colors.text_faint } else { colors.text_active };
+            out.texts.push(TextRun {
+                text: text.clone(),
+                pos: [boxr[0] + 10.0 * s, baseline_in(top, INPUT_H * s, mono)],
+                max_width: boxr[2] - 20.0 * s,
+                color: ink,
+                clip,
+                px: mono,
+                bold: false,
+                tracking: 0.0,
+            });
+
+            let btn = [right - button_w, top, button_w, INPUT_H * s];
+            out.rects.push(RectInstance {
+                radii: [8.0 * s; 4],
+                border: colors.line,
+                border_width: HAIRLINE * s,
+                ..RectInstance::filled(btn, colors.panel_bg, clip)
+            });
+            if let Some(hit) = intersect(btn, clip) {
+                out.hit.push(hit, HitRegion::SettingsBrowse(row));
+            }
+            let label = "Browse\u{2026}";
+            let tw = measure(label, DESC_PX * s, false, 0.0);
+            out.texts.push(TextRun {
+                text: label.to_string(),
+                pos: [btn[0] + (btn[2] - tw) / 2.0, baseline_in(btn[1], btn[3], DESC_PX * s)],
+                max_width: btn[2],
+                color: colors.text_active,
+                clip,
+                px: DESC_PX * s,
                 bold: false,
                 tracking: 0.0,
             });
@@ -1968,6 +2031,7 @@ mod tests {
                         | HitRegion::SettingsFilter
                         | HitRegion::SettingsSlider(_)
                         | HitRegion::SettingsToggle(_)
+                        | HitRegion::SettingsBrowse(_)
                         | HitRegion::SettingsStep(..),
                     ) => {}
                     None => {}
@@ -1981,6 +2045,42 @@ mod tests {
         assert!(seen_step, "the stepper's − and ＋ are clickable");
         assert!(seen_toggle, "the toggle track flips");
         assert!(seen_toml, "'Edit as TOML' opens the file");
+    }
+
+    #[test]
+    fn a_file_path_row_offers_a_browse_button_beside_its_input() {
+        // Two assertions that have to hold together: the button is hittable,
+        // and it does not sit on top of the input. Nothing reserves the room
+        // automatically -- the control column is a fixed width and both
+        // controls are placed against its right edge -- so an overlap is a
+        // one-character mistake that looks fine until someone clicks the end
+        // of a long path and gets a file dialog.
+        let m = model(vec![cell_row(
+            SettingsValueCell::FilePath { text: "wall.png".into(), placeholder: false },
+            false,
+        )]);
+        let l = lay(&m, 1000.0, 700.0);
+
+        // Sampled the way every other hit test here samples: the layout keeps
+        // no rect index, and a click is only ever a point.
+        let (mut browse_x, mut input_x) = (Vec::new(), Vec::new());
+        for x in (0..1000).step_by(2) {
+            for y in (46..746).step_by(2) {
+                match l.hit.hit(x as f32, y as f32) {
+                    Some(HitRegion::SettingsBrowse(0)) => browse_x.push(x),
+                    Some(HitRegion::SettingsSelect(0)) => input_x.push(x),
+                    _ => {}
+                }
+            }
+        }
+        assert!(!browse_x.is_empty(), "the Browse button takes clicks");
+        assert!(!input_x.is_empty(), "the input still takes clicks");
+        let input_right = input_x.iter().copied().max().expect("input");
+        let browse_left = browse_x.iter().copied().min().expect("browse");
+        assert!(
+            input_right < browse_left,
+            "the input must end before the button starts: input to {input_right}, button from {browse_left}"
+        );
     }
 
     #[test]
