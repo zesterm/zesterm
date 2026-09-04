@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="zesterm">
+  <!-- Colours are Obsidian's own tokens (crates/zest-theme/src/builtin.rs):
+       bg #0b0f1a, line #2a3350, accent #6ea8ff, green #5fd17f. Deliberately
+       plain, so replacing this file replaces the icon with no wiring to redo. -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#0b0f1a"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="51.5" fill="none" stroke="#2a3350" stroke-width="3"/>
+  <path d="M74 92 L112 128 L74 164" fill="none" stroke="#6ea8ff" stroke-width="18"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="132" y="150" width="52" height="16" rx="6" fill="#5fd17f"/>
+</svg>

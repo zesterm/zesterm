@@ -1,0 +1,78 @@
+# Maintainer: Andreas Ekdahl <andy@ekdahls.net>
+#
+# A **VCS package**, built from the repository rather than from a release
+# tarball, because there is no release: the repo carries no tags, so
+# `archive/refs/tags/v$pkgver.tar.gz` is a 404 and this file would describe a
+# package nobody could build. `-git` is the Arch spelling for that, and
+# `provides`/`conflicts` keep it exclusive with the tagged package this
+# becomes once there is a version to tag.
+_pkgname=zesterm
+pkgname=zesterm-git
+# Replaced by pkgver() below; makepkg keeps this only until the checkout
+# exists to compute the real one from.
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="GPU-accelerated themable terminal, and a fleet"
+arch=('x86_64' 'aarch64')
+url="https://github.com/zesterm/zesterm"
+license=('MIT' 'Apache-2.0')
+# fontconfig and freetype2 come in through fontique; libxkbcommon, wayland and
+# libx11/libxcb through winit -- it is built with both backends, so a package
+# built on Wayland still runs on X11. vulkan-icd-loader is the loader, not a
+# driver: the driver is the user's (vulkan-radeon / vulkan-intel / nvidia-utils,
+# or vulkan-swrast for a software one), which is why it is an optdepend rather
+# than a hard one -- the GL rung can serve a machine with no Vulkan at all.
+depends=('fontconfig' 'freetype2' 'libxkbcommon' 'wayland' 'libx11' 'libxcb'
+         'vulkan-icd-loader')
+optdepends=('vulkan-swrast: software Vulkan, for a machine with no GPU driver'
+            'xdg-utils: opening links and folders from the terminal'
+            'gnome-keyring: credential store for the daemon identity'
+            'ttf-jetbrains-mono-nerd: the default font stack'\''s Nerd Font glyphs'
+            'noto-fonts-emoji: colour emoji')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+makedepends=('cargo' 'git')
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+# No tags to describe, so the revision count and the short hash — the
+# conventional form for a VCS package that has never been released.
+pkgver() {
+  cd "$_pkgname"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --workspace
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$_pkgname"
+  # Three binaries, not one: the window is a client of its own daemon, and
+  # zest-mcp is how an agent harness reaches the same sessions.
+  for b in zesterm zest-daemon zest-mcp; do
+    install -Dm0755 "target/release/$b" "$pkgdir/usr/bin/$b"
+  done
+  install -Dm0644 packaging/linux/zesterm.desktop \
+    "$pkgdir/usr/share/applications/zesterm.desktop"
+  install -Dm0644 packaging/linux/zesterm.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/zesterm.svg"
+  install -Dm0644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm0644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}
