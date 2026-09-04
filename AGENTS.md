@@ -322,6 +322,15 @@ cargo run -p zest-proto --example fixture_dump -- --only vim-macos --print 7
 
 zesterm-dev                                    # build the workspace and open a window
 zesterm-dev --no-build --attach-probe          # probe flags stay in the foreground
+zesterm-dev --install                          # symlink the script and the three binaries
+                                               #   into ~/.local/bin (or $ZESTERM_BIN_DIR), so
+                                               #   `zesterm-dev` runs anywhere and an MCP
+                                               #   harness's bare `zest-mcp` resolves to the
+                                               #   build you just made. Links point into
+                                               #   target/<profile>/, so a rebuild needs no
+                                               #   reinstall — switching profile does
+zesterm-dev --mcp                              # the MCP server config, with the absolute path
+                                               #   to the built zest-mcp
 .\scripts\zesterm-dev.ps1                      # the same thing, in PowerShell on Windows
 cargo run --profile fast -p zest-app           # the terminal, quick rebuild
 ./target/fast/zesterm --startup-probe          # time to first paint; fails over 100ms

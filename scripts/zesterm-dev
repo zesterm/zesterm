@@ -5,9 +5,11 @@
 #   zesterm-dev                 build and open, in the current directory
 #   zesterm-dev --no-build      open what is already built
 #   zesterm-dev --release       the shipping build instead of the fast one
+#   zesterm-dev --install       put this and the built binaries on PATH
+#   zesterm-dev --mcp           print the MCP server config for the built zest-mcp
 #   zesterm-dev --startup-probe anything else is passed straight through
 #
-# Two things this exists to get right, both of which have cost time already:
+# Three things this exists to get right, each of which has cost time already:
 #
 # 1. **It builds the whole workspace.** The window is a client of `zest-daemon`
 #    (ADR-007) and finds it as a sibling of its own binary, so building only
@@ -24,6 +26,15 @@
 # 2. **A failed build never opens a window.** Launching the previous binary
 #    after a compile error is how you spend ten minutes testing a change that
 #    did not compile.
+#
+# 3. **`--install` closes #358's other half.** Building the workspace fixes
+#    which binary *exists*; it does not fix which binary a harness *launches*.
+#    An MCP config says `"command": "zest-mcp"`, which resolves through PATH --
+#    so unless the built one is on PATH, the agent gets whatever is installed,
+#    or nothing. The symlinks point into `target/<profile>/`, so a rebuild is
+#    picked up with no reinstall; switching profile means running `--install`
+#    again, which is why it prints the profile it wired up rather than leaving
+#    you to infer it.
 #
 # `--profile fast` by default: ~3.6s to rebuild against ~51s for release (thin
 # LTO, one codegen unit), and within a few percent at runtime, so startup and
@@ -53,13 +64,18 @@ args=""
 # /dev/null along with the window that was never opened.
 foreground=0
 
+install=0
+print_mcp=0
+
 for arg in "$@"; do
     case $arg in
+        --install)  install=1 ;;
+        --mcp)      print_mcp=1 ;;
         --no-build) build=0 ;;
         --release)  profile=release ;;
         --debug)    profile=dev ;;
         -h|--help)
-            sed -n '3,8p' "$target" | sed 's/^# \{0,1\}//'
+            sed -n '3,10p' "$target" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         --startup-probe|--attach-probe|--themes|--schema|--shell-integration)
@@ -78,9 +94,33 @@ esac
 bin=$REPO/target/$dir/zesterm
 
 if [ "$build" -eq 1 ]; then
+    # Find cargo rather than assuming PATH has it.
+    #
+    # rustup installs to `~/.cargo/bin` and offers to add it to the shell
+    # profile; declining -- or installing with `--no-modify-path` -- leaves a
+    # working toolchain that a fresh login shell cannot see. The failure is
+    # `cargo: command not found` from inside this script, which reads as the
+    # script being broken rather than the PATH being short.
+    #
+    # It is not only about profiles, either: a `.desktop` launcher, a systemd
+    # unit and a cron job all start with a minimal PATH no matter what the
+    # shell does, and "from anywhere" is meant to include those.
+    cargo_bin=${CARGO:-}
+    if [ -z "$cargo_bin" ]; then
+        if command -v cargo >/dev/null 2>&1; then
+            cargo_bin=cargo
+        elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then
+            cargo_bin=${CARGO_HOME:-$HOME/.cargo}/bin/cargo
+        else
+            echo "zesterm-dev: no cargo on PATH, and none at ${CARGO_HOME:-$HOME/.cargo}/bin" >&2
+            echo "zesterm-dev: install rustup, add ~/.cargo/bin to PATH, or set CARGO=/path/to/cargo" >&2
+            exit 1
+        fi
+    fi
+
     # The workspace, and quietly: the point is a window, not a build log. A
     # failure still prints, because cargo writes errors to stderr.
-    if ! ( cd "$REPO" && cargo build -q --profile "$profile" --workspace ); then
+    if ! ( cd "$REPO" && "$cargo_bin" build -q --profile "$profile" --workspace ); then
         echo "zesterm-dev: build failed; not opening a stale binary" >&2
         exit 1
     fi
@@ -120,13 +160,98 @@ if [ ! -x "$bin" ]; then
     exit 1
 fi
 
+if [ "$print_mcp" -eq 1 ] || [ "$install" -eq 1 ]; then
+    mcp=$REPO/target/$dir/zest-mcp
+    if [ ! -x "$mcp" ]; then
+        echo "zesterm-dev: no zest-mcp at $mcp" >&2
+        exit 1
+    fi
+fi
+
+if [ "$install" -eq 1 ]; then
+    # `~/.local/bin` because that is the XDG user path every shell already has;
+    # overridable for anyone who keeps their tools elsewhere.
+    bindir=${ZESTERM_BIN_DIR:-$HOME/.local/bin}
+
+    # All three, because they are one system: the window is a client of the
+    # daemon, and `zest-mcp` is a second client an agent harness starts by name.
+    # Installing only the window is how a current window talks to an old
+    # daemon -- the exact failure this script exists to prevent, and an
+    # invisible one, since everything connects and works.
+    #
+    # So a missing binary is an error rather than a line on the way past, and
+    # it is checked before anything is linked: an install that wires up some
+    # of a set it describes as one system is the half-state nobody inspects.
+    # `zesterm` and `zest-mcp` are already refused above; without this the
+    # third could be skipped while the summary still claimed all four. That is
+    # `--no-build` on a partial build -- an install that says it wired up a
+    # daemon it did not.
+    missing=
+    for b in zesterm zest-daemon zest-mcp; do
+        [ -x "$REPO/target/$dir/$b" ] || missing="${missing:+$missing }$b"
+    done
+    if [ -n "$missing" ]; then
+        echo "zesterm-dev: not built, so not linked: $missing" >&2
+        echo "zesterm-dev: run --install without --no-build, so every client is the build you just made" >&2
+        exit 1
+    fi
+
+    # After the check, not before: a refused install must leave the
+    # destination exactly as it found it, and creating the directory is
+    # already a change to it.
+    mkdir -p "$bindir"
+
+    # The script by its *source* path, never through $target: this may itself be
+    # running through the symlink we are about to replace, and a link to a link
+    # to itself is how `--install` stops working the second time.
+    ln -sf "$REPO/scripts/zesterm-dev" "$bindir/zesterm-dev"
+
+    for b in zesterm zest-daemon zest-mcp; do
+        ln -sf "$REPO/target/$dir/$b" "$bindir/$b"
+    done
+
+    echo "zesterm-dev: linked zesterm-dev, zesterm, zest-daemon, zest-mcp into $bindir"
+    echo "zesterm-dev: they point at the '$dir' build -- rerun --install after --release"
+    case ":$PATH:" in
+        *":$bindir:"*) ;;
+        *) echo "zesterm-dev: $bindir is not on your PATH" >&2 ;;
+    esac
+fi
+
+if [ "$print_mcp" -eq 1 ]; then
+    # The absolute path, not the bare name: a harness started from anywhere
+    # resolves `zest-mcp` through *its* PATH, which is not necessarily the one
+    # `--install` just wrote to. Naming the file removes the question.
+    printf '{\n  "mcpServers": {\n    "zesterm": {\n      "command": "%s"\n    }\n  }\n}\n' "$mcp"
+fi
+
+if [ "$install" -eq 1 ] || [ "$print_mcp" -eq 1 ]; then
+    exit 0
+fi
+
 # Say which binary and how old, so "latest" is checkable rather than assumed.
 # The daemon may well be older than the window and that is usually fine -- it is
 # reused across launches by design -- but when it is not, this is where you see
 # it.
+# GNU's `-c` is tried first, and the order is the whole fix: BSD `stat -f` is a
+# format string, but GNU `stat -f` is `--file-system`, which *succeeds* and
+# prints filesystem statistics. Tried the other way round, Linux never reaches
+# the fallback and the line reads
+# `fast build from <path> b35560178d292159 255 9123683e 4096 ...`.
+# A wrong answer that exits 0 is worse than no answer, and `||` cannot see it.
 if command -v stat >/dev/null 2>&1; then
-    built=$(stat -f '%Sm' -t '%H:%M:%S' "$bin" 2>/dev/null || stat -c '%y' "$bin" 2>/dev/null | cut -d. -f1)
-    echo "zesterm-dev: $dir build from $built"
+    # No pipeline, and that is the point: `stat -c … | cut …` reports *cut's*
+    # exit status, which is 0 even where `stat -c` failed -- so the `||`
+    # fallback below could never run on BSD, and only a second guard hid it.
+    # The fractional seconds come off with parameter expansion instead.
+    if built=$(stat -c '%y' "$bin" 2>/dev/null); then
+        built=${built%%.*}
+    else
+        built=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$bin" 2>/dev/null) || built=
+    fi
+    if [ -n "$built" ]; then
+        echo "zesterm-dev: $dir build from $built"
+    fi
 fi
 
 if [ "$foreground" -eq 1 ]; then
