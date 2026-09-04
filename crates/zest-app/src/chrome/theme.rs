@@ -280,7 +280,7 @@ mod tests {
         );
         assert!(
             (c.block_header_bg.0[3] - 1.0).abs() < 1e-6,
-            "nor do the objects sitting on a surface — pane header band, picker              footer, inheritance chips"
+            "nor do the objects sitting on a surface: pane header band, picker footer, inheritance chips"
         );
     }
 
