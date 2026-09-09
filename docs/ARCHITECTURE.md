@@ -1512,6 +1512,16 @@ corollary is that a session whose shell runs on another machine must refuse
 rather than name a local path, because the failure there is not an error but a
 *different file*.
 
+A path is only as good as the reader's un-escaping, so its **spelling** is part
+of the decision rather than a detail below it. On unix a leading `\` before
+every metacharacter is what a POSIX shell and the agents both undo. On Windows
+neither escaping nor leaving it alone works against the same reader — the
+separator *is* the escape character, so `\<char>` → `<char>` eats the path
+either way — and the answer is a third spelling: forward slashes, which Windows
+accepts everywhere a path is a path and which contain nothing to un-escape.
+(#548, after #532 recorded it as a known limit and plain Ctrl+V made it the
+chord people actually press.)
+
 ### The trap this ADR was written after
 
 `HostMessage::Exited { code: Option<i32> }` existed on the wire from protocol 2

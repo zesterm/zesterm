@@ -606,8 +606,11 @@ mod tests {
         assert_eq!(encode_text("d", true, false), Some(vec![0x04]));
         // Case-insensitive: Ctrl-Shift-C still produces 0x03.
         assert_eq!(encode_text("C", true, false), Some(vec![0x03]));
-        // SYN, and an agent's own image-paste key: it reads the clipboard
-        // itself when it sees this byte, so the terminal must not eat it.
+        // SYN, and an agent's own image-paste key on macOS and Linux: it reads
+        // the clipboard itself when it sees this byte. The encoder always
+        // produces it; whether the byte is ever reached is the app's table's
+        // question, and on Windows that table now pastes instead, because the
+        // programs that want SYN use Alt+V there (#548).
         assert_eq!(encode_text("v", true, false), Some(vec![0x16]), "Ctrl-V is SYN");
     }
 

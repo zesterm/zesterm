@@ -338,6 +338,20 @@ the history behind them is in closed issues and PRs.
       platforms, that leaves a shell with nothing. A session whose shell runs on
       another machine refuses; carrying the bytes there needs a wire message and
       is not done.
+- [x] **Ctrl+V pastes on Windows** (#548). The paste chord was Super *or*
+      Ctrl+Shift everywhere, so on the primary platform the only keyboard paste
+      was Ctrl+Shift+V and plain Ctrl+V reached the program as SYN — which
+      #532 then *pinned with a test*, on reasoning that holds on macOS and
+      Linux and not on Windows, where the programs that read SYN use Alt+V and
+      ignore it. `Mods::Paste` takes plain Ctrl there and only there; Copy stays
+      narrow, because Ctrl+C is SIGINT. Its plain-Ctrl half excludes Alt:
+      **AltGr is Ctrl+Alt on Windows**, so without that a layout's AltGr key
+      would paste. It swallows the key in the alternate screen too, as every
+      other terminal on the platform does, so vim's CTRL-V is CTRL-Q there
+      (`:h CTRL-Q`, which exists for this). The same change makes a pasted
+      picture's path use forward slashes on Windows — verbatim backslashes were
+      #532's known limit, and a reader that un-escapes `\<char>` ate every
+      separator.
 - [ ] **Drag and drop a file onto the window** (#532's other half).
       `WindowEvent::DroppedFile` is not handled anywhere; the path plumbing it
       needs now exists in `paste_image.rs`.

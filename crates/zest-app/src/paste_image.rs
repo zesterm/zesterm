@@ -309,21 +309,33 @@ fn escape_for_paste(path: &Path) -> Result<String, Error> {
     Ok(out)
 }
 
-/// Verbatim on Windows — and this is not laziness.
+/// Forward slashes on Windows, and no escaping at all.
 ///
-/// The separator *is* the escape character there. `C:\Users\A B\x.png` escaped
-/// POSIX-style becomes `C:\Users\A\ B\x.png`, and anything that un-escapes
-/// `\<char>` → `<char>` reads that as `C:UsersA Bx.png`: every separator eaten.
-/// Neither `cmd` nor PowerShell uses backslash escaping, so there is nothing to
-/// escape *for*. A Windows temp root with a space in it stays imperfect for the
-/// shell case; corrupting the path to fix it would be worse.
+/// Escaping POSIX-style is wrong here because the separator *is* the escape
+/// character: `C:\Users\A B\x.png` would become `C:\Users\A\ B\x.png`, and
+/// anything that un-escapes `\<char>` → `<char>` reads that as
+/// `C:UsersA Bx.png`, every separator eaten. But leaving it *verbatim* is wrong
+/// for the same reader and needs no escaping to go wrong at all: it un-escapes
+/// the separators the path already has. That was #532's recorded "known limit",
+/// and #548 made it reachable by the chord a hand actually presses, since plain
+/// Ctrl+V now pastes on this platform.
+///
+/// A forward slash is the one spelling neither reader touches. Windows accepts
+/// it everywhere a path is a path — `cmd`, PowerShell, editors and the agents
+/// all open `C:/Users/…` — so the payload survives being un-escaped by
+/// something that should not have, and survives not being.
+///
+/// A Windows temp root with a space in it stays imperfect for the *shell* case,
+/// exactly as before: there is still no escaping that both readers agree on,
+/// and corrupting the path to fix one of them would be worse.
 #[cfg(not(unix))]
 fn escape_for_paste(path: &Path) -> Result<String, Error> {
     let text = path.to_string_lossy();
     if text.chars().any(char::is_control) {
+        // A newline or a tab can never round-trip — see the unix arm.
         return Err(Error::Unpastable(path.to_path_buf()));
     }
-    Ok(text.into_owned())
+    Ok(text.replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -575,13 +587,15 @@ mod tests {
 
     #[cfg(not(unix))]
     #[test]
-    fn a_windows_path_is_emitted_verbatim() {
+    fn a_windows_path_is_emitted_with_forward_slashes() {
         let path = Path::new(r"C:\Users\a b\zesterm-paste-1.png");
-        assert_eq!(
-            escape_for_paste(path).unwrap(),
-            r"C:\Users\a b\zesterm-paste-1.png",
-            "the separator is the escape character here; escaping it eats the path"
-        );
+        let escaped = escape_for_paste(path).unwrap();
+        assert_eq!(escaped, "C:/Users/a b/zesterm-paste-1.png");
+        // The property the whole arm exists for: a reader that un-escapes
+        // `\<char>` -> `<char>` cannot eat anything, because there is nothing
+        // for it to eat. Escaping the separators and leaving them alone are
+        // both wrong against that reader (#548).
+        assert!(!escaped.contains('\\'), "a backslash is what the reader would eat: {escaped}");
     }
 
     fn age(path: &Path, by: Duration) {
