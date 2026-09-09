@@ -117,6 +117,20 @@ pub enum Mods {
     Desktop,
     /// [`zest_input::key::is_clipboard_chord`]: Super *or* Ctrl+Shift, both, everywhere.
     Clipboard,
+    /// [`Mods::Clipboard`], **plus plain Ctrl on Windows** — and nowhere else.
+    ///
+    /// Ctrl+V is what every terminal on that platform pastes with (Windows
+    /// Terminal, conhost, VS Code), so a hand reaches for it before it reaches
+    /// for Ctrl+Shift+V. It is free there for the reason it is *not* free
+    /// elsewhere: a program that reads the clipboard itself when it sees SYN
+    /// uses Alt+V on Windows and Ctrl+V only on macOS and Linux, where the byte
+    /// is also readline's quoted-insert. So the platform decides who owns the
+    /// key, and each answer is the one that costs nothing on its own platform.
+    ///
+    /// Paste only. Copy stays on [`Mods::Clipboard`] and always will: plain
+    /// Ctrl+C is SIGINT, which is the whole reason the Ctrl+Shift convention
+    /// exists.
+    Paste,
     /// Ctrl without Shift.
     Ctrl,
     /// Ctrl with Shift. Kept disjoint from [`Mods::Ctrl`] so two rows on the
@@ -323,13 +337,26 @@ pub static BINDINGS: &[Binding] = &[
     // same kind of thing — the desktop acting on the terminal — and because
     // it is the chord the encoder already refuses to pass to the shell.
     //
-    // `Mods::Clipboard` is Super *or* Ctrl+Shift, so plain Ctrl+V is not one
-    // of these and 0x16 keeps reaching the program — which some of them use as
-    // their own "read the clipboard yourself" key (#532). The paste row covers
-    // a picture as well as text; the label stays "Paste" because it is
-    // rendered in the palette.
+    // Paste is the one row on the wider `Mods::Paste`, which takes plain Ctrl
+    // on Windows as well (#548): that is the chord every terminal on the
+    // platform binds, and the program's own "read the clipboard yourself" key
+    // is Alt+V there rather than the SYN that Ctrl+V sends (#532). Off Windows
+    // the byte still belongs to the program, and Copy stays narrow everywhere —
+    // Ctrl+C is SIGINT. The row covers a picture as well as text; the label
+    // stays "Paste" because it is rendered in the palette.
+    //
+    // Nothing above matches "v" under plain Ctrl, so the row stays where the
+    // clipboard family reads best rather than moving for precedence.
+    //
+    // `When::Always`, not `NotAltScreen`, and the cost is named rather than
+    // hidden: vim's CTRL-V (visual block) is unreachable on Windows now. That
+    // is what Windows Terminal, conhost and VS Code all do, paste already
+    // ignores the alternate screen on the other two platforms, and vim ships
+    // CTRL-Q as the alias for precisely this reason (`:h CTRL-Q`) — where the
+    // `NotAltScreen` rows are scrollback, whose whole argument is that a
+    // full-screen program pages *itself*. Paste has no such counterpart.
     b(Mods::Clipboard, ChordKey::Char("c"), Action::Copy, "C", "Copy", Category::Clipboard),
-    b(Mods::Clipboard, ChordKey::Char("v"), Action::Paste, "V", "Paste", Category::Clipboard),
+    b(Mods::Paste, ChordKey::Char("v"), Action::Paste, "V", "Paste", Category::Clipboard),
     b(
         Mods::Clipboard,
         ChordKey::Char("o"),
@@ -416,6 +443,15 @@ fn mods_match(m: Mods, s: ModifiersState) -> Option<Form> {
     };
     match m {
         Mods::Desktop | Mods::Clipboard => two_conventions(),
+        // Alt is excluded, which is the one thing the `Mods::Ctrl` arm below
+        // does not do: **AltGr is Ctrl+Alt on Windows**, so without it AltGr+V
+        // would paste on every layout where that key types something, and
+        // Ctrl+Alt+V would stop reaching the program. Cheap here and invisible
+        // from a US keyboard, which is how it would have shipped.
+        Mods::Paste => two_conventions().or_else(|| {
+            (cfg!(windows) && s.control_key() && !s.shift_key() && !s.alt_key())
+                .then_some(Form::Plain)
+        }),
         Mods::Ctrl => (s.control_key() && !s.shift_key()).then_some(Form::Plain),
         Mods::CtrlShift => (s.control_key() && s.shift_key()).then_some(Form::Plain),
         Mods::Shift => s.shift_key().then_some(Form::Plain),
@@ -447,7 +483,8 @@ fn key_match(binding: &Binding, logical: &Key, physical: PhysicalKey, form: Form
             // fold under ⌘ too, and that is not an oversight: ⌘⇧C copied
             // before this table existed, and behaviour-preserving means it
             // still does.
-            let fold = matches!(binding.mods, Mods::Clipboard) || form == Form::CtrlShift;
+            let fold =
+                matches!(binding.mods, Mods::Clipboard | Mods::Paste) || form == Form::CtrlShift;
             if fold {
                 got.eq_ignore_ascii_case(want)
             } else {
@@ -495,6 +532,7 @@ pub fn lookup(
 }
 
 const MAC: bool = cfg!(target_os = "macos");
+const WINDOWS: bool = cfg!(windows);
 
 /// The platform-primary spelling of a chord.
 ///
@@ -519,6 +557,18 @@ pub fn chord_label(binding: &Binding) -> String {
         Mods::Clipboard => {
             if MAC {
                 "⌘"
+            } else {
+                "Ctrl+Shift+"
+            }
+        }
+        // The label names the *primary* reachable spelling, and on Windows that
+        // is now the plain one — Ctrl+Shift+V still pastes, and the palette's
+        // one note about the second convention still covers it.
+        Mods::Paste => {
+            if MAC {
+                "⌘"
+            } else if WINDOWS {
+                "Ctrl+"
             } else {
                 "Ctrl+Shift+"
             }
@@ -727,12 +777,19 @@ mod tests {
     const CTRL: ModifiersState = ModifiersState::CONTROL;
     const SHIFT: ModifiersState = ModifiersState::SHIFT;
     const CTRL_SHIFT: ModifiersState = CTRL.union(SHIFT);
+    const ALT: ModifiersState = ModifiersState::ALT;
 
     #[test]
     fn the_table_resolves_every_chord_the_cascade_did() {
         // A pinned copy of the old if-cascade's behavior, including the
         // arrivals that are easy to get wrong. If a refactor of the table
         // changes any line of this, it changed a shortcut.
+        //
+        // The table has exactly one deliberate departure from the cascade, and
+        // it is not spelled here because this list is what the cascade did:
+        // plain Ctrl+V pastes on Windows (#548), which
+        // `plain_ctrl_v_pastes_on_windows_and_reaches_the_program_elsewhere`
+        // owns. Everything the cascade *could* reach still resolves the same.
         let pinned: &[(Key, ModifiersState, Action)] = &[
             (char_key("t"), SUPER, Action::NewTab),
             (char_key("k"), SUPER, Action::ToggleFleetPicker),
@@ -843,18 +900,63 @@ mod tests {
     }
 
     #[test]
-    fn plain_ctrl_v_is_not_a_chord_so_0x16_still_reaches_the_program() {
-        // Ctrl+V is an agent's own image-paste key on macOS and Linux (Alt+V on
-        // Windows), and it works by reading the system clipboard itself when
-        // it sees SYN. `Mods::Ctrl` rows do exist -- Ctrl+Tab is one -- so a
-        // future row on "v" would take the key away from every program that
-        // wants it, and the symptom would be a feature that silently stopped
-        // working in one terminal only.
-        assert_eq!(action_for(&char_key("v"), CTRL), None, "Ctrl+V belongs to the program, not to us");
+    fn plain_ctrl_v_pastes_on_windows_and_reaches_the_program_elsewhere() {
+        // Who owns Ctrl+V is a platform question, and the first version of this
+        // test pinned one platform's answer for all three (#548). A program
+        // that reads the system clipboard itself when it sees SYN uses Ctrl+V
+        // on macOS and Linux -- where it is also readline's quoted-insert -- and
+        // Alt+V on Windows. So off Windows the byte belongs to the program, and
+        // on Windows it belongs to us, where it is the chord every other
+        // terminal on the platform pastes with.
+        //
+        // The failure this guards is silent in both directions: a paste that
+        // does nothing, or a program's own clipboard key that stopped working
+        // in one terminal only.
+        let want = if cfg!(windows) { Some(Action::Paste) } else { None };
+        assert_eq!(
+            action_for(&char_key("v"), CTRL),
+            want,
+            "Ctrl+V is ours on Windows and the program's everywhere else"
+        );
+        // Never a chord bare, on any platform.
         assert_eq!(action_for(&char_key("v"), ModifiersState::empty()), None);
-        // ...while the two spellings that *are* ours stay ours.
+        // ...while the two spellings that are ours everywhere stay ours.
         assert_eq!(action_for(&char_key("v"), SUPER), Some(Action::Paste));
         assert_eq!(action_for(&char_key("V"), CTRL_SHIFT), Some(Action::Paste));
+        // And the narrow half of the policy: Copy is not widened with it,
+        // because plain Ctrl+C is SIGINT.
+        assert_eq!(action_for(&char_key("c"), CTRL), None, "Ctrl+C is SIGINT, on every platform");
+    }
+
+    #[test]
+    fn altgr_is_never_a_paste() {
+        // AltGr arrives as Ctrl+Alt on Windows, so the plain-Ctrl half of
+        // `Mods::Paste` has to exclude Alt or the key that types `@` on a
+        // Swedish layout -- or anything else a layout puts behind AltGr --
+        // pastes instead. Invisible from a US keyboard, which is how it would
+        // have shipped.
+        assert_eq!(action_for(&char_key("v"), CTRL.union(ALT)), None, "AltGr+V types, never pastes");
+        // Ctrl+Alt+V therefore still reaches the program, as it did before.
+        assert_eq!(action_for(&char_key("v"), CTRL_SHIFT.union(ALT)), Some(Action::Paste),
+            "...but Alt is not *excluded* from the two conventions, which never tested it");
+    }
+
+    #[test]
+    fn the_paste_label_names_the_chord_this_platform_pastes_with() {
+        // The palette and the shortcut sheet render this, and a label naming a
+        // chord that runs nothing is the failure `Mods::SuperShift` prints
+        // nothing rather than commit. Windows gained a shorter spelling, so
+        // the label had to follow it there and only there.
+        let want = if MAC {
+            "⌘V"
+        } else if WINDOWS {
+            "Ctrl+V"
+        } else {
+            "Ctrl+Shift+V"
+        };
+        assert_eq!(chord_for(Action::Paste), want);
+        // Copy did not move with it.
+        assert_eq!(chord_for(Action::Copy), if MAC { "⌘C" } else { "Ctrl+Shift+C" });
     }
 
     #[test]

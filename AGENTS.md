@@ -1089,6 +1089,21 @@ you need before you trip on it.
   account listing. When a row builder cannot know a fact, leave the field
   empty *and make sure someone downstream owns filling it* — a comment
   claiming the fact does not exist is how nobody does. (#537)
+- **A test that pins behaviour has to say which platform its reasoning holds
+  on, or it defends the bug.** The grid's paste chord was Super *or* Ctrl+Shift
+  everywhere, so on Windows the only keyboard paste was Ctrl+Shift+V and plain
+  Ctrl+V went to the program as SYN — while every other terminal on the
+  platform pastes on Ctrl+V. #532 then wrote
+  `plain_ctrl_v_is_not_a_chord_so_0x16_still_reaches_the_program`, whose
+  reasoning (an agent reads the clipboard itself when it sees SYN) is true on
+  macOS and Linux and false on Windows, where the same agents use Alt+V and
+  ignore the byte. The absence stopped reading as an oversight and started
+  reading as a decision, so the next person to look concluded a *later* change
+  had broken it — the report was "we broke Ctrl+V", and nothing had. A
+  platform-split assertion is the cheap fix; the expensive part was that the
+  green test pointed away from the answer. Related: `Mods::Paste`'s plain-Ctrl
+  half excludes Alt, because **AltGr is Ctrl+Alt on Windows** and a US keyboard
+  cannot show you that. (#548)
 - **A UI text entry must never invent its own key handling.** An entry that
   `return`s before the keymap table swallows every chord that reaches it, and
   the guard that makes a chord "not text" is the same guard that eats ⌘V —
