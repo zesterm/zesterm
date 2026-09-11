@@ -7279,7 +7279,7 @@ impl App {
                     field_idx: 0,
                     buffer: TextField::default(),
                     error: false,
-                    append: false,
+                    list: crate::settings_ui::ListEdit::Value,
                 });
                 self.mark_chrome_dirty();
             }
@@ -7587,6 +7587,9 @@ impl App {
             }
             (HitRegion::SettingsListAdd(row), MouseButton::Left) => {
                 self.begin_list_add(row);
+            }
+            (HitRegion::SettingsListEdit(row, item), MouseButton::Left) => {
+                self.begin_list_edit(row, item);
             }
             (HitRegion::SettingsListItem(row, item), MouseButton::Left) => {
                 // Drag-to-reorder begins here; crossing another item applies
@@ -8041,7 +8044,7 @@ impl App {
                         field_idx: idx,
                         buffer: TextField::new(buffer),
                         error: false,
-                        append: false,
+                        list: crate::settings_ui::ListEdit::Value,
                     });
                 }
             }
@@ -8412,22 +8415,44 @@ impl App {
                 self.apply_edit(idx, value);
                 true
             }
-            // The add-chip: `commit_list_append` owns the parse, because
-            // appending needs the list's current value. It leaves the buffer
-            // open, so success and failure are both settled here.
+            // The add-chip and the entry edit: `commit_list_append` and
+            // `commit_list_replace` own the parse, because either needs the
+            // list's current value. Both leave the buffer open, so both are
+            // settled in one place.
             crate::settings_ui::Pending::Append(idx, text) => {
                 let took = self.commit_list_append(idx, &text);
-                if let Some(ui) = self.settings_ui.as_mut() {
-                    if took {
-                        ui.editing = None;
-                    } else if let Some(edit) = ui.editing.as_mut() {
-                        edit.error = true;
-                    }
-                }
-                self.mark_chrome_dirty();
+                self.settle_list_buffer(took);
+                took
+            }
+            crate::settings_ui::Pending::Replace(idx, item, text) => {
+                let took = self.commit_list_replace(idx, item, &text);
+                self.settle_list_buffer(took);
                 took
             }
         }
+    }
+
+    /// Settle the buffer an append or a replace left open.
+    ///
+    /// Shared by both editors, because the profiles tab had none: its
+    /// `Append` arm returned `commit_list_append`'s answer and left the typed
+    /// text sitting in the row it had just written, with a refusal showing no
+    /// error at all. One settle, so the two tabs cannot disagree about what
+    /// happens after a list edit.
+    fn settle_list_buffer(&mut self, took: bool) {
+        let editing = if self.profiles_tab_active() {
+            self.profiles_ui.as_mut().map(|ui| &mut ui.editing)
+        } else {
+            self.settings_ui.as_mut().map(|ui| &mut ui.editing)
+        };
+        if let Some(editing) = editing {
+            if took {
+                *editing = None;
+            } else if let Some(edit) = editing.as_mut() {
+                edit.error = true;
+            }
+        }
+        self.mark_chrome_dirty();
     }
 
     /// Where an edit lands: the user's config file, existing or about to.
@@ -8613,7 +8638,7 @@ impl App {
                         field_idx: idx,
                         buffer: TextField::default(),
                         error: false,
-                        append: true,
+                        list: crate::settings_ui::ListEdit::Append,
                     });
                 }
             }
@@ -8642,13 +8667,106 @@ impl App {
                         field_idx: idx,
                         buffer: TextField::default(),
                         error: false,
-                        append: true,
+                        list: crate::settings_ui::ListEdit::Append,
                     });
                 }
             }
             _ => {}
         }
         self.mark_chrome_dirty();
+    }
+
+    /// Click an entry: edit it where it is drawn.
+    ///
+    /// The gap this closes is that no list widget had an edit affordance at
+    /// all -- changing one variable meant removing it and retyping both
+    /// halves, and the font row's per-item region already meant something
+    /// else (drag-to-reorder).
+    ///
+    /// Seeded from what the row *drew*, which on the profiles tab is the
+    /// merged environment: the person clicked an entry showing a value, so
+    /// the buffer has to open on that value. Editing an inherited one is how
+    /// you override it, and `commit_list_replace` lands the result in the
+    /// profile's own table.
+    fn begin_list_edit(&mut self, row: usize, item: usize) {
+        let profiles = self.profiles_tab_active();
+        // Leaving the open buffer is a commit, and a refused one must keep
+        // the field (#272/#275) -- so the old edit settles before a new one
+        // opens, exactly as the add chip does.
+        let free = if profiles { self.profiles_commit_edit() } else { self.settings_commit_edit() };
+        if !free {
+            return;
+        }
+        let Some(idx) =
+            (if profiles { self.profiles_field_of_row(row) } else { self.settings_field_of_row(row) })
+        else {
+            return;
+        };
+        let ui_field = if profiles {
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        } else {
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+        };
+        let Some(widget) = ui_field else { return };
+        let current =
+            if profiles { self.profiles_value_of(idx) } else { self.settings_value_of(idx) };
+        let Some(current) = current else { return };
+        let Some(text) = list_entry_text(widget, &current, item) else { return };
+        let edit = crate::settings_ui::EditBuffer {
+            field_idx: idx,
+            buffer: TextField::new(&text),
+            error: false,
+            list: crate::settings_ui::ListEdit::Replace(item),
+        };
+        if profiles {
+            if let Some(ui) = self.profiles_ui.as_mut() {
+                ui.selected = row;
+                ui.editing = Some(edit);
+            }
+        } else if let Some(ui) = self.settings_ui.as_mut() {
+            ui.selected = row;
+            ui.editing = Some(edit);
+        }
+        self.mark_chrome_dirty();
+    }
+
+    /// Commit a replace buffer: the entry at `item` becomes `text`.
+    ///
+    /// `commit_list_append`'s twin, deliberately down to its shape -- same
+    /// seed on the profiles tab, same "empty closes the buffer rather than
+    /// erroring", same `false` meaning the input cannot be an entry. A rule
+    /// that differed between add and edit would be a row whose entries can be
+    /// created and then not corrected.
+    fn commit_list_replace(&mut self, idx: usize, item: usize, text: &str) -> bool {
+        let profiles = self.profiles_tab_active();
+        let field = if profiles {
+            self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| (f.widget, f.key.clone()))
+        } else {
+            self.settings_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| (f.widget, f.key.clone()))
+        };
+        let Some((widget, key)) = field else { return false };
+        let text = text.trim();
+        if text.is_empty() {
+            return true;
+        }
+        if profiles {
+            let Some(drawn) = self.profiles_value_of(idx) else { return false };
+            // `env` again: the index names an entry in the merged map the row
+            // drew, and the value is written to the profile's own table.
+            let next = if key == "env" {
+                let Some(own) = self.profiles_seed_of(idx) else { return false };
+                env_value_replacing(&drawn, &own, item, text)
+            } else {
+                list_value_replacing(widget, &drawn, item, text)
+            };
+            let Some(next) = next else { return false };
+            self.profiles_apply_edit(idx, next);
+            return true;
+        }
+        let Some(current) = self.settings_value_of(idx) else { return false };
+        let Some(next) = list_value_replacing(widget, &current, item, text) else { return false };
+        self.apply_edit(idx, next);
+        true
     }
 
     /// Commit an append buffer: a tag verbatim (a leading `-` disables and
@@ -9102,7 +9220,14 @@ impl App {
             // *reason* it was unreachable — no profiles field was a list —
             // stopped being true, and a swallowed Enter is #272 again.
             crate::settings_ui::Pending::Append(idx, text) => {
-                self.commit_list_append(idx, &text)
+                let took = self.commit_list_append(idx, &text);
+                self.settle_list_buffer(took);
+                took
+            }
+            crate::settings_ui::Pending::Replace(idx, item, text) => {
+                let took = self.commit_list_replace(idx, item, &text);
+                self.settle_list_buffer(took);
+                took
             }
         }
     }
@@ -9227,7 +9352,7 @@ impl App {
                 field_idx: idx,
                 buffer: TextField::new(seed),
                 error: false,
-                append: false,
+                list: crate::settings_ui::ListEdit::Value,
             });
         }
         self.mark_chrome_dirty();
@@ -12935,6 +13060,103 @@ fn env_value_without(
     Some(serde_json::Value::Object(own))
 }
 
+/// `KEY=VALUE`, with a bare `KEY` meaning an empty value -- the
+/// empty-means-unset spelling all the way down to the pty. `None` when there
+/// is no key at all, which is the one input that cannot be an entry.
+///
+/// One copy, because add and edit must agree: a rule that accepts `Q=a=b` on
+/// an add and rejects it on an edit is a row whose entries can be created and
+/// then never corrected.
+fn split_env_entry(text: &str) -> Option<(String, String)> {
+    let (key, value) = match text.split_once('=') {
+        Some((k, v)) => (k.trim(), v.trim()),
+        None => (text, ""),
+    };
+    (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+}
+
+/// The new value for a list or key/value row whose entry at `item` becomes
+/// `text`.
+///
+/// The third of the trio beside [`list_value_without`] and [`list_value_with`],
+/// free-standing for their reason: both editors draw these rows with the same
+/// `draw_control`, so they must agree about what its controls do.
+///
+/// `FontList` is absent on purpose. A family is chosen from the roster the
+/// client brought, not typed -- its dashed row opens that menu, and its
+/// per-item region already means drag-to-reorder.
+fn list_value_replacing(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    item: usize,
+    text: &str,
+) -> Option<serde_json::Value> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::TagList => {
+            let mut arr = current.as_array().cloned().unwrap_or_default();
+            let slot = arr.get_mut(item)?;
+            *slot = serde_json::Value::String(text.to_string());
+            Some(serde_json::Value::Array(arr))
+        }
+        Widget::KeyValue => {
+            let map = current.as_object()?;
+            // By position, like the x beside it: the control renders the map
+            // in iteration order, and resolving the click back to a *key*
+            // here is what keeps the two in step.
+            let old = map.keys().nth(item)?.clone();
+            let (key, value) = split_env_entry(text)?;
+            let mut map = map.clone();
+            map.remove(&old);
+            map.insert(key, serde_json::Value::String(value));
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+/// The new **own** env for the §12 `env` row whose entry at `item` becomes
+/// `text`.
+///
+/// [`env_value_without`]'s twin, and two maps for its reason: the index names
+/// an entry in the *merged* environment the row drew, and the value written
+/// is the profile's own table.
+///
+/// Editing an **inherited** entry therefore creates an override for it, which
+/// is the only thing the gesture can mean -- the person clicked a row showing
+/// a value and typed a different one.
+fn env_value_replacing(
+    merged: &serde_json::Value,
+    own: &serde_json::Value,
+    item: usize,
+    text: &str,
+) -> Option<serde_json::Value> {
+    let old = merged.as_object()?.keys().nth(item)?.clone();
+    let (key, value) = split_env_entry(text)?;
+    let mut own = own.as_object().cloned().unwrap_or_default();
+    own.remove(&old);
+    own.insert(key, serde_json::Value::String(value));
+    Some(serde_json::Value::Object(own))
+}
+
+/// The text an entry's edit buffer opens with: what the row drew, spelled the
+/// way the add chip would accept it, so one parse serves both.
+fn list_entry_text(
+    widget: zest_config::ui::Widget,
+    current: &serde_json::Value,
+    item: usize,
+) -> Option<String> {
+    use zest_config::ui::Widget;
+    match widget {
+        Widget::TagList => current.as_array()?.get(item)?.as_str().map(str::to_string),
+        Widget::KeyValue => {
+            let (k, v) = current.as_object()?.iter().nth(item)?;
+            Some(format!("{k}={}", v.as_str().unwrap_or_default()))
+        }
+        _ => None,
+    }
+}
+
 /// The new value for a list or key/value row with `text` appended.
 ///
 /// `KEY=VALUE` for a key/value row; a bare `KEY` gets an empty value, which is
@@ -12954,15 +13176,9 @@ fn list_value_with(
             Some(serde_json::Value::Array(arr))
         }
         Widget::KeyValue => {
-            let (key, value) = match text.split_once('=') {
-                Some((k, v)) => (k.trim(), v.trim()),
-                None => (text, ""),
-            };
-            if key.is_empty() {
-                return None;
-            }
+            let (key, value) = split_env_entry(text)?;
             let mut map = current.as_object().cloned().unwrap_or_default();
-            map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            map.insert(key, serde_json::Value::String(value));
             Some(serde_json::Value::Object(map))
         }
         _ => None,
@@ -16727,7 +16943,7 @@ mod code_entry_tests {
             field_idx: 0,
             buffer: TextField::default(),
             error: true,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         }
     }
 
@@ -17590,7 +17806,7 @@ mod profile_env_round_trip_tests {
     //! editor's transformation, store the result the way `write_profile_value`
     //! does, resolve again, and look at what a launch would actually get.
 
-    use super::{env_value_without, list_value_with};
+    use super::{env_value_replacing, env_value_without, list_value_with};
     use zest_config::profiles::resolve_profile;
     use zest_config::ui::Widget;
 
@@ -17701,6 +17917,45 @@ OWN = \"2\"
     }
 
     #[test]
+    fn editing_an_inherited_entry_creates_an_override_for_it() {
+        // What the gesture can only mean: the person clicked a row showing a
+        // value and typed a different one. The index names an entry in the
+        // merged map the row drew; the result lands in the profile's own
+        // table, so the edit becomes an override rather than a no-op.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "SHARED");
+
+        let next = env_value_replacing(&drawn, &own(&c), item, "SHARED=mine").expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert_eq!(
+            after.own_env.get("SHARED").map(String::as_str),
+            Some("mine"),
+            "the profile now owns the key it edited"
+        );
+        assert_eq!(
+            after.meta.env.get("OWN").map(String::as_str),
+            Some("2"),
+            "and its own entries are untouched"
+        );
+    }
+
+    #[test]
+    fn renaming_an_entry_does_not_leave_the_old_key_behind() {
+        // The failure a naive insert would ship: editing `OWN=2` into
+        // `RENAMED=2` has to take the old key with it, or one edit becomes
+        // two variables and the shell inherits a name nobody typed.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "OWN");
+
+        let next = env_value_replacing(&drawn, &own(&c), item, "RENAMED=2").expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert_eq!(after.own_env.get("RENAMED").map(String::as_str), Some("2"));
+        assert!(!after.own_env.contains_key("OWN"), "the old key goes with the rename");
+    }
+
+    #[test]
     fn the_real_writer_lands_an_unset_in_the_profiles_own_table() {
         // The three tests above model `write_profile_value` with a `store`
         // helper, and a helper is exactly what this repo has been caught by
@@ -17787,7 +18042,7 @@ OWN = \"2\"
 
 #[cfg(test)]
 mod list_value_tests {
-    use super::{list_value_with, list_value_without};
+    use super::{list_entry_text, list_value_replacing, list_value_with, list_value_without};
     use zest_config::ui::Widget;
 
     fn map(pairs: &[(&str, &str)]) -> serde_json::Value {
@@ -17797,6 +18052,61 @@ mod list_value_tests {
                 .map(|(k, v)| ((*k).to_string(), serde_json::Value::String((*v).to_string())))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn an_entry_is_replaced_in_place_by_the_same_rule_that_adds_one() {
+        // Add and edit share `split_env_entry` deliberately: a rule that
+        // accepted `Q=a=b` on an add and rejected it on an edit would be a
+        // row whose entries can be created and then never corrected.
+        let current = map(&[("A", "1"), ("B", "2")]);
+
+        let edited =
+            list_value_replacing(Widget::KeyValue, &current, 0, "A=9").expect("a new value");
+        assert_eq!(edited["A"], "9", "the value changes");
+        assert_eq!(edited["B"], "2", "and its neighbour does not");
+
+        let renamed =
+            list_value_replacing(Widget::KeyValue, &current, 0, "Z=9").expect("a new value");
+        assert!(renamed.get("A").is_none(), "a rename takes the old key with it");
+        assert_eq!(renamed["Z"], "9");
+
+        let bare = list_value_replacing(Widget::KeyValue, &current, 0, "A").expect("a new value");
+        assert_eq!(bare["A"], "", "a bare key unsets, exactly as it does on an add");
+
+        assert!(
+            list_value_replacing(Widget::KeyValue, &current, 0, "=orphan").is_none(),
+            "an entry with no key is refused on an edit too"
+        );
+        assert!(
+            list_value_replacing(Widget::KeyValue, &current, 9, "A=1").is_none(),
+            "and a position nothing was drawn at is nothing to do"
+        );
+
+        let tags = serde_json::json!(["-liga", "ss01"]);
+        let edited = list_value_replacing(Widget::TagList, &tags, 1, "ss02").expect("a new value");
+        assert_eq!(edited, serde_json::json!(["-liga", "ss02"]), "a tag replaces by position");
+        assert!(
+            list_value_replacing(Widget::FontList, &tags, 0, "Consolas").is_none(),
+            "a font family is chosen from the roster, never typed -- and its per-item \
+             region already means drag-to-reorder"
+        );
+    }
+
+    #[test]
+    fn an_entry_seeds_its_edit_with_what_the_row_drew() {
+        // The buffer has to open on the entry the person clicked, spelled the
+        // way the add chip would accept it, so one parse serves both.
+        let current = map(&[("A", "1"), ("B", "")]);
+        assert_eq!(list_entry_text(Widget::KeyValue, &current, 0).as_deref(), Some("A=1"));
+        assert_eq!(
+            list_entry_text(Widget::KeyValue, &current, 1).as_deref(),
+            Some("B="),
+            "an unset entry seeds the spelling that keeps it unset, not the word `unset`"
+        );
+        let tags = serde_json::json!(["-liga"]);
+        assert_eq!(list_entry_text(Widget::TagList, &tags, 0).as_deref(), Some("-liga"));
+        assert_eq!(list_entry_text(Widget::KeyValue, &current, 9), None);
     }
 
     #[test]
@@ -17875,7 +18185,7 @@ mod profiles_edit_tests {
             field_idx,
             buffer: TextField::new(text),
             error: false,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         });
     }
 
@@ -17895,7 +18205,7 @@ mod profiles_edit_tests {
             field_idx: idx,
             buffer: TextField::new("CLAUDE_CONFIG_DIR=${profile_dir}/claude"),
             error: false,
-            append: true,
+            list: crate::settings_ui::ListEdit::Append,
         });
         assert_eq!(
             ui.take_pending_edit(),
@@ -17987,7 +18297,7 @@ mod settings_ime_tests {
             field_idx: 0,
             buffer: TextField::new("nu "),
             error: true,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         });
         ui.commit_text("シェル");
         let edit = ui.editing.as_ref().expect("still editing");
@@ -18023,7 +18333,7 @@ mod settings_ime_tests {
             field_idx: 0,
             buffer: TextField::new("/bin/"),
             error: true,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         });
         ui.text_key(TextCommand::Paste, Some("zsh"));
         let edit = ui.editing.as_ref().expect("still editing");
@@ -18050,7 +18360,7 @@ mod settings_ime_tests {
             field_idx: 0,
             buffer: TextField::new("obsidian"),
             error: false,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         });
         if let Some(edit) = ui.editing.as_mut() {
             edit.buffer.select_all();

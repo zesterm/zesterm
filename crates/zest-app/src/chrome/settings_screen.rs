@@ -1094,10 +1094,10 @@ pub(super) fn draw_control(
                     bold: false,
                     tracking: 0.0,
                 });
-                list_remove(out, colors, s, clip, row, j, [x + w - 24.0 * s, ry, 24.0 * s, item[3]], measure);
+                list_remove(out, colors, s, clip, row, j, [x + w - 24.0 * s, ry, 24.0 * s, item[3]], measure, inert);
                 ry += (LIST_ROW_H + LIST_GAP) * s;
             }
-            list_add(out, colors, s, clip, row, [x, ry, w, LIST_ROW_H * s], "+ Add a family", measure);
+            list_add(out, colors, s, clip, row, [x, ry, w, LIST_ROW_H * s], "+ Add a family", measure, inert);
         }
         SettingsValueCell::TagList { tags } => {
             // Chips flow right-to-left from the column's right edge so the
@@ -1343,38 +1343,57 @@ pub(super) fn draw_control(
             let w = CONTROL_W * s;
             let x = right - w;
             let mut ry = top;
-            for (j, (k, v)) in entries.iter().enumerate() {
+            for (j, entry) in entries.iter().enumerate() {
                 let key_w = w * 0.45;
+                // An inherited entry wears the panel's own colours where an
+                // owned one wears the accent. The row's chip cannot make this
+                // distinction -- it is true of entries, not of the row -- and
+                // without it "which of these are mine" is unanswerable from
+                // the screen (#550).
+                let (key_bg, key_ink) = if entry.inherited {
+                    (colors.panel_bg, colors.text_faint)
+                } else {
+                    (colors.accent_soft, colors.accent)
+                };
                 out.rects.push(RectInstance {
                     radii: [8.0 * s, 0.0, 0.0, 8.0 * s],
-                    ..RectInstance::filled([x, ry, key_w, LIST_ROW_H * s], colors.accent_soft, clip)
+                    ..RectInstance::filled([x, ry, key_w, LIST_ROW_H * s], dim(key_bg), clip)
                 });
                 out.rects.push(RectInstance {
                     radii: [0.0, 8.0 * s, 8.0 * s, 0.0],
-                    border: colors.line,
+                    border: dim(colors.line),
                     border_width: HAIRLINE * s,
                     ..RectInstance::filled(
                         [x + key_w, ry, w - key_w, LIST_ROW_H * s],
-                        colors.panel_bg,
+                        dim(colors.panel_bg),
                         clip,
                     )
                 });
+                // The body, minus the x's own column: click an entry to edit
+                // it where it is drawn. Pushed before `list_remove` so the x
+                // keeps its rect whichever order the map is walked in.
+                let body = [x, ry, w - 24.0 * s, LIST_ROW_H * s];
+                if !inert {
+                    if let Some(hit) = intersect(body, clip) {
+                        out.hit.push(hit, HitRegion::SettingsListEdit(row, j));
+                    }
+                }
                 out.texts.push(TextRun {
-                    text: k.clone(),
+                    text: entry.key.clone(),
                     pos: [x + 10.0 * s, baseline_in(ry, LIST_ROW_H * s, 11.0 * s)],
                     max_width: key_w - 14.0 * s,
-                    color: colors.accent,
+                    color: key_ink,
                     clip,
                     px: 11.0 * s,
                     bold: false,
                     tracking: 0.0,
                 });
-                let (vtext, vcolor) = if v.is_empty() {
+                let (vtext, vcolor) = if entry.value.is_empty() {
                     // Empty *unsets* the variable (wholesale replace, §11);
                     // say so instead of drawing a blank cell.
                     ("unset".to_string(), colors.text_faint)
                 } else {
-                    (v.clone(), colors.text_active)
+                    (entry.value.clone(), colors.text_active)
                 };
                 out.texts.push(TextRun {
                     text: vtext,
@@ -1386,10 +1405,10 @@ pub(super) fn draw_control(
                     bold: false,
                     tracking: 0.0,
                 });
-                list_remove(out, colors, s, clip, row, j, [x + w - 24.0 * s, ry, 24.0 * s, LIST_ROW_H * s], measure);
+                list_remove(out, colors, s, clip, row, j, [x + w - 24.0 * s, ry, 24.0 * s, LIST_ROW_H * s], measure, inert);
                 ry += (LIST_ROW_H + LIST_GAP) * s;
             }
-            list_add(out, colors, s, clip, row, [x, ry, w, LIST_ROW_H * s], "+ Add an entry", measure);
+            list_add(out, colors, s, clip, row, [x, ry, w, LIST_ROW_H * s], "+ Add an entry", measure, inert);
         }
     }
     menu_anchor
@@ -1406,9 +1425,12 @@ pub(super) fn list_remove(
     item: usize,
     rect: [f32; 4],
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    inert: bool,
 ) {
-    if let Some(hit) = intersect(rect, clip) {
-        out.hit.push(hit, HitRegion::SettingsListRemove(row, item));
+    if !inert {
+        if let Some(hit) = intersect(rect, clip) {
+            out.hit.push(hit, HitRegion::SettingsListRemove(row, item));
+        }
     }
     let xw = measure("\u{d7}", 12.0 * s, false, 0.0);
     out.texts.push(TextRun {
@@ -1434,10 +1456,14 @@ pub(super) fn list_add(
     rect: [f32; 4],
     label: &str,
     measure: &mut dyn FnMut(&str, f32, bool, f32) -> f32,
+    inert: bool,
 ) {
-    dashed_border(&mut out.rects, rect, s, colors.line, clip);
-    if let Some(hit) = intersect(rect, clip) {
-        out.hit.push(hit, HitRegion::SettingsListAdd(row));
+    let line = if inert { super::layout::washed(colors.line, 0.35) } else { colors.line };
+    dashed_border(&mut out.rects, rect, s, line, clip);
+    if !inert {
+        if let Some(hit) = intersect(rect, clip) {
+            out.hit.push(hit, HitRegion::SettingsListAdd(row));
+        }
     }
     let tw = measure(label, 11.0 * s, false, 0.0);
     out.texts.push(TextRun {
@@ -2230,7 +2256,7 @@ mod tests {
 
     #[test]
     fn list_widgets_expose_remove_add_and_reorder_targets() {
-        use super::super::model::SettingsFace;
+        use super::super::model::{KeyValueEntry, SettingsFace};
         let m = model(vec![
             cell_row(
                 SettingsValueCell::FontList {
@@ -2243,7 +2269,18 @@ mod tests {
             ),
             cell_row(
                 SettingsValueCell::KeyValue {
-                    entries: vec![("FOO".into(), "bar".into()), ("GONE".into(), String::new())],
+                    entries: vec![
+                        KeyValueEntry {
+                            key: "FOO".into(),
+                            value: "bar".into(),
+                            inherited: false,
+                        },
+                        KeyValueEntry {
+                            key: "GONE".into(),
+                            value: String::new(),
+                            inherited: true,
+                        },
+                    ],
                 },
                 false,
             ),
@@ -2253,6 +2290,7 @@ mod tests {
         let mut removes = std::collections::HashSet::new();
         let mut adds = std::collections::HashSet::new();
         let mut items = std::collections::HashSet::new();
+        let mut edits = std::collections::HashSet::new();
         for x in (0..1000).step_by(2) {
             for y in (46..746).step_by(2) {
                 match l.hit.hit(x as f32, y as f32) {
@@ -2264,6 +2302,9 @@ mod tests {
                     }
                     Some(HitRegion::SettingsListItem(r, i)) => {
                         items.insert((r, i));
+                    }
+                    Some(HitRegion::SettingsListEdit(r, i)) => {
+                        edits.insert((r, i));
                     }
                     _ => {}
                 }
@@ -2280,6 +2321,91 @@ mod tests {
             items.contains(&(0, 0)) && items.contains(&(0, 1)),
             "font rows are drag targets — order is the setting"
         );
+        assert!(
+            edits.contains(&(1, 0)) && edits.contains(&(1, 1)),
+            "every env entry can be edited where it is drawn: {edits:?}"
+        );
+        assert!(
+            !edits.iter().any(|(r, _)| *r == 0),
+            "a font row is not one: its body already means drag-to-reorder, and one region \
+             with two verbs is how the wrong one runs"
+        );
+    }
+
+    #[test]
+    fn an_inherited_entry_is_drawn_differently_from_one_the_profile_owns() {
+        // Asserted on the drawn run rather than on the model, which would
+        // only restate the flag the test just set. This is the difference a
+        // screenshot would show, and the reason `KeyValueEntry` carries the
+        // fact at all: the row's chip is spent on *when* the row applies, so
+        // the entry is the only thing left that can say whose it is.
+        use super::super::model::KeyValueEntry;
+        let m = model(vec![cell_row(
+            SettingsValueCell::KeyValue {
+                entries: vec![
+                    KeyValueEntry { key: "MINE".into(), value: "1".into(), inherited: false },
+                    KeyValueEntry { key: "THEIRS".into(), value: "2".into(), inherited: true },
+                ],
+            },
+            false,
+        )]);
+        let l = lay(&m, 1000.0, 700.0);
+        let ink = |key: &str| {
+            l.texts
+                .iter()
+                .find(|t| t.text == key)
+                .unwrap_or_else(|| panic!("{key} is drawn"))
+                .color
+        };
+        assert_ne!(
+            ink("MINE"),
+            ink("THEIRS"),
+            "an inherited entry must not read as one this profile set"
+        );
+    }
+
+    #[test]
+    fn an_inert_list_row_offers_nothing_to_click() {
+        // #476's rule, in the widgets written after it. `KeyValue` painted
+        // without `dim` and `list_add`/`list_remove` pushed their regions
+        // unconditionally, so a capability-gated list would have looked
+        // disabled, said so, and edited anyway.
+        //
+        // Swept off the rendered surface rather than asserted on the model,
+        // because the model just restates the flag that was set -- which is
+        // exactly why the first version of this looked tested.
+        use super::super::model::{KeyValueEntry, SettingsFace};
+        let m = model(vec![
+            inert_cell_row(SettingsValueCell::KeyValue {
+                entries: vec![KeyValueEntry {
+                    key: "FOO".into(),
+                    value: "bar".into(),
+                    inherited: false,
+                }],
+            }),
+            inert_cell_row(SettingsValueCell::FontList {
+                faces: vec![SettingsFace { family: "Cascadia Mono".into(), fallback: false }],
+            }),
+            inert_cell_row(SettingsValueCell::TagList { tags: vec!["-liga".into()] }),
+        ]);
+        let l = lay(&m, 1000.0, 700.0);
+        for x in (0..1000).step_by(2) {
+            for y in (46..746).step_by(2) {
+                let hit = l.hit.hit(x as f32, y as f32);
+                assert!(
+                    !matches!(
+                        hit,
+                        Some(
+                            HitRegion::SettingsListAdd(_)
+                                | HitRegion::SettingsListRemove(..)
+                                | HitRegion::SettingsListEdit(..)
+                                | HitRegion::SettingsListItem(..)
+                        )
+                    ),
+                    "an inert list row must push no list region, and pushed {hit:?} at {x},{y}"
+                );
+            }
+        }
     }
 
     /// The caret's x for a buffer with `caret` bytes behind it, as drawn.

@@ -264,6 +264,14 @@ pub enum HitRegion {
     /// A font-list item's body, by (row, item) — the drag-to-reorder handle
     /// and drop target: order IS the setting (§11).
     SettingsListItem(usize, usize),
+    /// A tag or env entry's body, by (row, item) — click to edit it where it
+    /// is drawn.
+    ///
+    /// Deliberately **not** [`HitRegion::SettingsListItem`], which already
+    /// means drag-to-reorder on a font row. Reusing it would give one region
+    /// two verbs decided by the widget behind it, which is how the wrong one
+    /// runs (#550).
+    SettingsListEdit(usize, usize),
     /// One row of the profiles editor's rail (design §12); clicking edits
     /// that profile (only the launcher launches — two different verbs).
     ProfilesRailRow(usize),
@@ -398,6 +406,7 @@ pub fn wheel_target(hit: Option<HitRegion>, pane_focus: Option<usize>) -> WheelT
         | R::SettingsListRemove(..)
         | R::SettingsListAdd(_)
         | R::SettingsListItem(..)
+        | R::SettingsListEdit(..)
         | R::ProfilesChoice(..) => WheelTarget::Settings,
 
         // An open dropdown scrolls its own list — a roster of 266 installed

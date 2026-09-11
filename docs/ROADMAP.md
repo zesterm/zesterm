@@ -91,16 +91,29 @@ the history behind them is in closed issues and PRs.
       `[profiles.x.env]`. The round-trip tests resolve after every write, and
       one of them runs the production writer against a real file rather than a
       helper — a synthetic stand-in is how ADR-013's broken fix stayed green.
-- [ ] **A list entry can be edited in place** (#550, PR 2). No list widget has
-      an edit affordance today: `KeyValue` pushes only add and remove, and
-      `FontList`'s per-item region means drag-to-reorder — so changing one
-      variable means deleting it and retyping both halves. Needs `EditBuffer`'s
-      `append: bool` to become a mode, a `SettingsListEdit` region distinct
-      from the reorder one, and per-entry inheritance marking off `own_env`,
-      which is the distinction the row chip deliberately cannot make. `inert`
-      goes in at the same time: `KeyValue` paints without `dim(…)` and
-      `list_add`/`list_remove` push their regions unguarded, which is the #476
-      class in a widget written after the rule.
+- [x] **A list entry can be edited in place** (#550, PR 2). No list widget had
+      an edit affordance at all: `KeyValue` pushed only add and remove, so
+      changing one variable meant deleting it and retyping both halves.
+      `EditBuffer`'s `append: bool` is a three-state `ListEdit` — a second bool
+      beside the first could have been true at once, a shape the writer would
+      then have to choose between — and `SettingsListEdit` is deliberately a
+      new region rather than `SettingsListItem`, which already means
+      drag-to-reorder on a font row: one region with two verbs decided by the
+      widget behind it is how the wrong one runs. Add and edit share one
+      `split_env_entry`, because a rule that accepts `Q=a=b` on an add and
+      rejects it on an edit is a row whose entries can be created and then
+      never corrected; a rename takes the old key with it, or one edit becomes
+      two variables. Each entry now says whether it is the profile's or
+      inherited — the fact the row's chip structurally cannot carry, since
+      `fold_meta` merges env key by key and §12 spends that slot on *when* the
+      row applies — asserted on the **drawn ink**, not on the model, which
+      would only restate the flag the test set. Two more found in the same
+      area: the profiles tab had no settle for a list buffer at all (a
+      successful add left the typed text sitting in the row it had just
+      written, a refusal showed no error), and `KeyValue` painted without
+      `dim(…)` while `list_add`/`list_remove` pushed their regions unguarded —
+      the #476 class in widgets written after the rule, swept off the rendered
+      surface rather than asserted on the model.
 - [x] **`window.chrome_opacity` is an opacity, not a tint** (#522, phase 1 of
       #521). A chrome bar now *writes* the window surface where it sits
       (`Scene::surface_rects`, the blend disabled) instead of compositing onto
