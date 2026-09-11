@@ -164,6 +164,18 @@ pub struct ProfileResolved {
     /// Keys in the merged overrides that are neither profile-only nor schema
     /// keys — the typo surface the editor warns about.
     pub unknown_keys: Vec<String>,
+    /// The named profile's **own** env entries, before Defaults are merged in.
+    ///
+    /// [`ProfileMeta::env`] is the merged map, which is what the launch uses
+    /// and what an editor must *show*. A writer needs the other one: without
+    /// it an edit reads the merged map and stores it back as the profile's
+    /// own, which hard-copies every inherited variable on an add and does
+    /// nothing at all on a remove -- `fold_meta` merges Defaults back in on
+    /// the next read, so the entry reappears and the remove looks broken.
+    ///
+    /// [`ProfileResolved::provenance`] cannot answer this: it is keyed per
+    /// *field*, and `env` is the one field whose inheritance is per entry.
+    pub own_env: BTreeMap<String, String>,
 }
 
 impl ProfileResolved {
@@ -290,6 +302,10 @@ pub fn resolve_profile(config: &toml::Table, name: &str) -> ProfileResolved {
 
     let (named_meta, named_set) = meta_with_presence(named);
     let (defaults_meta, defaults_set) = meta_with_presence(defaults);
+    // Taken before the fold, which is the only moment the two env maps are
+    // still distinguishable: `fold_meta` consumes both and merges this one
+    // field key by key.
+    let own_env = named_meta.env.clone();
     let meta = fold_meta(named_meta, &named_set, defaults_meta, &defaults_set);
     for key in PROFILE_ONLY_KEYS {
         if named_set.contains(key) {
@@ -301,7 +317,7 @@ pub fn resolve_profile(config: &toml::Table, name: &str) -> ProfileResolved {
 
     let unknown_keys = cascade::unknown_in(&overrides);
 
-    ProfileResolved { overrides, meta, provenance, unknown_keys }
+    ProfileResolved { overrides, meta, provenance, unknown_keys, own_env }
 }
 
 /// Per-key fallback: the named profile's value where it set one, Defaults'
@@ -993,6 +1009,54 @@ mod tests {
             Some("work"),
             "the named profile wins the keys it names, and only those"
         );
+    }
+
+    #[test]
+    fn own_env_holds_the_profiles_entries_alone_where_meta_holds_the_merge() {
+        // The pair `meta.env` cannot express, and the reason this field
+        // exists. An editor must *show* the merge -- it is what the launch
+        // uses -- but it must *write* the profile's own table. Reading the
+        // merge and storing it back hard-copies every inherited variable on
+        // an add, and on a remove writes an entry out of a table it was never
+        // in, which `fold_meta` then merges straight back (#550).
+        let c = config(
+            "[profiles.defaults.env]
+SHARED = \"1\"
+OVERRIDDEN = \"defaults\"
+             [profiles.work.env]
+OVERRIDDEN = \"work\"
+OWN = \"2\"
+",
+        );
+        let resolved = resolve_profile(&c, "work");
+        assert_eq!(
+            resolved.own_env.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["OVERRIDDEN", "OWN"],
+            "only the keys `[profiles.work.env]` actually names"
+        );
+        assert_eq!(
+            resolved.own_env.get("OVERRIDDEN").map(String::as_str),
+            Some("work"),
+            "and its own value for a key it shares with Defaults"
+        );
+        assert!(
+            resolved.meta.env.contains_key("SHARED"),
+            "while the merged map still carries Defaults' entry, which is what a launch gets"
+        );
+    }
+
+    #[test]
+    fn defaults_own_env_is_its_own_entries_since_it_inherits_from_nothing() {
+        // `resolve_profile` deliberately gives Defaults an empty parent, so
+        // the two maps coincide there. Worth pinning: the editor decides
+        // "inherited" by absence from `own_env`, and on Defaults that answer
+        // must be "nothing is inherited", not "everything is".
+        let c = config("[profiles.defaults.env]
+SHARED = \"1\"
+");
+        let resolved = resolve_profile(&c, "defaults");
+        assert_eq!(resolved.own_env.get("SHARED").map(String::as_str), Some("1"));
+        assert_eq!(resolved.own_env, resolved.meta.env, "Defaults inherits from nothing");
     }
 
     #[test]
