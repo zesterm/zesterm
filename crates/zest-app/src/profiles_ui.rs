@@ -164,8 +164,17 @@ pub fn build_profile_rows(
             // The dot only on an override (§12) — and never on the launch
             // trio, whose reset would delete the profile's identity. On
             // Defaults the dot marks its own keys (reset removes them).
+            //
+            // `env` is the exception inside the exception. It is on
+            // NEVER_CHIP for the *chip*'s sake — an inheritance chip could
+            // only ever be half true for it — and that suppression was
+            // silently taking the dot with it, so the one row that can
+            // accumulate entries had no way back at all: no dot, no
+            // `SettingsReset` region, and nothing else clears
+            // `[profiles.<name>.env]` (#550). A reset there is an ordinary
+            // override to undo, not the profile's identity.
             let modified = provenance == ProfileProvenance::OverridesDefaults
-                && !NEVER_CHIP.contains(&field.key.as_str());
+                && (field.key == "env" || !NEVER_CHIP.contains(&field.key.as_str()));
 
             let value = effective_value(field, resolved, &overrides, ctx);
             let cell = match editing.filter(|e| e.field_idx == idx) {
@@ -319,6 +328,19 @@ pub fn edit_seed_value(
             serde_json::Value::String(resolved.meta.command.clone().unwrap_or_default())
         }
         "host" => serde_json::Value::String(resolved.meta.host.clone().unwrap_or_default()),
+        // The profile's **own** table, where `effective_value` hands back the
+        // merged environment. Both are right for their job: the row must show
+        // what the launch will use, and an edit must write what the file
+        // holds. Seeding from the merge instead is what stored every
+        // inherited variable as this profile's own on the first add, and left
+        // a removed one for `fold_meta` to put straight back (#550).
+        "env" => serde_json::Value::Object(
+            resolved
+                .own_env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        ),
         _ => effective_value(field, resolved, overrides, ctx),
     }
 }
@@ -761,6 +783,72 @@ mod tests {
             Some("1"),
             "Defaults' entries are part of what this profile launches with, so the row shows them"
         );
+    }
+
+    #[test]
+    fn an_edit_of_the_env_row_seeds_from_the_profiles_own_entries() {
+        // The twin of the test above, and the distinction the whole row turns
+        // on: `effective_value` is merged because the row must describe the
+        // environment the launch gets, and `edit_seed_value` is the profile's
+        // own because an edit writes `[profiles.work.env]`. Seeding from the
+        // merge stored Defaults' entries as this profile's own on the first
+        // add, which stops them tracking Defaults with nothing to see (#550).
+        let c = config(
+            "[profiles.defaults.env]
+SHARED = \"1\"
+             [profiles.work.env]
+OWN = \"2\"
+",
+        );
+        let resolved = resolve_profile(&c, "work");
+        let values = window_values();
+        let schemes = scheme_swatches();
+        let seed = edit_seed_value(
+            &fields()[field_index("env")],
+            &resolved,
+            &serde_json::Value::Null,
+            &ctx(&values, &schemes, false),
+        );
+        let map = seed.as_object().expect("the env seed is an object");
+        assert_eq!(map.get("OWN").and_then(|v| v.as_str()), Some("2"));
+        assert!(
+            !map.contains_key("SHARED"),
+            "an inherited entry must not be seeded into an edit that writes the profile's table"
+        );
+    }
+
+    #[test]
+    fn the_env_row_offers_a_reset_once_the_profile_owns_entries() {
+        // `env` is on NEVER_CHIP so its chip slot can say *when* it applies,
+        // and that suppression was taking the modified dot with it. The dot
+        // *is* the reset button, and nothing else clears `[profiles.x.env]` --
+        // so the one row that accumulates entries had no way back (#550).
+        let owning = resolve_profile(&config("[profiles.work.env]
+OWN = \"2\"
+"), "work");
+        let (rows, _, _) = build(&owning, false);
+        let modified = rows.iter().find_map(|r| match r {
+            SettingsRowModel::Setting { key, modified, .. } if key == "env" => Some(*modified),
+            _ => None,
+        });
+        assert_eq!(modified, Some(true), "a profile with its own env entries can reset the row");
+
+        // Inheriting alone is not an override, so Defaults' entries must not
+        // offer a reset that would delete a table this profile does not own.
+        let inheriting = resolve_profile(
+            &config("[profiles.defaults.env]
+SHARED = \"1\"
+[profiles.work]
+command = \"pwsh\"
+"),
+            "work",
+        );
+        let (rows, _, _) = build(&inheriting, false);
+        let modified = rows.iter().find_map(|r| match r {
+            SettingsRowModel::Setting { key, modified, .. } if key == "env" => Some(*modified),
+            _ => None,
+        });
+        assert_eq!(modified, Some(false), "an inherited-only env row has no override to undo");
     }
 
     #[test]

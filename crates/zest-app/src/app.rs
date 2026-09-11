@@ -8556,13 +8556,28 @@ impl App {
     fn remove_list_item(&mut self, row: usize, item: usize) {
         if self.profiles_tab_active() {
             let Some(idx) = self.profiles_field_of_row(row) else { return };
-            let Some(widget) =
-                self.profiles_ui.as_ref().and_then(|ui| ui.fields.get(idx)).map(|f| f.widget)
+            let Some((widget, key)) = self
+                .profiles_ui
+                .as_ref()
+                .and_then(|ui| ui.fields.get(idx))
+                .map(|f| (f.widget, f.key.clone()))
             else {
                 return;
             };
             let Some(current) = self.profiles_value_of(idx) else { return };
-            let Some(next) = list_value_without(widget, &current, item) else { return };
+            // `env` is the one row whose drawn map and written map differ: the
+            // x sits beside a *merged* entry and the file holds only the
+            // profile's own table, so the index is resolved against one and
+            // the value written to the other (#550). Keyed on the field rather
+            // than on `Widget::KeyValue`, because a second key-value row here
+            // would not want this and would say so by its name.
+            let next = if key == "env" {
+                let Some(own) = self.profiles_seed_of(idx) else { return };
+                env_value_without(&current, &own, item)
+            } else {
+                list_value_without(widget, &current, item)
+            };
+            let Some(next) = next else { return };
             self.profiles_apply_edit(idx, next);
             return;
         }
@@ -8653,8 +8668,13 @@ impl App {
             // Committing nothing is closing the buffer, not an error.
             return true;
         }
+        // The *seed*, not the displayed value, on the profiles tab: an append
+        // writes the profile's own table, and appending to the merged
+        // environment stores every inherited variable as this profile's own
+        // (#550). Identical to `profiles_value_of` for every other widget --
+        // `edit_seed_value` only diverges for `command`, `host` and `env`.
         let current =
-            if profiles { self.profiles_value_of(idx) } else { self.settings_value_of(idx) };
+            if profiles { self.profiles_seed_of(idx) } else { self.settings_value_of(idx) };
         let Some(current) = current else { return false };
         let Some(next) = list_value_with(widget, &current, text) else { return false };
         if profiles {
@@ -8906,7 +8926,14 @@ impl App {
             Widget::SchemePicker | Widget::AccentPicker | Widget::IconPicker => {
                 self.profiles_adjust(1);
             }
-            Widget::TagList | Widget::KeyValue => {}
+            // The add affordance was pointer-only here while the Settings tab
+            // reached it from the keyboard (#550) -- and selection plus Enter
+            // is the path that never goes near a hit region at all.
+            Widget::TagList | Widget::KeyValue => {
+                if let Some(row) = self.profiles_ui.as_ref().map(|ui| ui.selected) {
+                    self.begin_list_add(row);
+                }
+            }
         }
         self.mark_chrome_dirty();
     }
@@ -12872,6 +12899,40 @@ fn list_value_without(
         }
         _ => None,
     }
+}
+
+/// The new **own** env for the §12 `env` row whose x was clicked at `item`.
+///
+/// `env` is the one control whose drawn map and written map are different
+/// maps, and both directions were wrong before #550. The index comes from the
+/// *merged* environment, because that is what the row drew; the value returned
+/// is the profile's *own* table, because that is what the file holds. Which
+/// branch applies is decided by ownership:
+///
+/// - an entry the profile owns is **deleted** from its table, so it falls back
+///   through Defaults again if Defaults also names it;
+/// - an inherited entry becomes an **empty value**, which is the design's
+///   per-variable drop ("an empty value unsets a variable"). Removing it from
+///   a table it is not in writes nothing at all, and `fold_meta` merges
+///   Defaults straight back on the next read -- which is exactly what made
+///   the x look broken while every call reported success.
+///
+/// So an entry already showing `unset` is *deleted* rather than re-emptied,
+/// and inheritance resumes. That is the only reading of "remove this override"
+/// that leaves the row reversible from the keyboard-free path.
+///
+/// `None` means "nothing to do", never "write null", like its neighbours.
+fn env_value_without(
+    merged: &serde_json::Value,
+    own: &serde_json::Value,
+    item: usize,
+) -> Option<serde_json::Value> {
+    let key = merged.as_object()?.keys().nth(item)?.clone();
+    let mut own = own.as_object().cloned().unwrap_or_default();
+    if own.remove(&key).is_none() {
+        own.insert(key, serde_json::Value::String(String::new()));
+    }
+    Some(serde_json::Value::Object(own))
 }
 
 /// The new value for a list or key/value row with `text` appended.
@@ -17517,6 +17578,209 @@ mod palette_tests {
         assert!(
             (pane_opacity(1.0, Some(&id)) - 1.0).abs() < f32::EPSILON,
             "a hand-edited value is clamped, not trusted (never-crash rule)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod profile_env_round_trip_tests {
+    //! The env row is the one control whose map on screen and map in the file
+    //! are different maps, and every bug in #550 is that difference going
+    //! unnoticed. These close the loop the unit tests above cannot: apply the
+    //! editor's transformation, store the result the way `write_profile_value`
+    //! does, resolve again, and look at what a launch would actually get.
+
+    use super::{env_value_without, list_value_with};
+    use zest_config::profiles::resolve_profile;
+    use zest_config::ui::Widget;
+
+    /// `[profiles.defaults.env] SHARED` plus `[profiles.work.env] OWN`.
+    fn config() -> toml::Table {
+        "[profiles.defaults.env]
+SHARED = \"1\"
+[profiles.work.env]
+OWN = \"2\"
+"
+            .parse()
+            .expect("valid toml")
+    }
+
+    fn as_json(map: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
+        serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        )
+    }
+
+    /// What the row draws: the merged environment the launch will use.
+    fn merged(c: &toml::Table) -> serde_json::Value {
+        as_json(&resolve_profile(c, "work").meta.env)
+    }
+
+    /// What the file holds: `[profiles.work.env]` alone.
+    fn own(c: &toml::Table) -> serde_json::Value {
+        as_json(&resolve_profile(c, "work").own_env)
+    }
+
+    /// `write_profile_value(.., "work", "env", ..)` without a disk: replace
+    /// `[profiles.work].env` wholesale, which is what an `InlineTable` write
+    /// does.
+    fn store(c: &toml::Table, next: &serde_json::Value) -> toml::Table {
+        let mut c = c.clone();
+        let table = next
+            .as_object()
+            .expect("an env value is an object")
+            .iter()
+            .map(|(k, v)| {
+                (k.clone(), toml::Value::String(v.as_str().expect("a string").to_string()))
+            })
+            .collect::<toml::Table>();
+        c.get_mut("profiles")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|p| p.get_mut("work"))
+            .and_then(toml::Value::as_table_mut)
+            .expect("[profiles.work] exists")
+            .insert("env".into(), toml::Value::Table(table));
+        c
+    }
+
+    /// Position of a key in the drawn row, which renders in map order.
+    fn index_of(value: &serde_json::Value, key: &str) -> usize {
+        value.as_object().expect("an object").keys().position(|k| k == key).expect("a drawn entry")
+    }
+
+    #[test]
+    fn removing_an_inherited_entry_is_not_answered_by_defaults_putting_it_back() {
+        // The reported symptom, and the sharpest of the five: the x on an
+        // inherited variable visibly does nothing. Reading the *merged* map
+        // and storing it back writes SHARED out of a table it was never in,
+        // and `fold_meta` merges Defaults in again on the very next read.
+        //
+        // The design's answer is per-variable rather than all-or-nothing
+        // (client-ui README, "An empty value unsets a variable"): drop an
+        // inherited entry by writing it empty into the profile's own table.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "SHARED");
+
+        let next = env_value_without(&drawn, &own(&c), item).expect("a new value");
+        let after = merged(&store(&c, &next));
+        assert_eq!(
+            after.get("SHARED").and_then(|v| v.as_str()),
+            Some(""),
+            "removing an inherited entry must unset it; anything else and the x did nothing"
+        );
+        assert_eq!(
+            after.get("OWN").and_then(|v| v.as_str()),
+            Some("2"),
+            "and it must not disturb the entries beside it"
+        );
+    }
+
+    #[test]
+    fn adding_an_entry_does_not_hard_copy_defaults_into_the_profile() {
+        // The same read, failing in the opposite direction. Storing the merged
+        // map makes SHARED the profile's own, so it stops tracking Defaults --
+        // silently, and visible only the next time Defaults changes.
+        let c = config();
+
+        let next = list_value_with(Widget::KeyValue, &own(&c), "NEW=3").expect("a new value");
+        let stored = store(&c, &next);
+        let after = resolve_profile(&stored, "work");
+        assert_eq!(
+            after.own_env.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["NEW", "OWN"],
+            "the profile owns what it named plus the new entry, and nothing inherited"
+        );
+        assert_eq!(
+            after.meta.env.get("SHARED").map(String::as_str),
+            Some("1"),
+            "while the launch still sees Defaults' entry, through inheritance"
+        );
+    }
+
+    #[test]
+    fn the_real_writer_lands_an_unset_in_the_profiles_own_table() {
+        // The three tests above model `write_profile_value` with a `store`
+        // helper, and a helper is exactly what this repo has been caught by
+        // before -- a synthetic stand-in kept a broken fix green (ADR-013's
+        // "a capture beats a helper"). So one of them runs the production
+        // path end to end: the real `to_toml`, the real writer, a real file,
+        // re-read and re-resolved.
+        let field = zest_config::profiles::fields()
+            .into_iter()
+            .find(|f| f.key == "env")
+            .expect("env is a profile field");
+
+        // Per-process, because this box runs parallel worktrees and libtest
+        // runs these concurrently: a fixed name in the shared temp directory
+        // is two runs writing one file, which reads as a flaky assertion
+        // rather than as a collision (#540 is that shape).
+        let path = std::env::temp_dir()
+            .join(format!("zesterm-env-editor-round-trip-550-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "# mine
+[profiles.defaults.env]
+SHARED = \"1\"
+             [profiles.work]
+# the work one
+command = \"pwsh\"
+             [profiles.work.env]
+OWN = \"2\"
+",
+        )
+        .expect("write");
+
+        let c: toml::Table =
+            std::fs::read_to_string(&path).expect("read").parse().expect("valid toml");
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "SHARED");
+        let next = env_value_without(&drawn, &own(&c), item).expect("a new value");
+
+        let value = crate::settings_ui::to_toml(&field, &next).expect("a writable value");
+        // Written bare, under `[profiles.work]` -- `env` is a profile-only key,
+        // not a dotted settings key, and `write_profile_value` never splits it.
+        zest_config::write_profile_value(&path, "work", &field.key, value)
+            .expect("the write lands");
+
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let after: toml::Table = text.parse().expect("still valid toml");
+        let resolved = zest_config::profiles::resolve_profile(&after, "work");
+        assert_eq!(
+            resolved.meta.env.get("SHARED").map(String::as_str),
+            Some(""),
+            "the inherited entry is unset for the launch, not restored by Defaults: {text}"
+        );
+        assert_eq!(
+            resolved.meta.env.get("OWN").map(String::as_str),
+            Some("2"),
+            "and the profile's own entry is untouched: {text}"
+        );
+        assert!(text.contains("# mine"), "comments elsewhere survive the write: {text}");
+        assert!(text.contains("# the work one"), "and the profile's own: {text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn removing_an_entry_the_profile_owns_deletes_it_from_the_profiles_table() {
+        // The branch that already worked, pinned so the fix for the other one
+        // cannot turn every remove into an empty value.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "OWN");
+
+        let next = env_value_without(&drawn, &own(&c), item).expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert!(
+            !after.own_env.contains_key("OWN"),
+            "an owned entry is deleted, not emptied -- emptying it would unset a variable              the shell might otherwise inherit"
+        );
+        assert_eq!(
+            after.meta.env.get("SHARED").map(String::as_str),
+            Some("1"),
+            "and Defaults is untouched either way"
         );
     }
 }

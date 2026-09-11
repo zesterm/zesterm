@@ -67,6 +67,40 @@ the history behind them is in closed issues and PRs.
       from `WM_NCMOUSEMOVE`.
 - [ ] Polish: OSC 0/2 title, font zoom, DPI changes. (DECSCUSR cursor styles
       and `cursor.shape`/`cursor.trail` are done; `smear` is #329.)
+- [x] **The env row writes the profile's own table** (#550, PR 1). `[profiles.x.env]`
+      is the one control whose map on screen and map in the file are different
+      maps — the row must show the *merged* environment because that is what
+      the launch gets, and an edit must write the profile's *own* because that
+      is what the file holds. Both mutators read the merged one and stored it
+      back, so the two directions failed opposite ways: adding a variable
+      hard-copied every inherited one into the profile (it stopped tracking
+      Defaults, invisibly until Defaults next changed), and removing an
+      inherited one wrote it out of a table it was never in, which `fold_meta`
+      merged straight back on the next read — the `×` visibly did nothing while
+      every call reported success. `ProfileResolved::own_env` is the fact
+      nothing could express (`provenance` is keyed per *field*, and `env` is
+      the one field whose inheritance is per entry); dropping an inherited entry
+      now writes it **empty**, which is the design's per-variable unset rather
+      than all-or-nothing. Two more from the same row: Enter reached the add
+      buffer on the Settings tab and hit an empty arm on Profiles, so the add
+      chip was pointer-only — and selection-plus-Enter is exactly the path that
+      never goes near a hit region (#476's lesson); and `env` sat on
+      `NEVER_CHIP` so its chip slot could say *when* it applies, which was
+      silently taking the modified dot with it, leaving the one row that
+      accumulates entries with no reset and nothing else that clears
+      `[profiles.x.env]`. The round-trip tests resolve after every write, and
+      one of them runs the production writer against a real file rather than a
+      helper — a synthetic stand-in is how ADR-013's broken fix stayed green.
+- [ ] **A list entry can be edited in place** (#550, PR 2). No list widget has
+      an edit affordance today: `KeyValue` pushes only add and remove, and
+      `FontList`'s per-item region means drag-to-reorder — so changing one
+      variable means deleting it and retyping both halves. Needs `EditBuffer`'s
+      `append: bool` to become a mode, a `SettingsListEdit` region distinct
+      from the reorder one, and per-entry inheritance marking off `own_env`,
+      which is the distinction the row chip deliberately cannot make. `inert`
+      goes in at the same time: `KeyValue` paints without `dim(…)` and
+      `list_add`/`list_remove` push their regions unguarded, which is the #476
+      class in a widget written after the rule.
 - [x] **`window.chrome_opacity` is an opacity, not a tint** (#522, phase 1 of
       #521). A chrome bar now *writes* the window surface where it sits
       (`Scene::surface_rects`, the blend disabled) instead of compositing onto
