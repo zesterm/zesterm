@@ -8755,7 +8755,7 @@ impl App {
             // drew, and the value is written to the profile's own table.
             let next = if key == "env" {
                 let Some(own) = self.profiles_seed_of(idx) else { return false };
-                env_value_replacing(&drawn, &own, item, text)
+                env_value_replacing(&drawn, &own, &self.profiles_defaults_env(), item, text)
             } else {
                 list_value_replacing(widget, &drawn, item, text)
             };
@@ -8856,6 +8856,33 @@ impl App {
     /// `[profiles.<name>]` value a launch would spawn verbatim.
     fn profiles_seed_of(&self, field_idx: usize) -> Option<serde_json::Value> {
         self.profiles_eval(field_idx, crate::profiles_ui::edit_seed_value)
+    }
+
+    /// Defaults' own env entries, as the object `env_value_replacing` wants.
+    ///
+    /// `own_env` *on the Defaults profile* is the Defaults environment, since
+    /// `resolve_profile` gives that one an empty parent on purpose -- so this
+    /// needs no new resolver field.
+    ///
+    /// Empty when the profile being edited is Defaults itself. There is no
+    /// layer under it for a renamed-away key to survive in, and claiming
+    /// otherwise would write a tombstone for a variable nothing sets.
+    fn profiles_defaults_env(&self) -> serde_json::Value {
+        use zest_config::profiles::RESERVED_PROFILE;
+        let editing_defaults =
+            self.profiles_ui.as_ref().is_some_and(|ui| ui.profile == RESERVED_PROFILE);
+        if editing_defaults {
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+        let root = crate::launcher::profiles_root(&self.settings);
+        let defaults = zest_config::profiles::resolve_profile(&root, RESERVED_PROFILE);
+        serde_json::Value::Object(
+            defaults
+                .own_env
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect(),
+        )
     }
 
     fn profiles_eval(
@@ -13118,16 +13145,30 @@ fn list_value_replacing(
 /// The new **own** env for the §12 `env` row whose entry at `item` becomes
 /// `text`.
 ///
-/// [`env_value_without`]'s twin, and two maps for its reason: the index names
-/// an entry in the *merged* environment the row drew, and the value written
-/// is the profile's own table.
+/// [`env_value_without`]'s twin, and **three** maps because a rename spans all
+/// three layers: the index names an entry in the `merged` environment the row
+/// drew, the value is written to the profile's `own` table, and whether the
+/// old key survives that write is `defaults`' business.
 ///
-/// Editing an **inherited** entry therefore creates an override for it, which
-/// is the only thing the gesture can mean -- the person clicked a row showing
-/// a value and typed a different one.
+/// Editing an **inherited** entry creates an override for it, which is the
+/// only thing the gesture can mean -- the person clicked a row showing a value
+/// and typed a different one.
+///
+/// A **rename has to take the old key with it**, and removing it from the own
+/// table is not enough when Defaults also names it: `fold_meta` merges it back
+/// on the next read and one edit becomes two variables, the old one still
+/// reaching the shell under a name nobody meant to keep. The tombstone is an
+/// explicit empty value -- the same per-variable unset the x already writes,
+/// so it is a state the row can already draw and the person can already undo.
+///
+/// `defaults` is empty when the profile being edited *is* Defaults, which is
+/// `resolve_profile`'s own rule ("resolving `defaults` itself must not fall
+/// through to itself"): there, removing the key really does remove it, and a
+/// tombstone would leave an `unset` row over a variable nothing sets.
 fn env_value_replacing(
     merged: &serde_json::Value,
     own: &serde_json::Value,
+    defaults: &serde_json::Value,
     item: usize,
     text: &str,
 ) -> Option<serde_json::Value> {
@@ -13135,6 +13176,9 @@ fn env_value_replacing(
     let (key, value) = split_env_entry(text)?;
     let mut own = own.as_object().cloned().unwrap_or_default();
     own.remove(&old);
+    if key != old && defaults.get(&old).is_some() {
+        own.insert(old, serde_json::Value::String(String::new()));
+    }
     own.insert(key, serde_json::Value::String(value));
     Some(serde_json::Value::Object(own))
 }
@@ -17926,7 +17970,8 @@ OWN = \"2\"
         let drawn = merged(&c);
         let item = index_of(&drawn, "SHARED");
 
-        let next = env_value_replacing(&drawn, &own(&c), item, "SHARED=mine").expect("a new value");
+        let next = env_value_replacing(&drawn, &own(&c), &defaults_env(&c), item, "SHARED=mine")
+            .expect("a new value");
         let after = resolve_profile(&store(&c, &next), "work");
         assert_eq!(
             after.own_env.get("SHARED").map(String::as_str),
@@ -17940,6 +17985,11 @@ OWN = \"2\"
         );
     }
 
+    /// Defaults' own entries, which is what Defaults' env *is*.
+    fn defaults_env(c: &toml::Table) -> serde_json::Value {
+        as_json(&resolve_profile(c, "defaults").own_env)
+    }
+
     #[test]
     fn renaming_an_entry_does_not_leave_the_old_key_behind() {
         // The failure a naive insert would ship: editing `OWN=2` into
@@ -17949,10 +17999,101 @@ OWN = \"2\"
         let drawn = merged(&c);
         let item = index_of(&drawn, "OWN");
 
-        let next = env_value_replacing(&drawn, &own(&c), item, "RENAMED=2").expect("a new value");
+        let next = env_value_replacing(&drawn, &own(&c), &defaults_env(&c), item, "RENAMED=2")
+            .expect("a new value");
         let after = resolve_profile(&store(&c, &next), "work");
         assert_eq!(after.own_env.get("RENAMED").map(String::as_str), Some("2"));
         assert!(!after.own_env.contains_key("OWN"), "the old key goes with the rename");
+        assert!(
+            !after.meta.env.contains_key("OWN"),
+            "and nothing underneath puts it back -- Defaults never named it"
+        );
+    }
+
+    #[test]
+    fn renaming_an_inherited_entry_takes_the_old_key_with_it() {
+        // Review caught this one. Removing the old key from the profile's own
+        // table is a no-op when the key was never in it, so `SHARED` kept
+        // arriving from Defaults beside the new name: one rename, two
+        // variables, and the PR claiming the opposite.
+        //
+        // The tombstone is the same empty value the x writes, so the state is
+        // one the row can draw and the person can undo.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "SHARED");
+
+        let next = env_value_replacing(&drawn, &own(&c), &defaults_env(&c), item, "RENAMED=9")
+            .expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert_eq!(after.meta.env.get("RENAMED").map(String::as_str), Some("9"));
+        assert_eq!(
+            after.meta.env.get("SHARED").map(String::as_str),
+            Some(""),
+            "the inherited name it was renamed away from must not still reach the shell"
+        );
+    }
+
+    #[test]
+    fn renaming_an_override_of_an_inherited_key_takes_it_with_it_too() {
+        // The same hole one layer along: the profile *owns* the key, so the
+        // remove lands -- and Defaults names it as well, so it comes back
+        // anyway. Ownership is not the question; whether anything underneath
+        // still answers for the old name is.
+        let c: toml::Table = "[profiles.defaults.env]\nBOTH = \"theirs\"\n\
+             [profiles.work.env]\nBOTH = \"mine\"\n"
+            .parse()
+            .expect("valid toml");
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "BOTH");
+
+        let next = env_value_replacing(&drawn, &own(&c), &defaults_env(&c), item, "RENAMED=mine")
+            .expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert_eq!(after.meta.env.get("RENAMED").map(String::as_str), Some("mine"));
+        assert_eq!(
+            after.meta.env.get("BOTH").map(String::as_str),
+            Some(""),
+            "Defaults' value must not resurface under the name the rename left"
+        );
+    }
+
+    #[test]
+    fn renaming_on_defaults_writes_no_tombstone() {
+        // Defaults has no layer under it -- `resolve_profile` gives it an
+        // empty parent on purpose -- so a removed key is simply gone, and a
+        // tombstone would leave an `unset` row over a variable nothing sets.
+        // The caller passes an empty map for exactly this; pinned here so the
+        // fix for the case above cannot quietly acquire a second bug.
+        let c = config();
+        let drawn = defaults_env(&c);
+        let item = index_of(&drawn, "SHARED");
+        let empty = serde_json::Value::Object(serde_json::Map::new());
+
+        let next = env_value_replacing(&drawn, &drawn, &empty, item, "RENAMED=1")
+            .expect("a new value");
+        let map = next.as_object().expect("an object");
+        assert!(map.contains_key("RENAMED"));
+        assert!(!map.contains_key("SHARED"), "no tombstone where nothing can resurface: {map:?}");
+    }
+
+    #[test]
+    fn editing_a_value_in_place_is_not_a_rename() {
+        // The guard the tombstone needs: changing `SHARED=1` to `SHARED=9` on
+        // a profile that inherits it must produce an override, not an
+        // override plus an unset of the same key.
+        let c = config();
+        let drawn = merged(&c);
+        let item = index_of(&drawn, "SHARED");
+
+        let next = env_value_replacing(&drawn, &own(&c), &defaults_env(&c), item, "SHARED=9")
+            .expect("a new value");
+        let after = resolve_profile(&store(&c, &next), "work");
+        assert_eq!(
+            after.meta.env.get("SHARED").map(String::as_str),
+            Some("9"),
+            "same key, new value -- nothing to take with it"
+        );
     }
 
     #[test]
