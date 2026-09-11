@@ -17713,7 +17713,12 @@ OWN = \"2\"
             .find(|f| f.key == "env")
             .expect("env is a profile field");
 
-        let path = std::env::temp_dir().join("zesterm-env-editor-round-trip-550.toml");
+        // Per-process, because this box runs parallel worktrees and libtest
+        // runs these concurrently: a fixed name in the shared temp directory
+        // is two runs writing one file, which reads as a flaky assertion
+        // rather than as a collision (#540 is that shape).
+        let path = std::env::temp_dir()
+            .join(format!("zesterm-env-editor-round-trip-550-{}.toml", std::process::id()));
         std::fs::write(
             &path,
             "# mine
