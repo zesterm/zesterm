@@ -387,6 +387,15 @@ fn cell_for(
                 .unwrap_or("\u{2014}")
                 .to_string(),
         },
+        // The env row is the merged environment, so each entry has to say
+        // which half it came from. The row's own chip cannot: `fold_meta`
+        // merges this field key by key, so "inherited" and "overrides" are
+        // both half true of the row and exactly true of an entry (#550).
+        Widget::KeyValue if field.key == "env" => SettingsValueCell::KeyValue {
+            entries: settings_ui::key_value_entries(Some(value), |k| {
+                !resolved.own_env.contains_key(k)
+            }),
+        },
         // An unset command's caption ("the host's default shell") is a
         // placeholder, not a value: the input draws it faint, and the edit
         // seed already refuses to commit it (edit_seed_value).
@@ -726,7 +735,7 @@ mod tests {
             field_idx,
             buffer: crate::text_field::TextField::new(text),
             error: false,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         })
     }
 
@@ -814,6 +823,61 @@ OWN = \"2\"
         assert!(
             !map.contains_key("SHARED"),
             "an inherited entry must not be seeded into an edit that writes the profile's table"
+        );
+    }
+
+    #[test]
+    fn each_env_entry_says_whether_it_is_this_profiles_or_inherited() {
+        // The fact the row's chip cannot carry. `fold_meta` merges env key by
+        // key, so "inherited from Defaults" and "overrides Defaults" are each
+        // half true of the row and exactly true of an entry -- and without
+        // this, "which of these are mine" is unanswerable from the screen.
+        let c = config(
+            "[profiles.defaults.env]\nSHARED = \"1\"\n\
+             [profiles.work.env]\nOWN = \"2\"\n",
+        );
+        let resolved = resolve_profile(&c, "work");
+        let (rows, _, _) = build(&resolved, false);
+        let entries = rows
+            .iter()
+            .find_map(|r| match r {
+                SettingsRowModel::Setting {
+                    key,
+                    value: SettingsValueCell::KeyValue { entries },
+                    ..
+                } if key == "env" => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("the env row draws as a key/value control");
+
+        let shared = entries.iter().find(|e| e.key == "SHARED").expect("the inherited entry");
+        let own = entries.iter().find(|e| e.key == "OWN").expect("the profile's own");
+        assert!(shared.inherited, "Defaults' entry is marked inherited");
+        assert!(!own.inherited, "and the profile's own is not");
+    }
+
+    #[test]
+    fn defaults_own_entries_are_never_marked_inherited() {
+        // Defaults has no parent -- `resolve_profile` gives it an empty one
+        // on purpose -- so every entry there is its own. Marking them
+        // inherited would say each row came from somewhere that does not
+        // exist.
+        let resolved = resolve_profile(&config("[profiles.defaults.env]\nSHARED = \"1\"\n"), "defaults");
+        let (rows, _, _) = build(&resolved, true);
+        let entries = rows
+            .iter()
+            .find_map(|r| match r {
+                SettingsRowModel::Setting {
+                    key,
+                    value: SettingsValueCell::KeyValue { entries },
+                    ..
+                } if key == "env" => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("the env row draws as a key/value control");
+        assert!(
+            entries.iter().all(|e| !e.inherited),
+            "nothing on Defaults is inherited: {entries:?}"
         );
     }
 

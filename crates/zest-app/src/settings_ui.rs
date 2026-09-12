@@ -33,9 +33,29 @@ pub struct EditBuffer {
     pub buffer: crate::text_field::TextField,
     /// The last Enter did not parse; drawn as an error until the text changes.
     pub error: bool,
-    /// Enter *appends* to a list field (a new tag, a new env entry) instead
-    /// of replacing the value — the add-chip's mode.
-    pub append: bool,
+    /// What this buffer's Enter does to a list field.
+    pub list: ListEdit,
+}
+
+/// What an open buffer's Enter means for a list or key/value field.
+///
+/// Three states rather than the `append: bool` this replaces, because
+/// "change the entry I clicked" is a third thing and a second bool beside the
+/// first would let both be true at once — a shape the writer would then have
+/// to pick between.
+///
+/// [`ListEdit::Append`] and [`ListEdit::Replace`] are both handed back
+/// **unparsed**: either needs the list's *current* value to produce a whole
+/// new one, and that lives with the writer rather than here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListEdit {
+    /// Not a list edit — the text is the field's whole new value.
+    #[default]
+    Value,
+    /// The dashed add affordance: a new entry at the end.
+    Append,
+    /// An existing entry, edited where it is drawn.
+    Replace(usize),
 }
 
 /// What leaving an open edit should do (#272, #275).
@@ -50,6 +70,11 @@ pub enum Pending {
     /// with the writer. The buffer is deliberately left open, because only
     /// the caller can tell whether the append took.
     Append(usize, String),
+    /// Replace the entry at this position with this raw text. Unparsed and
+    /// left open for [`Pending::Append`]'s reasons exactly — the two differ
+    /// only in where the text lands, so they are settled by one path in the
+    /// caller and a divergence between them cannot be spelled.
+    Replace(usize, usize, String),
     /// The buffer does not parse. It stays open, flagged, and the caller must
     /// NOT leave — a value that cannot be written must not be lost by looking
     /// away from it.
@@ -76,8 +101,12 @@ pub fn take_pending_edit(editing: &mut Option<EditBuffer>, fields: &[UiField]) -
         *editing = None;
         return Pending::None;
     };
-    if edit.append {
-        return Pending::Append(idx, edit.buffer.text().to_string());
+    match edit.list {
+        ListEdit::Append => return Pending::Append(idx, edit.buffer.text().to_string()),
+        ListEdit::Replace(item) => {
+            return Pending::Replace(idx, item, edit.buffer.text().to_string())
+        }
+        ListEdit::Value => {}
     }
     match parse_input(field, edit.buffer.text()) {
         Some(value) => {
@@ -570,15 +599,11 @@ pub(crate) fn value_cell(
                 })
                 .unwrap_or_default(),
         },
+        // Nothing is inherited here: `shell.env` has no layer above it the
+        // way a profile's env has Defaults. The profiles editor builds this
+        // cell itself, with the flag filled in.
         Widget::KeyValue => SettingsValueCell::KeyValue {
-            entries: value
-                .and_then(serde_json::Value::as_object)
-                .map(|map| {
-                    map.iter()
-                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            entries: key_value_entries(value, |_| false),
         },
     }
 }
@@ -872,6 +897,30 @@ pub fn step_selection(actions: &[RowAction], from: usize, down: bool) -> usize {
     }
 }
 
+/// The rows of a key/value control, with `inherited` decided by the caller.
+///
+/// One walk, shared by both editors: they draw these rows with the same
+/// `draw_control`, so they have to agree about the order the entries come out
+/// in — the x and the edit region are both resolved back to a key *by
+/// position*.
+pub fn key_value_entries(
+    value: Option<&serde_json::Value>,
+    inherited: impl Fn(&str) -> bool,
+) -> Vec<crate::chrome::model::KeyValueEntry> {
+    value
+        .and_then(serde_json::Value::as_object)
+        .map(|map| {
+            map.iter()
+                .map(|(k, v)| crate::chrome::model::KeyValueEntry {
+                    key: k.clone(),
+                    value: v.as_str().unwrap_or_default().to_string(),
+                    inherited: inherited(k),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,13 +937,32 @@ mod tests {
         fields().iter().position(|f| f.key == key).unwrap_or_else(|| panic!("{key} is a field"))
     }
 
-    fn open(field_idx: usize, text: &str, append: bool) -> Option<EditBuffer> {
+    fn open(field_idx: usize, text: &str, list: ListEdit) -> Option<EditBuffer> {
         Some(EditBuffer {
             field_idx,
             buffer: crate::text_field::TextField::new(text),
             error: false,
-            append,
+            list,
         })
+    }
+
+    #[test]
+    fn a_replace_buffer_reaches_the_replace_arm_with_its_position() {
+        // The variant is the point, the way it is for `Append`: a `Commit`
+        // here would write the typed entry as the field's *whole* value --
+        // one variable replacing the environment -- which is a worse outcome
+        // than the no-op the row had before it could be edited at all.
+        let idx = field_index("shell.env");
+        let mut editing = open(idx, "FOO=bar", ListEdit::Replace(1));
+        assert_eq!(
+            take_pending_edit(&mut editing, &fields()),
+            Pending::Replace(idx, 1, "FOO=bar".into()),
+            "a replace buffer carries the position it was opened at"
+        );
+        assert!(
+            editing.is_some(),
+            "and stays open: only the writer knows whether the entry could be parsed"
+        );
     }
 
     #[test]
@@ -903,7 +971,7 @@ mod tests {
         // wrote, so changing category or closing the tab dropped the buffer.
         let fields = fields();
         let idx = field_index("typography.size_pt");
-        let mut editing = open(idx, "18", false);
+        let mut editing = open(idx, "18", ListEdit::Value);
         assert_eq!(
             take_pending_edit(&mut editing, &fields),
             Pending::Commit(idx, serde_json::json!(18.0)),
@@ -916,7 +984,7 @@ mod tests {
     fn a_settings_buffer_that_cannot_be_written_refuses_to_be_left() {
         let fields = fields();
         let idx = field_index("typography.size_pt");
-        let mut editing = open(idx, "not a number", false);
+        let mut editing = open(idx, "not a number", ListEdit::Value);
         assert_eq!(take_pending_edit(&mut editing, &fields), Pending::Refused);
         let edit = editing.as_ref().expect("the buffer stays open");
         assert!(edit.error, "and says so");
@@ -932,7 +1000,7 @@ mod tests {
         // first would destroy the text on the failing half.
         let fields = fields();
         let idx = field_index("typography.families");
-        let mut editing = open(idx, "Cascadia Mono", true);
+        let mut editing = open(idx, "Cascadia Mono", ListEdit::Append);
         assert_eq!(
             take_pending_edit(&mut editing, &fields),
             Pending::Append(idx, "Cascadia Mono".to_string()),
@@ -946,7 +1014,7 @@ mod tests {
 
     #[test]
     fn a_buffer_naming_a_field_that_is_gone_is_dropped_not_stuck() {
-        let mut editing = open(9999, "orphan", false);
+        let mut editing = open(9999, "orphan", ListEdit::Value);
         assert_eq!(take_pending_edit(&mut editing, &fields()), Pending::None);
         assert!(editing.is_none(), "an unwritable orphan is dropped, not held");
     }
@@ -1337,7 +1405,7 @@ mod tests {
             field_idx: idx,
             buffer: crate::text_field::TextField::new("18"),
             error: false,
-            append: false,
+            list: crate::settings_ui::ListEdit::Value,
         };
         let (rows, _) = build_rows(
             &all,

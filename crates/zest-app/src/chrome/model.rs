@@ -934,6 +934,27 @@ pub struct SettingsFace {
     pub fallback: bool,
 }
 
+/// One row of a key/value control.
+///
+/// `inherited` is per **entry**, not per row, and that is the whole reason
+/// this is a struct rather than the pair it replaces. A profile's env is
+/// routinely part inherited and part its own — `fold_meta` merges that one
+/// field key by key — so the row's inheritance chip could only ever be half
+/// true, and §12 spends that slot on *when* the row applies instead. The fact
+/// still has to be shown somewhere, and the only place it is true of is the
+/// entry (#550).
+///
+/// Always `false` where there is no layer to inherit from: `shell.env` on the
+/// Settings tab has no Defaults above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyValueEntry {
+    pub key: String,
+    /// Empty *unsets* the variable, which is how an inherited one is dropped
+    /// per variable rather than all-or-nothing.
+    pub value: String,
+    pub inherited: bool,
+}
+
 /// The value half of a settings row, as it should be drawn.
 ///
 /// Which cell a field gets is the row builder's decision (from the schema's
@@ -971,7 +992,7 @@ pub enum SettingsValueCell {
     /// Chips with a × each and a dashed add chip.
     TagList { tags: Vec<String> },
     /// Paired key/value cells; an empty value renders `unset` (it unsets).
-    KeyValue { entries: Vec<(String, String)> },
+    KeyValue { entries: Vec<KeyValueEntry> },
     /// A typed edit in progress; drawn as the buffer with a caret, in warn
     /// colours after a failed parse. Whether the edit replaces the value or
     /// grows a list is `settings_ui::EditBuffer`'s business — this cell only
