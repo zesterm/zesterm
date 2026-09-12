@@ -1142,6 +1142,16 @@ pub(super) fn draw_control(
                     bold: false,
                     tracking: 0.0,
                 });
+                // The chip body, minus the x's own column: click a tag to
+                // edit it where it is drawn, exactly as a key/value entry is
+                // (#550). Pushed before `list_remove` so the x keeps its rect
+                // whichever order the map is walked in.
+                let body = [chip[0], chip[1], w - xw - 12.0 * s, chip[3]];
+                if !inert {
+                    if let Some(hit) = intersect(body, clip) {
+                        out.hit.push(hit, HitRegion::SettingsListEdit(row, j));
+                    }
+                }
                 let xr = [chip[0] + w - xw - 12.0 * s, chip[1], xw + 12.0 * s, chip[3]];
                 if let Some(hit) = intersect(xr, clip) {
                     if !inert {
@@ -2324,6 +2334,12 @@ mod tests {
         assert!(
             edits.contains(&(1, 0)) && edits.contains(&(1, 1)),
             "every env entry can be edited where it is drawn: {edits:?}"
+        );
+        assert!(
+            edits.contains(&(2, 0)),
+            "and every tag chip: `list_entry_text` and `begin_list_edit` both took a \
+             TagList from the start, so a missing region here is a chip that looks \
+             editable and silently is not: {edits:?}"
         );
         assert!(
             !edits.iter().any(|(r, _)| *r == 0),
