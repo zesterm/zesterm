@@ -27,6 +27,21 @@ host: string, ask_host: boolean, starting_directory: string,
  */
 tab_title: string, color_scheme: string, tab_color?: number, icon: string, color_from: string, 
 /**
+ * The environment this profile gives the shell it launches, merged
+ * through `profiles.defaults` per entry (the one profile-only key that
+ * merges rather than picks), values exactly as the file spells them.
+ *
+ * Unexpanded on purpose: `${profile_dir}` and its siblings resolve on
+ * the machine that *runs* the profile, at spawn, so what a config editor
+ * shows is what the file holds and not one machine's reading of it. An
+ * empty value means "unset", as everywhere `env` is spelled.
+ *
+ * Here and not on [`HostProfile`]: this is the answer to a question
+ * about a file, asked of the machine that holds it, where the offer is
+ * pushed to every paired device whether or not it asked.
+ */
+env: Array<[string, string]>, 
+/**
  * The settings keys this profile overrides, each with `source` reading
  * `profile:<name>` or `profile:defaults` — so "this profile sets it" and
  * "it fell through to Defaults" are distinguishable, which is the

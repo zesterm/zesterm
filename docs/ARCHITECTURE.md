@@ -1165,6 +1165,29 @@ client to resolve a label against its *own* fleet — the one way this feature
 could run a command on the wrong computer. A test asserts neither key reaches
 the wire.
 
+### Appearance and command are published; the environment never is
+
+A profile's `env` (#487) is the second absent field, for a different reason. A
+host pushes its offer to every paired device whether or not it asked, and a
+profile's environment is where a login lives — `CLAUDE_CONFIG_DIR`, `GH_CONFIG_DIR`,
+a `KUBECONFIG` — so publishing it would hand every machine's secrets-adjacent
+configuration to every phone that ever paired. The launch path therefore runs the
+other way: a client launching a published profile sends its **name**, and the
+host that owns the profile applies the environment itself, beneath whatever
+entries the launch carried (#559). That is the same "resolved on the host"
+rule as `command` and `starting_directory`, applied to the one field that must
+not cross the wire at all. No privilege is created — `CreateSession.command` is
+already arbitrary execution on the host, so a client that can name a profile
+could always have read its variables from inside the shell — and a name the
+host has no profile for changes nothing, so a viewer launching its *own*
+profile at a remote machine (which sends the name for placeholder expansion)
+is not refused. On a collision the launch's entries win per key: the viewer's
+profile is the one the viewer can edit, which is this ADR's rule for the
+launcher row, applied to the environment. What a client may *read* is a
+different question with a different answer: `GetConfig` answers for the file
+on request, and its `ConfigProfile.env` shows the merged, unexpanded map — the
+same client can already read `shell.env` from the same reply.
+
 ### It rides `Sessions`, and that is a cost rather than a fit
 
 `HostMessage` is `#[serde(tag = "t")]`, so a new variant is not additive. That

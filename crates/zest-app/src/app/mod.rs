@@ -571,6 +571,23 @@ struct LauncherState {
     actions: Vec<crate::launcher::LauncherAction>,
 }
 
+/// What a profile launch at another machine carries: the tab's identity and
+/// the four strings the far daemon is told.
+///
+/// A struct for `zest_daemon::client::Launch`'s reason: three of these are
+/// `String`s and a fourth made it eight arguments, which is where a swapped
+/// `command`/`cwd` stops being something the compiler can catch.
+struct ProfileLaunch {
+    /// The profile's name, which is also the launch's `profile` on the wire.
+    name: String,
+    identity: crate::tabs::ProfileIdentity,
+    command: String,
+    cwd: String,
+    /// The profile's own entries, unexpanded, when *this* machine holds the
+    /// profile; empty for a published one, whose host applies its own (#559).
+    env: Vec<(String, String)>,
+}
+
 /// A block's open ⋯ menu (design §3), and the action list parallel to its
 /// drawn rows — built in one `block_menu::build_rows` pass, so index `n` means
 /// the same thing in both by construction, exactly as the launcher's does.
@@ -10423,10 +10440,13 @@ impl App {
                     // launch — a connecting tab that settles failed, saying
                     // so — never a silent refusal.
                     self.spawn_connecting_tab(
-                        name,
-                        identity,
-                        profile.command.clone(),
-                        profile.starting_directory.clone(),
+                        ProfileLaunch {
+                            name: name.to_string(),
+                            identity,
+                            command: profile.command.clone(),
+                            cwd: profile.starting_directory.clone(),
+                            env: Vec::new(),
+                        },
                         label.clone(),
                         crate::launch::HostTarget::Unroutable {
                             error: format!("no way to reach host '{label}' right now"),
@@ -10451,12 +10471,18 @@ impl App {
                     // environments to every paired device. Resolving the name
                     // against *this* machine's config instead would be worse
                     // than nothing -- a local profile can share a name with a
-                    // remote one and mean something else entirely. The host
-                    // applying its own is #487's phase 3.
+                    // remote one and mean something else entirely. So nothing
+                    // travels but the name, and the host applies its own
+                    // profile's env when the launch names it (#487 phase 3,
+                    // #559) -- `open_shell_tab` sends `identity.name`.
                     Vec::new(),
                 );
             }
-            target => self.spawn_connecting_tab(name, identity, command, cwd, label, target),
+            target => self.spawn_connecting_tab(
+                ProfileLaunch { name: name.to_string(), identity, command, cwd, env: Vec::new() },
+                label,
+                target,
+            ),
         }
     }
 
@@ -10514,11 +10540,19 @@ impl App {
                     false,
                     self.config.shell.as_deref(),
                 );
+                // This machine's own profile, launched elsewhere: its entries
+                // travel unexpanded, and the far host resolves them -- the
+                // remote half of #487's "on every spawn path", which sent
+                // nothing until #559. `shell.env` stays home; that is the far
+                // machine's setting to apply.
                 self.spawn_connecting_tab(
-                    name,
-                    identity,
-                    command,
-                    cwd.unwrap_or_default(),
+                    ProfileLaunch {
+                        name: name.to_string(),
+                        identity,
+                        command,
+                        cwd: cwd.unwrap_or_default(),
+                        env: meta.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    },
                     host_label,
                     target,
                 );
@@ -10534,15 +10568,17 @@ impl App {
     /// profile on host · command" in the scheme's dim colour (§12). It
     /// settles live when an attach succeeds, or into the dead-tab treatment
     /// carrying the error after [`crate::launch::MAX_DIALS`] failures.
+    ///
+    /// `launch.name` goes on the wire as the launch's profile, so the far
+    /// host resolves `env`'s placeholders against its own directories and
+    /// applies its own profile of that name beneath (#559).
     fn spawn_connecting_tab(
         &mut self,
-        name: &str,
-        identity: crate::tabs::ProfileIdentity,
-        command: String,
-        cwd: String,
+        launch: ProfileLaunch,
         host_label: String,
         target: crate::launch::HostTarget,
     ) {
+        let ProfileLaunch { name, identity, command, cwd, env } = launch;
         let Some(client) = self.remote_identity() else {
             tracing::warn!("no identity to dial with; cannot launch the profile");
             return;
@@ -10575,7 +10611,7 @@ impl App {
             cols,
             rows,
             seed.clone(),
-            name,
+            &name,
             &provenance,
             &host_label,
         );
@@ -10602,6 +10638,7 @@ impl App {
         // beside this launch's connecting tab (#190).
         let on_pending = Some(self.pairing_notifier(host_label.clone()));
         let pairing = Arc::clone(&self.pairing);
+        let profile = name;
         let spawned = std::thread::Builder::new().name("zest-profile-launch".into()).spawn(
             move || {
                 let mut failures = 0u32;
@@ -10619,9 +10656,10 @@ impl App {
                                     // Remote by construction (`local: false`
                                     // below), so this machine's `shell.env`
                                     // stays home; the far daemon applies its
-                                    // own (#488).
-                                    env: &[],
-                                    profile: "",
+                                    // own (#488). Only the profile's entries
+                                    // travel, unexpanded, beside its name.
+                                    env: &env,
+                                    profile: &profile,
                                     cols,
                                     rows,
                                     scrollback,

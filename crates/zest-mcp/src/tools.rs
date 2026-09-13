@@ -99,6 +99,16 @@ pub enum ToolError {
     /// function, so a refusal and a row cannot disagree.
     #[error("cannot reach `{label}`: {why}")]
     Unreachable { label: String, why: String },
+    /// A profile named to `create_session` that the host does not publish.
+    ///
+    /// A refusal rather than a plain shell, because the daemon is lenient
+    /// about a name it has no profile for (a client that resolved its own
+    /// profile carries everything it needs) -- and an agent that typo'd a name
+    /// would otherwise get a session that looks right and has none of the
+    /// profile's environment. Names what *is* offered, since the next act is
+    /// to pick one of those.
+    #[error("`{label}` publishes no profile named `{profile}`; it offers: {offered}")]
+    NoSuchProfile { label: String, profile: String, offered: String },
     /// A first connection to a machine that has never trusted this agent.
     ///
     /// Not a failure and not a retry-in-a-loop: somebody at that machine is
@@ -1084,7 +1094,9 @@ impl ToolSet {
         let max_lines = clamp_lines(opt_usize(args, "max_lines")?);
         let deadline = Instant::now() + clamp_timeout(opt_u32(args, "timeout_ms")?);
 
-        let addr = conn.create_session(command, cwd, cols, rows)?;
+        // No profile: an isolated run is a command to completion, and the
+        // command is the one thing it requires.
+        let addr = conn.create_session(command, cwd, "", cols, rows)?;
 
         // Observing, like every other attach this crate makes. It owns this
         // session outright, so a vote would harm nobody -- but `observe` is
@@ -1187,13 +1199,60 @@ impl ToolSet {
         }))
     }
 
+    /// Start a session, under one of the host's published profiles when the
+    /// call names one.
+    ///
+    /// The same launch `launch_published` makes in the app: the profile's
+    /// command and starting directory fill whatever the call left empty, and
+    /// its *name* goes on the wire for the host to apply the environment it
+    /// never publishes (#559). Resolved against the offer rather than passed
+    /// through blind, because the daemon is lenient about an unknown name and
+    /// a typo would otherwise start a plausible shell with none of the
+    /// profile's environment -- the same reason the launcher warns rather than
+    /// launches when the far config changed under an open menu.
     fn create_session(&self, conn: &Conn, args: &Value) -> Result<Value, ToolError> {
-        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
-        let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let mut command = args.get("command").and_then(Value::as_str).unwrap_or("").to_string();
+        let mut cwd = args.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+        let profile = opt_str(args, "profile")?.unwrap_or_default().trim().to_string();
         let cols = opt_u16(args, "cols")?.unwrap_or(120);
         let rows = opt_u16(args, "rows")?.unwrap_or(30);
-        let addr = conn.create_session(command, cwd, cols, rows)?;
-        Ok(json!({ "session": Resolver::format(addr), "cols": cols, "rows": rows }))
+        if !profile.is_empty() {
+            // A listing is a *question* (#360), and its reply carries a fresh
+            // offer whenever the far config changed -- so this is what makes
+            // a profile saved a moment ago launchable, rather than whichever
+            // offer this connection happened to open with.
+            conn.list_sessions()?;
+            let (found, offered) = conn.with(|s| {
+                let profiles = s.offer.as_ref().map_or(&[][..], |o| o.profiles.as_slice());
+                (
+                    profiles.iter().find(|p| p.name == profile).cloned(),
+                    profiles.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+                )
+            });
+            let Some(published) = found else {
+                return Err(ToolError::NoSuchProfile {
+                    label: conn.label().to_string(),
+                    profile,
+                    offered: if offered.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        offered.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                    },
+                });
+            };
+            if command.is_empty() {
+                command = published.command;
+            }
+            if cwd.is_empty() {
+                cwd = published.starting_directory;
+            }
+        }
+        let addr = conn.create_session(&command, &cwd, &profile, cols, rows)?;
+        let mut out = json!({ "session": Resolver::format(addr), "cols": cols, "rows": rows });
+        if !profile.is_empty() {
+            out["profile"] = json!(profile);
+        }
+        Ok(out)
     }
 
     fn close_session(&self, conn: &Conn, addr: SessionAddr) -> Result<Value, ToolError> {
