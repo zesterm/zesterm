@@ -1817,9 +1817,12 @@ fn env_probe(path: &std::path::Path, var: &str) -> Option<String> {
 fn profile_seed(var: &str, out: &std::path::Path) -> String {
     // TOML basic strings take backslash escapes, and a Windows temp path is
     // full of them; a literal string does not, and the daemon's splitter
-    // then sees the path as written.
+    // then sees the path as written. The *multi-line* literal form, because
+    // the unix command quotes its output path with single quotes, which a
+    // one-line literal cannot contain -- review's catch, on a seed that only
+    // Windows had run.
     format!(
-        "[profiles.probe]\ncommand = '{}'\n\n[profiles.probe.env]\n{var} = \"from-the-host\"\n",
+        "[profiles.probe]\ncommand = '''{}'''\n\n[profiles.probe.env]\n{var} = \"from-the-host\"\n",
         write_env_cmd(var, out)
     )
 }
