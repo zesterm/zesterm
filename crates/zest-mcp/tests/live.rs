@@ -125,8 +125,12 @@ fn serve_daemon_cfg(
         offer: Some(zest_daemon::offer::OfferSource::new({
             let mut offer = zest_daemon::offer::facts("mcp-test-shell".into());
             if let Some(path) = &config_path {
-                let table: toml::Table =
+                let mut table: toml::Table =
                     std::fs::read_to_string(path).expect("seed").parse().expect("seed parses");
+                // Migrated, as the seam's own reader migrates: the offer and
+                // the spawn path must describe one config, or a seed written
+                // in an older spelling would be offered and then not applied.
+                zest_config::migrate::migrate(&mut table);
                 let layers = [zest_config::Layer { source: zest_config::Source::User, table }];
                 offer.profiles = zest_daemon::offer::profiles_of(
                     &zest_config::cascade::resolve(&layers).settings,

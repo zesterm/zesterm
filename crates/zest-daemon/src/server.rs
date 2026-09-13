@@ -4377,7 +4377,7 @@ mod tests {
     }
 
     #[test]
-    fn a_launchs_own_env_beats_the_hosts_profile_entry() {
+    fn a_launch_entry_beats_the_hosts_profile_entry() {
         // The order #487 states: host's profile first, the launch's entries
         // on top. The native app sends its *own* profile's resolved entries
         // beside the name, and a viewer's same-named profile is the one the
