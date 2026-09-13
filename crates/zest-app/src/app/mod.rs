@@ -2,10 +2,10 @@
 //!
 //! The crate's largest file, being split one concern at a time (#554). The
 //! rule for what goes in a child and what stays here: a child module can see
-//! this module's private items, and this module cannot see a child's -- so the
-//! *state* stays beside `App` and the *code* moves out. No field on `App` and
-//! no item outside this module changes visibility; a moved item gains exactly
-//! the `pub(super)` its old callers here already had by sharing one file.
+//! this module's private items, while this module cannot see a child's — so the
+//! *state* stays beside `App` and the *code* moves out. No field on `App` and no
+//! item outside this module changes visibility; a moved item gains exactly the
+//! `pub(super)` that sharing one file used to give it implicitly.
 
 mod gpu;
 
@@ -2026,7 +2026,6 @@ fn spawn_pairing_clock(
     }
 }
 
-/// The live GPU state, created once the window exists.
 /// A window size computed from `window.columns` / `window.rows`, and the font
 /// stack it was measured with so the caller need not build one twice.
 struct SizedFromCells {
@@ -2039,6 +2038,7 @@ struct SizedFromCells {
     fonts: Box<Fonts>,
 }
 
+/// The live GPU state, created once the window exists.
 struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,

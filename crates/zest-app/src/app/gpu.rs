@@ -219,17 +219,6 @@ pub(super) fn capture_frame(gpu: &mut Gpu, scene: &zest_render_wgpu::Scene, path
     }
 }
 
-/// How the compositor should treat this surface's alpha.
-///
-/// Transparency is adapter-dependent on Windows: DX12 reports `Opaque` on every
-/// adapter, and Vulkan only on some (ADR-003). Never silently ignore the
-/// setting — a window that stays opaque because the hardware cannot do better
-/// is a fact worth logging, and one that stays opaque because nobody asked the
-/// question again is a bug.
-///
-/// Free-standing because this decision is now made twice: once at startup, and
-/// again whenever `window.opacity` changes on a live window. Two copies of it
-/// would be two chances to disagree about what the adapter can do.
 /// The backends to try, in order, on this platform.
 ///
 /// A free function so a test can hold it against
@@ -248,6 +237,17 @@ fn preferred_backends() -> &'static [wgpu::Backends] {
     }
 }
 
+/// How the compositor should treat this surface's alpha.
+///
+/// Transparency is adapter-dependent on Windows: DX12 reports `Opaque` on every
+/// adapter, and Vulkan only on some (ADR-003). Never silently ignore the
+/// setting — a window that stays opaque because the hardware cannot do better
+/// is a fact worth logging, and one that stays opaque because nobody asked the
+/// question again is a bug.
+///
+/// Free-standing because this decision is now made twice: once at startup, and
+/// again whenever `window.opacity` changes on a live window. Two copies of it
+/// would be two chances to disagree about what the adapter can do.
 pub(super) fn alpha_mode_for(
     want_transparency: bool,
     supported: &[wgpu::CompositeAlphaMode],
