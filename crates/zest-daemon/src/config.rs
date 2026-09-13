@@ -345,13 +345,19 @@ fn nearest(typed: &str, keys: &[String], profile: bool) -> String {
 /// `offer.rs` uses: that resolves the *real* config directory, and this has to
 /// resolve the seam's file so a test is not reading the developer's own
 /// settings. The layer set is otherwise the same — user file only, no profile
-/// selected and no workspace layer, which is what the daemon runs on.
-fn load_at(path: &Path) -> (zest_config::Resolved, Vec<String>, bool) {
+/// selected and no workspace layer, which is what the daemon runs on — and so
+/// is the migration step, because the spawn path reads through here too
+/// (#559): a legacy file that `load` would have upgraded in memory must not
+/// spawn a shell from its un-upgraded keys.
+pub(crate) fn load_at(path: &Path) -> (zest_config::Resolved, Vec<String>, bool) {
     let exists = path.is_file();
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut problems = Vec::new();
     let table = match text.parse::<toml::Table>() {
-        Ok(t) => t,
+        Ok(mut t) => {
+            zest_config::migrate::migrate(&mut t);
+            t
+        }
         Err(e) => {
             // Reported, never swallowed, and worded for the case that actually
             // happens: an editor mid-save. A client told "the file did not
@@ -524,6 +530,9 @@ fn project_profile(name: &str, r: &zest_config::profiles::ProfileResolved) -> Co
             Some(zest_config::profiles::ColorFrom::Host) => "host".into(),
             None => String::new(),
         },
+        // The merged map, which is what a launch uses; a writer wants
+        // `own_env`, and goes through `SetConfig` rather than reading this.
+        env: r.meta.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         overrides: overrides
             .into_iter()
             .map(|(key, value)| {

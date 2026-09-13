@@ -1514,8 +1514,16 @@ impl Connection {
                 // `shell_integration` branch: `shell.env` has nothing to do
                 // with command blocks, and hanging it off that switch would
                 // make one setting silently disable another.
-                let settings =
-                    zest_config::load(&zest_config::Options::default()).resolved.settings;
+                //
+                // Through the config seam when there is one -- the same file
+                // `GetConfig` answers from, and the only way a test can put a
+                // profile in front of this arm without writing the
+                // developer's own config (`ConfigSeam`'s reason for existing).
+                // A daemon with no seam reads what it always did.
+                let settings = match &self.config.settings {
+                    Some(seam) => crate::config::load_at(&seam.path).0.settings,
+                    None => zest_config::load(&zest_config::Options::default()).resolved.settings,
+                };
                 // After `command_line` is settled, because which shell this is
                 // decides what gets injected -- and a client may have asked for
                 // something that is not a shell at all.
@@ -1553,14 +1561,43 @@ impl Connection {
                 // what makes "`${env:…}` never reads a sibling" true by
                 // construction rather than by rule.
                 let ctx = launch_expand_context(&profile, spec.effective_env());
-                let launched: Vec<(String, String)> = env
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let v = zest_config::profiles::expand(&v, &ctx);
-                        (k, v)
-                    })
-                    .collect();
-                spec.layer_env(launched, &injected);
+                let expand = |pairs: Vec<(String, String)>| -> Vec<(String, String)> {
+                    pairs
+                        .into_iter()
+                        .map(|(k, v)| {
+                            let v = zest_config::profiles::expand(&v, &ctx);
+                            (k, v)
+                        })
+                        .collect()
+                };
+                // The named profile's own environment, when this machine has
+                // a profile by that name -- #487's phase 3. `HostProfile`
+                // deliberately publishes no `env`, so a client launching a
+                // profile it learned from the offer cannot carry the entries
+                // itself; the host that owns the profile is the one that
+                // applies them (#559). Beneath the launch's own entries, so a
+                // viewer's same-named profile still wins per key -- ADR-014's
+                // rule for a collision, applied to the environment.
+                //
+                // A name this machine has no profile for is not a refusal:
+                // the app's local path sends its own profile's name beside
+                // the resolved entries, and refusing over a file the two read
+                // a moment apart would fail a launch that carried everything
+                // it needed. Placeholders still resolve, as they always have.
+                // `list_profiles` never lists `defaults`, so nobody can launch
+                // the layer every profile falls through to.
+                //
+                // No new privilege: `command` is already arbitrary execution
+                // here, so a client that can name a profile could already
+                // print its variables from inside the shell.
+                if !profile.is_empty() {
+                    let root = zest_config::profiles::root_of(&settings);
+                    if zest_config::profiles::list_profiles(&root).contains(&profile) {
+                        let meta = zest_config::profiles::resolve_profile(&root, &profile).meta;
+                        spec.layer_env(expand(meta.env.into_iter().collect()), &injected);
+                    }
+                }
+                spec.layer_env(expand(env), &injected);
                 // Made once the values are final, and only when something
                 // actually names it: a launch that never mentions
                 // `${profile_dir}` must not leave a directory behind on every
@@ -4274,6 +4311,122 @@ mod tests {
         drop(registry);
     }
 
+    /// A daemon whose config file holds `[profiles.probe.env]`, and a launch
+    /// against it that names the profile and carries `extra` itself.
+    ///
+    /// Asserts the scratch file was seeded before anything else, for the
+    /// reason `ConfigScratch` states: a seam at the wrong path makes the
+    /// daemon answer out of compiled defaults, and every assertion below
+    /// would then be about the test's own config rather than the wire.
+    fn launch_naming_profile(
+        tag: &str,
+        seed: &str,
+        profile: &str,
+        var: &str,
+        extra: Vec<(String, String)>,
+    ) -> (ConfigScratch, Arc<Registry>, std::path::PathBuf) {
+        let s = ConfigScratch::new(tag, seed);
+        assert!(s.text().contains("[profiles."), "the scratch config was not seeded");
+        let (mut c, registry) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+
+        let out = std::env::temp_dir().join(format!("zest-env-{tag}-{}", std::process::id()));
+        let _ = std::fs::write(&out, "sentinel");
+        peer.send(
+            &mut c,
+            &ClientMessage::CreateSession {
+                command: write_env_cmd(var, &out),
+                cwd: String::new(),
+                cols: 80,
+                rows: 24,
+                env: extra,
+                profile: profile.into(),
+            },
+        );
+        assert!(
+            wait_for(|| std::fs::read_to_string(&out).is_ok_and(|s| s != "sentinel")),
+            "the child never ran, so nothing here is about the profile"
+        );
+        (s, registry, out)
+    }
+
+    #[test]
+    fn a_launch_naming_a_profile_gets_that_profiles_env_from_the_host() {
+        // #487's phase 3, from the side an agent meets it (#559): a
+        // `HostProfile` carries no `env`, so a client that learned a profile
+        // from the offer can send its name and nothing else -- and the
+        // machine that owns the profile must be the one to apply it. Asserted
+        // from inside the child, because a `profile` that the daemon merely
+        // *accepted* is exactly what shipped before: the field was on the
+        // wire and resolved placeholders only.
+        let (s, registry, out) = launch_naming_profile(
+            "host-profile",
+            "[profiles.probe.env]\nZESTERM_TEST_HOST_PROFILE = \"from-the-host\"\n",
+            "probe",
+            "ZESTERM_TEST_HOST_PROFILE",
+            Vec::new(),
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_HOST_PROFILE").expect("the child wrote it");
+        assert_eq!(
+            got, "from-the-host",
+            "a launch that names a profile and carries no env must still get the \
+             profile's env, applied by the host that owns it: {got:?}"
+        );
+        let _ = std::fs::remove_file(&out);
+        drop((s, registry));
+    }
+
+    #[test]
+    fn a_launchs_own_env_beats_the_hosts_profile_entry() {
+        // The order #487 states: host's profile first, the launch's entries
+        // on top. The native app sends its *own* profile's resolved entries
+        // beside the name, and a viewer's same-named profile is the one the
+        // user can edit -- ADR-014's collision rule, per key.
+        let (s, registry, out) = launch_naming_profile(
+            "host-profile-order",
+            "[profiles.probe.env]\nZESTERM_TEST_PROFILE_ORDER = \"from-the-host\"\n",
+            "probe",
+            "ZESTERM_TEST_PROFILE_ORDER",
+            vec![("ZESTERM_TEST_PROFILE_ORDER".into(), "from-the-launch".into())],
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_PROFILE_ORDER").expect("the child wrote it");
+        assert_eq!(
+            got, "from-the-launch",
+            "the launch's own entry must win over the host's profile entry: {got:?}"
+        );
+        let _ = std::fs::remove_file(&out);
+        drop((s, registry));
+    }
+
+    #[test]
+    fn a_profile_the_host_does_not_have_changes_nothing() {
+        // Lenient on purpose: the app's local path names its own profile
+        // beside the resolved entries, and a refusal over a file the two read
+        // a moment apart would fail a launch that carried everything it
+        // needed. So an unknown name keeps exactly today's behaviour
+        // (placeholders still resolve --
+        // `a_launch_envs_placeholders_resolve_on_the_host_not_the_client`),
+        // and no *other* profile's entries leak in, which is the failure
+        // `resolve_profile`'s empty-over-Defaults answer would produce if the
+        // lookup did not check the name exists: Defaults' env would apply to
+        // every launch that named anything.
+        let (s, registry, out) = launch_naming_profile(
+            "host-profile-unknown",
+            "[profiles.other.env]\nZESTERM_TEST_PROFILE_UNKNOWN = \"leaked\"\n\
+             [profiles.defaults.env]\nZESTERM_TEST_PROFILE_UNKNOWN = \"leaked-from-defaults\"\n",
+            "nope",
+            "ZESTERM_TEST_PROFILE_UNKNOWN",
+            Vec::new(),
+        );
+        let got = env_probe(&out, "ZESTERM_TEST_PROFILE_UNKNOWN").expect("the child wrote it");
+        assert!(
+            got.is_empty(),
+            "an unknown profile must not apply another profile's or Defaults' entries: {got:?}"
+        );
+        let _ = std::fs::remove_file(&out);
+        drop((s, registry));
+    }
+
     /// A child that fails, with a status nothing could have guessed.
     ///
     /// `3` rather than `1`: a `1` is what a dozen accidents produce, so a test
@@ -6048,6 +6201,55 @@ mod tests {
         assert_eq!(d.host, "big-linux", "a file view shows the host key it was asked to edit");
         assert_eq!(d.command, "bash");
         assert_eq!(d.icon, "D", "and a value inherited from the defaults layer");
+    }
+
+    #[test]
+    fn a_profile_reads_back_with_the_env_it_launches_as_the_file_spells_it() {
+        // The read half of what `SetConfig` could already write (#551): a
+        // client about to launch a profile, or to edit it, has to see the
+        // environment it sets -- and see it merged the way a launch merges it
+        // (Defaults per entry, the profile winning), unexpanded, because the
+        // placeholders belong to the machine that runs the profile at spawn.
+        let s = ConfigScratch::new(
+            "profileenv",
+            "[profiles.defaults.env]\nSHARED = \"fleet-wide\"\nOVERRIDDEN = \"from-defaults\"\n\n\
+             [profiles.work.env]\nOVERRIDDEN = \"from-work\"\nDIR = \"${profile_dir}/claude\"\n",
+        );
+        let (mut c, _r) = conn_with(s.daemon(false));
+        let mut peer = authenticate(&mut c);
+        let out = peer.send(
+            &mut c,
+            &ClientMessage::GetConfig {
+                keys: vec!["nothing.at.all".into()],
+                profile: "work".into(),
+                want_fields: false,
+                want_themes: false,
+            },
+        );
+        let one = out.into_iter().next().expect("a reply");
+        let HostMessage::ConfigState { profile_detail, .. } = &one else {
+            panic!("expected ConfigState")
+        };
+        let d = profile_detail.as_ref().expect("the named profile");
+        let env: std::collections::BTreeMap<_, _> = d.env.iter().cloned().collect();
+        assert_eq!(
+            env.get("SHARED").map(String::as_str),
+            Some("fleet-wide"),
+            "an entry only Defaults sets is part of what the profile launches with: {:?}",
+            d.env
+        );
+        assert_eq!(
+            env.get("OVERRIDDEN").map(String::as_str),
+            Some("from-work"),
+            "the profile's own entry wins per key: {:?}",
+            d.env
+        );
+        assert_eq!(
+            env.get("DIR").map(String::as_str),
+            Some("${profile_dir}/claude"),
+            "values are the file's spelling, never one machine's expansion: {:?}",
+            d.env
+        );
     }
 
     #[test]

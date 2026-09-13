@@ -351,10 +351,17 @@ impl Conn {
     }
 
     /// Create a session and wait for the host to name it.
+    ///
+    /// `profile` is one the *host* publishes, by name, and nothing more
+    /// travels with it: the host applies that profile's environment itself
+    /// (#559), because the offer deliberately carries none and this client
+    /// holds no config of the far machine's to resolve one from. An agent's
+    /// session otherwise takes the host's own `shell.env` and nothing more.
     pub fn create_session(
         &self,
         command: &str,
         cwd: &str,
+        profile: &str,
         cols: u16,
         rows: u16,
     ) -> Result<SessionAddr, ConnError> {
@@ -367,10 +374,8 @@ impl Conn {
             cwd: cwd.to_string(),
             cols,
             rows,
-            // An agent's session takes the host's own `shell.env` and nothing
-            // more: there is no profile behind an MCP tool call to carry one.
             env: Vec::new(),
-            profile: String::new(),
+            profile: profile.to_string(),
         });
         self.wait_for(|s| s.created)
     }

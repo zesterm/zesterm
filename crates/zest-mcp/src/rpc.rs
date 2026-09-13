@@ -416,16 +416,31 @@ fn tool_definitions() -> Value {
             "description":
                 "Start a new terminal on a host and return its id. Prefer this over \
                  typing into somebody's existing session: a shell of your own cannot \
-                 interrupt their work, and its scrollback is yours to read.",
+                 interrupt their work, and its scrollback is yours to read. To start \
+                 it under one of that host's profiles -- a separate login, a tool's own \
+                 config directory -- name the profile; `hosts` lists what each machine \
+                 offers.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "What to run. Empty means the host's default shell."
+                        "description": "What to run. Empty means the profile's command when one \
+                                        is named, else the host's default shell."
                     },
                     "host": { "type": "string", "description": HOST_DESC },
-                    "cwd": { "type": "string", "description": "Working directory on that host." },
+                    "cwd": { "type": "string", "description": "Working directory on that host. \
+                                                              Empty means the profile's starting \
+                                                              directory when one is named." },
+                    "profile": {
+                        "type": "string",
+                        "description":
+                            "A profile that host publishes (see `hosts`). The host applies the \
+                             profile's environment itself; its command and starting directory \
+                             fill in whatever `command` and `cwd` leave empty. Refused if the \
+                             host offers no profile by that name -- the reply says what it \
+                             does offer."
+                    },
                     "cols": { "type": "integer", "description": "Columns, 1-1000. Default 120." },
                     "rows": { "type": "integer", "description": "Rows, 1-1000. Default 30." }
                 }

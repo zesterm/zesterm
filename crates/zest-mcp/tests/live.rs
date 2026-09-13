@@ -116,9 +116,24 @@ fn serve_daemon_cfg(
         // make the first listing carry nothing, which is indistinguishable from
         // a daemon that predates the field -- and then the assertion below
         // would be about the test's own config rather than about the wire.
-        offer: Some(zest_daemon::offer::OfferSource::new(zest_daemon::offer::facts(
-            "mcp-test-shell".into(),
-        ))),
+        //
+        // Its profiles come from the scratch config when there is one, the
+        // way the real daemon's do from its own file: `create_session` with a
+        // profile checks the name against the offer and the daemon applies
+        // the env from the file, and a seed that fed only one of the two would
+        // test half the path.
+        offer: Some(zest_daemon::offer::OfferSource::new({
+            let mut offer = zest_daemon::offer::facts("mcp-test-shell".into());
+            if let Some(path) = &config_path {
+                let table: toml::Table =
+                    std::fs::read_to_string(path).expect("seed").parse().expect("seed parses");
+                let layers = [zest_config::Layer { source: zest_config::Source::User, table }];
+                offer.profiles = zest_daemon::offer::profiles_of(
+                    &zest_config::cascade::resolve(&layers).settings,
+                );
+            }
+            offer
+        })),
         settings: config_path
             .map(|path| zest_daemon::config::ConfigSeam { path, writes: true }),
     };
@@ -306,7 +321,7 @@ fn creating_a_session_names_the_one_it_created() {
     let conn = dial(&addr, "zest-mcp test");
 
     let created = conn
-        .create_session(&quiet_cmd(), "", COLS, ROWS)
+        .create_session(&quiet_cmd(), "", "", COLS, ROWS)
         .expect("the daemon answers a create with a listing naming it");
 
     assert!(
@@ -323,7 +338,7 @@ fn attaching_builds_a_replica_from_the_keyframe_that_answers_it() {
     let (addr, registry) = serve_daemon();
     let conn = dial(&addr, "zest-mcp test");
 
-    let created = conn.create_session(&quiet_cmd(), "", COLS, ROWS).expect("create");
+    let created = conn.create_session(&quiet_cmd(), "", "", COLS, ROWS).expect("create");
     conn.attach(created, COLS, ROWS, true).expect("attach");
 
     let size = conn.with(|s| s.replica(created).map(zest_mcp::Replica::size));
@@ -346,7 +361,7 @@ fn an_observer_does_not_resize_the_session_someone_else_is_rendering() {
     let (addr, registry) = serve_daemon();
 
     let human = dial(&addr, "a window");
-    let created = human.create_session(&quiet_cmd(), "", COLS, ROWS).expect("create");
+    let created = human.create_session(&quiet_cmd(), "", "", COLS, ROWS).expect("create");
     human.attach(created, COLS, ROWS, false).expect("the human attaches and votes");
 
     let session = registry.get(created.session).expect("the session exists");
@@ -381,7 +396,7 @@ fn detaching_leaves_the_session_running() {
     let (addr, registry) = serve_daemon();
     let conn = dial(&addr, "zest-mcp test");
 
-    let created = conn.create_session(&quiet_cmd(), "", COLS, ROWS).expect("create");
+    let created = conn.create_session(&quiet_cmd(), "", "", COLS, ROWS).expect("create");
     conn.attach(created, COLS, ROWS, true).expect("attach");
     conn.detach(created);
 
@@ -426,7 +441,7 @@ fn a_recovery_orphaned_by_our_own_detach_is_not_worn_by_the_next_attach() {
     let (addr, registry) = serve_daemon();
     let conn = dial(&addr, "zest-mcp test");
 
-    let created = conn.create_session(&long_lived_cmd(), "", COLS, ROWS).expect("create");
+    let created = conn.create_session(&long_lived_cmd(), "", "", COLS, ROWS).expect("create");
     conn.attach(created, COLS, ROWS, true).expect("the first attach");
     conn.send(zest_proto::ClientMessage::RequestKeyframe { session: created });
     conn.detach(created);
@@ -462,7 +477,7 @@ fn a_keyframe_answering_a_pre_detach_recovery_mints_no_ghost_replica() {
     let (addr, registry) = serve_daemon();
     let conn = dial(&addr, "zest-mcp test");
 
-    let created = conn.create_session(&long_lived_cmd(), "", COLS, ROWS).expect("create");
+    let created = conn.create_session(&long_lived_cmd(), "", "", COLS, ROWS).expect("create");
     conn.attach(created, COLS, ROWS, true).expect("attach");
     conn.send(zest_proto::ClientMessage::RequestKeyframe { session: created });
     conn.detach(created);
@@ -1766,4 +1781,137 @@ fn search_blocks_answers_from_the_connected_hosts_and_dials_none() {
 
     let a = tools.resolver().resolve(&session).expect("the id this server minted");
     registry.close(a.session);
+}
+
+/// A command that writes one environment variable to `path`, in each
+/// platform's spelling, and the reader for what it wrote.
+///
+/// The daemon's own tests carry the same pair and the same two rules: no
+/// backslashes anywhere (`split_command_line` eats them, #285), and an *unset*
+/// variable writes nothing rather than its own name, so the empty file is a
+/// real answer. `set VAR` prints `VAR=value`; `printenv` prints the bare
+/// value; `env_probe` folds the two.
+fn write_env_cmd(var: &str, path: &std::path::Path) -> String {
+    let path = path.display();
+    if cfg!(windows) {
+        format!("cmd.exe /c set {var}> \"{path}\"")
+    } else {
+        format!("/bin/sh -c \"printenv {var} > '{path}'\"")
+    }
+}
+
+fn env_probe(path: &std::path::Path, var: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = raw.trim();
+    Some(raw.strip_prefix(&format!("{var}=")).unwrap_or(raw).to_string())
+}
+
+/// The seed for the profile tests: a profile whose *command* writes the
+/// variable its *env* sets, so one launch proves both that the published
+/// command was used and that the host applied the environment it never
+/// publishes.
+fn profile_seed(var: &str, out: &std::path::Path) -> String {
+    // TOML basic strings take backslash escapes, and a Windows temp path is
+    // full of them; a literal string does not, and the daemon's splitter
+    // then sees the path as written.
+    format!(
+        "[profiles.probe]\ncommand = '{}'\n\n[profiles.probe.env]\n{var} = \"from-the-host\"\n",
+        write_env_cmd(var, out)
+    )
+}
+
+/// The one live test that waits on a child, and why it is allowed to: the
+/// claim under test is *what environment the child was born with*, and no
+/// message on the wire carries that. The child is `cmd.exe` / `sh`, which
+/// start in milliseconds on the runners that made PowerShell a problem (#285),
+/// and the wait is bounded.
+#[test]
+fn create_session_with_a_profile_launches_it_with_the_hosts_env() {
+    let out = std::env::temp_dir().join(format!("zest-mcp-profile-env-{}", std::process::id()));
+    let _ = std::fs::write(&out, "sentinel");
+    let (addr, _path) =
+        serve_daemon_serving_config("profile", &profile_seed("ZESTERM_MCP_PROFILE", &out));
+    let mut t = tools(dial(&addr, "profile-launch"));
+
+    let listed = t.call("hosts", &serde_json::json!({})).expect("hosts");
+    assert!(
+        listed.to_string().contains("\"probe\""),
+        "the seeded profile must be published before it can be named: {listed}"
+    );
+
+    // No `command`: the profile's own is what runs.
+    let created = t
+        .call("create_session", &serde_json::json!({ "profile": "probe", "cols": COLS, "rows": ROWS }))
+        .expect("a published profile launches");
+    assert_eq!(created["profile"], "probe", "the reply says what was applied: {created}");
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < give_up
+        && std::fs::read_to_string(&out).is_ok_and(|s| s == "sentinel")
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let got = env_probe(&out, "ZESTERM_MCP_PROFILE").expect("the child wrote it");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(
+        got, "from-the-host",
+        "a session started under a profile must get that profile's env, applied by the \
+         host that owns it -- the client sent the name and nothing else: {got:?}"
+    );
+}
+
+#[test]
+fn create_session_refuses_a_profile_the_host_does_not_offer() {
+    let out = std::env::temp_dir().join(format!("zest-mcp-profile-nope-{}", std::process::id()));
+    let (addr, _path) =
+        serve_daemon_serving_config("profile-nope", &profile_seed("ZESTERM_MCP_NOPE", &out));
+    let mut t = tools(dial(&addr, "profile-refused"));
+
+    let err = t
+        .call("create_session", &serde_json::json!({ "profile": "nope" }))
+        .expect_err("a name the host does not publish is a refusal, not a plain shell");
+    let text = err.to_string();
+    assert!(
+        text.contains("`nope`") && text.contains("`probe`"),
+        "the refusal names what was asked and what is offered: {text}"
+    );
+
+    let listed = t.call("sessions", &serde_json::json!({})).expect("sessions");
+    assert!(
+        listed["sessions"].as_array().expect("array").is_empty(),
+        "nothing was started behind the refusal: {listed}"
+    );
+}
+
+#[test]
+fn an_explicit_command_beats_the_profiles() {
+    // The profile's command would write the probe file; `quiet_cmd` prints
+    // `mcp` to the screen instead. Asserted on the screen, because a session
+    // listing does not carry the command, and the child is the only witness.
+    let out = std::env::temp_dir().join(format!("zest-mcp-profile-cmd-{}", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let (addr, _path) =
+        serve_daemon_serving_config("profile-cmd", &profile_seed("ZESTERM_MCP_CMD", &out));
+    let mut t = tools(dial(&addr, "profile-command"));
+
+    let created = t
+        .call(
+            "create_session",
+            &serde_json::json!({ "profile": "probe", "command": quiet_cmd(), "cols": COLS, "rows": ROWS }),
+        )
+        .expect("create_session");
+    let session = created["session"].as_str().expect("a session id").to_string();
+
+    let give_up = std::time::Instant::now() + Duration::from_secs(30);
+    let mut seen = String::new();
+    while std::time::Instant::now() < give_up && !seen.contains("mcp") {
+        let screen = t.call("screen", &serde_json::json!({ "session": session })).expect("screen");
+        seen = screen["text"].as_str().unwrap_or_default().to_string();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(seen.contains("mcp"), "the explicit command ran, not the profile's: {seen:?}");
+    assert!(
+        !out.exists(),
+        "the profile's command must not have run beside the explicit one"
+    );
 }

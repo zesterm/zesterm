@@ -597,10 +597,16 @@ A local-only editor is the half-feature this roadmap declines. Epic: #445.
       verbatim (panes still carry no profile of their own), and the editor row
       wears an `applies to new sessions` chip — a running process cannot be
       handed a new environment, and of nine terminals surveyed none says so in
-      its UI. Open: a *published*
-      profile's environment, which is the host's to apply — `HostProfile`
+      its UI. Phase 3 (#559): a
+      *published* profile's environment is the host's to apply — `HostProfile`
       deliberately carries none, so no machine hands its profiles'
-      environments to every paired device (phase 3).
+      environments to every paired device — and now it does: a launch that
+      names a profile the host has gets that profile's env beneath its own
+      entries. `zest-mcp`'s `create_session` takes `profile`, checked against
+      the host's offer (a typo'd name is a refusal naming what *is* offered,
+      not a plausible shell with none of the environment), the native app's
+      remote launches send the name, and `config` shows a profile's `env`
+      (`ConfigProfile.env`). The web client still sends no name: #560.
 - [x] **A launch can name its child's environment** (#488). `CreateSession`
       grew an additive `env`, skipped when empty so an ordinary launch is
       byte-identical to what a peer predating it sent. It is a bug fix wearing

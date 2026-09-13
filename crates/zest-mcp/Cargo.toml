@@ -57,6 +57,12 @@ serde_json = { workspace = true }
 # `tests/live.rs` drives `serve()` in-process, so there is no binary to find and
 # no socket path to collide on.
 zest-daemon = { workspace = true }
+# So the in-process daemon's *offer* can be built from the same scratch config
+# its settings seam reads: `create_session` with a profile validates the name
+# against the offer and the daemon applies the env from the file, and a test
+# has to reach both halves through one seed.
+zest-config = { workspace = true }
+toml = { workspace = true }
 # `CommandSpec` and `PtySize`, so `tests/live.rs` can create a session straight
 # on the registry -- which is what a session opened by the app or by another
 # agent looks like from this connection, and the only way to test a listing

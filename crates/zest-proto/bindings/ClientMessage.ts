@@ -154,8 +154,8 @@ command: string, cwd: string, cols: number, rows: number,
  */
 env: Array<[string, string]>, 
 /**
- * The profile this launch came from, for resolving `env`'s
- * placeholders. Empty when no profile is behind it.
+ * The profile this launch came from. Empty when no profile is behind
+ * it.
  *
  * A *name*, not the resolved values, because `${profile_dir}` has to
  * name a directory on the machine that runs the shell. Expanded
@@ -164,11 +164,20 @@ env: Array<[string, string]>,
  * calling it configuration. Same rule ADR-014 already applies to
  * `starting_directory`.
  *
- * It resolves placeholders and nothing else: the host does **not**
- * look this name up in its own config. A launch says what environment
- * it wants; only where `${profile_dir}` lands is the host's to decide.
- * (A published profile the host owns is #487's phase 3, and a
- * different question.)
+ * The host does two things with it. It resolves `env`'s placeholders
+ * against its own directories, and — when it has a profile by this
+ * name — it applies that profile's own `env` *beneath* the entries
+ * the launch carried (#487's phase 3, #559). That second half is what
+ * lets a client launch a profile it learned from the host's offer:
+ * [`HostProfile`] deliberately publishes no environment, so the
+ * machine that owns the profile is the only one that can apply it.
+ * The launch's entries win per key, so a viewer's same-named profile
+ * beats the host's — ADR-014's collision rule. A name the host has no
+ * profile for changes nothing beyond expansion; it is not a refusal,
+ * because a client that already resolved its own profile carries
+ * everything it needs. No new privilege: `command` is already
+ * arbitrary execution on the host, so a client that can name a
+ * profile could already read its variables from inside the shell.
  */
 profile: string, } | { "t": "attach", session: SessionAddr, cols: number, rows: number, observe: boolean, } | { "t": "detach", session: SessionAddr, } | { "t": "input", session: SessionAddr, bytes: Array<number>, } | { "t": "resize", session: SessionAddr, cols: number, rows: number, } | { "t": "ack", session: SessionAddr, seq: Seq, } | { "t": "request_scrollback", session: SessionAddr, from_line: number, count: number, } | { "t": "close_session", session: SessionAddr, } | { "t": "read_file", 
 /**
