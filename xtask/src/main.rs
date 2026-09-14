@@ -719,8 +719,10 @@ const SPAWN_ALLOWED: &[(&str, &str)] = &[
 /// benches and `tests/` directories are dev tools run from a shell, which has
 /// a console to inherit, and a flash there is nobody's bug.
 ///
-/// A file's test modules are skipped the same way and for the same reason, but
-/// *skipped over* rather than stopped at. This used to `break` on the first
+/// Test-only items are skipped the same way and for the same reason, but
+/// *skipped over* rather than stopped at. Any top-level item behind
+/// `#[cfg(test)]` counts, not only a `mod` -- the tree has `fn` helpers gated
+/// that way too. This used to `break` on the first
 /// column-0 `#[cfg(test)]`, on the stated assumption that it "is how this
 /// workspace spells a trailing `mod tests` and nothing else" -- which was not
 /// true of a single large file in the tree. Plenty interleave a test module
@@ -741,9 +743,10 @@ fn scan_spawns(text: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut n = 0usize;
     while n < lines.len() {
-        // A column-0 `cfg(test)` attribute opens a test item, which runs in a
-        // test binary that has a console of its own. Skip its span and keep
-        // reading: a test module is very often not the last thing in a file.
+        // A column-0 `cfg(test)` attribute opens a test-only item -- a `mod`,
+        // but equally a `fn` or a `use` -- which runs in a test binary that has
+        // a console of its own. Skip its span and keep reading: a test item is
+        // very often not the last thing in a file.
         if opens_test_item(lines[n]) {
             n = end_of_item(&lines, n);
             continue;
@@ -775,16 +778,39 @@ fn opens_test_item(line: &str) -> bool {
         .any(|tok| tok == "test")
 }
 
-/// The index just past the item beginning at `start`, found by the closing
-/// brace in the same column.
+/// The index just past the item beginning at `start`.
 ///
-/// Brace-counting would be defeated by a brace in a string or a comment, which
-/// test code is full of. Column-0 `}` is what this workspace's rustfmt-free
-/// style actually guarantees for a top-level item, and if one is missing the
-/// scan simply ends -- which is the safe direction for the *rest* of the file
-/// only because a file whose top-level braces do not close will not compile.
+/// Two shapes, and getting the second wrong would reintroduce the very bug this
+/// gate was just fixed for. `#[cfg(test)] mod tests { .. }` is brace-delimited
+/// and ends at the closing brace in column 0. But `#[cfg(test)] mod testing;`
+/// is a *declaration* -- `zest-cloud/src/lib.rs` has one -- and has no braces
+/// at all, so hunting for a `}` runs past it to whatever closes next, skipping
+/// every shipped line in between.
+///
+/// So: read forward to whichever comes first, a `{` or a terminating `;`. A
+/// semicolon ends the item there. A brace means scan on to the column-0 `}`,
+/// because brace-*counting* would be defeated by a brace inside a string or a
+/// comment and test code is full of both. Column-0 `}` is what this workspace's
+/// rustfmt-free style guarantees for a top-level item; if one is missing the
+/// file does not compile, so ending the scan there costs nothing real.
 fn end_of_item(lines: &[&str], start: usize) -> usize {
-    for (offset, line) in lines.iter().enumerate().skip(start + 1) {
+    let mut n = start + 1;
+    // Past any further attributes stacked under the `cfg`.
+    while n < lines.len() && lines[n].starts_with('#') {
+        n += 1;
+    }
+    // The item's head may wrap, so read until it declares which shape it is.
+    while n < lines.len() {
+        let line = lines[n];
+        if line.contains('{') {
+            break;
+        }
+        if line.trim_end().ends_with(';') {
+            return n + 1; // a declaration: `mod testing;`, and nothing follows
+        }
+        n += 1;
+    }
+    for (offset, line) in lines.iter().enumerate().skip(n) {
         if *line == "}" {
             return offset + 1;
         }
@@ -912,6 +938,33 @@ fn b() {
              while the one inside `mod tests` must not: {found:?}"
         );
         assert_eq!(found[0].0, 14, "and it is reported at its real line: {found:?}");
+    }
+
+    /// A `cfg(test)` item with no braces at all, which is how the blind spot
+    /// this PR removes would have come straight back.
+    ///
+    /// `zest-cloud/src/lib.rs` declares `#[cfg(test)] mod testing;`. Hunting
+    /// for a closing brace runs past a declaration to whatever closes next,
+    /// skipping every shipped line in between -- and it happens to be harmless
+    /// in that file only because it sits on the last line of 39.
+    #[test]
+    fn a_semicolon_terminated_test_item_does_not_swallow_the_rest_of_the_file() {
+        let src = "\
+#[cfg(test)]
+mod testing;
+
+fn ship() {
+    std::process::Command::new(\"git\");
+}
+";
+        let found = scan_spawns(src);
+        assert_eq!(
+            found.len(),
+            1,
+            "`mod testing;` ends at its own semicolon, so the spawn below it is still \
+             shipped code and must be found: {found:?}"
+        );
+        assert_eq!(found[0].0, 5, "at its real line: {found:?}");
     }
 
     /// `remote.rs` spells it this way, and an equality check missed it -- so
