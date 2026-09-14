@@ -717,9 +717,107 @@ const SPAWN_ALLOWED: &[(&str, &str)] = &[
 /// The spelling, not the semantics: a `use std::process::Command as Cmd` would
 /// walk straight past. It also stops at `crates/*/src` -- `xtask`, examples,
 /// benches and `tests/` directories are dev tools run from a shell, which has
-/// a console to inherit, and a flash there is nobody's bug. Same for a file's
-/// test module: the cut is the first `#[cfg(test)]` at column 0, which is how
-/// this workspace spells a trailing `mod tests` and nothing else.
+/// a console to inherit, and a flash there is nobody's bug.
+///
+/// Test-only items are skipped the same way and for the same reason, but
+/// *skipped over* rather than stopped at. Any top-level item behind
+/// `#[cfg(test)]` counts, not only a `mod` -- the tree has `fn` helpers gated
+/// that way too. This used to `break` on the first
+/// column-0 `#[cfg(test)]`, on the stated assumption that it "is how this
+/// workspace spells a trailing `mod tests` and nothing else" -- which was not
+/// true of a single large file in the tree. Plenty interleave a test module
+/// with more shipped code below it, and everything below went unread: 18,611
+/// lines of `app.rs`, 4,124 of `zest-daemon/src/server.rs`, and 834 of
+/// `zest-app/src/platform.rs`, which was cut at line 31 of 865 and is the file
+/// that owns `shell_open`. Nothing was actually wrong down there -- every
+/// `Command::new` below a cut was inside a test -- so the gate reported green
+/// for years while covering a fraction of what it named. A gate that silently
+/// stops reading is worse than one that never claimed to.
+/// Every direct `Command::new` in one file's shipped code, as `(line, text)`.
+///
+/// Separated from the walk so the skipping rules can be tested against a
+/// literal, which is the only way to show this reads *past* a test module
+/// rather than stopping at one.
+fn scan_spawns(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found = Vec::new();
+    let mut n = 0usize;
+    while n < lines.len() {
+        // A column-0 `cfg(test)` attribute opens a test-only item -- a `mod`,
+        // but equally a `fn` or a `use` -- which runs in a test binary that has
+        // a console of its own. Skip its span and keep reading: a test item is
+        // very often not the last thing in a file.
+        if opens_test_item(lines[n]) {
+            n = end_of_item(&lines, n);
+            continue;
+        }
+        let code = lines[n].trim_start();
+        if code.contains("Command::new(") && !code.starts_with("//") {
+            found.push((n + 1, code.to_string()));
+        }
+        n += 1;
+    }
+    found
+}
+
+/// Whether a column-0 line is a `cfg(test)` attribute, in any spelling the
+/// workspace uses.
+///
+/// `#[cfg(test)]` is the common one; `remote.rs` writes
+/// `#[cfg(all(test, unix))]`, which an equality check misses entirely -- so
+/// that file's tests were being scanned as shipped code while other files had
+/// shipped code skipped as tests. Both halves of that were wrong.
+fn opens_test_item(line: &str) -> bool {
+    if !line.starts_with("#[cfg(") || !line.ends_with(")]") {
+        return false;
+    }
+    // `test` as a whole predicate, never as a substring: `#[cfg(feature =
+    // "testing")]` and `#[cfg(target_os = "fuchsia")]` must not match.
+    line["#[cfg(".len()..line.len() - 2]
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == "test")
+}
+
+/// The index just past the item beginning at `start`.
+///
+/// Two shapes, and getting the second wrong would reintroduce the very bug this
+/// gate was just fixed for. `#[cfg(test)] mod tests { .. }` is brace-delimited
+/// and ends at the closing brace in column 0. But `#[cfg(test)] mod testing;`
+/// is a *declaration* -- `zest-cloud/src/lib.rs` has one -- and has no braces
+/// at all, so hunting for a `}` runs past it to whatever closes next, skipping
+/// every shipped line in between.
+///
+/// So: read forward to whichever comes first, a `{` or a terminating `;`. A
+/// semicolon ends the item there. A brace means scan on to the column-0 `}`,
+/// because brace-*counting* would be defeated by a brace inside a string or a
+/// comment and test code is full of both. Column-0 `}` is what this workspace's
+/// rustfmt-free style guarantees for a top-level item; if one is missing the
+/// file does not compile, so ending the scan there costs nothing real.
+fn end_of_item(lines: &[&str], start: usize) -> usize {
+    let mut n = start + 1;
+    // Past any further attributes stacked under the `cfg`.
+    while n < lines.len() && lines[n].starts_with('#') {
+        n += 1;
+    }
+    // The item's head may wrap, so read until it declares which shape it is.
+    while n < lines.len() {
+        let line = lines[n];
+        if line.contains('{') {
+            break;
+        }
+        if line.trim_end().ends_with(';') {
+            return n + 1; // a declaration: `mod testing;`, and nothing follows
+        }
+        n += 1;
+    }
+    for (offset, line) in lines.iter().enumerate().skip(n) {
+        if *line == "}" {
+            return offset + 1;
+        }
+    }
+    lines.len()
+}
+
 fn check_spawn() -> ExitCode {
     let mut files = Vec::new();
     collect_rs(std::path::Path::new("crates"), &mut files);
@@ -745,19 +843,8 @@ fn check_spawn() -> ExitCode {
             }
         };
         scanned += 1;
-        for (n, line) in text.lines().enumerate() {
-            // A top-level `#[cfg(test)]` opens the test module; everything
-            // below it runs in a binary that has a console of its own.
-            if line == "#[cfg(test)]" {
-                break;
-            }
-            let code = line.trim_start();
-            if code.starts_with("//") {
-                continue; // naming the call in prose is not making it
-            }
-            if code.contains("Command::new(") {
-                violations.push(format!("{rel}:{}: {}", n + 1, code));
-            }
+        for (line_no, code) in scan_spawns(&text) {
+            violations.push(format!("{rel}:{line_no}: {code}"));
         }
     }
 
@@ -818,6 +905,81 @@ mod tests {
     /// `zest-cloud` — never to quiet a check because a direct dependency looked
     /// convenient.
     const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
+
+    /// The bug this gate had for its whole life, as a literal.
+    ///
+    /// The old scan stopped at the first column-0 `#[cfg(test)]`, so a spawn
+    /// below an interleaved test module was never read. In the real tree that
+    /// was 18,611 unread lines of `app.rs` alone.
+    #[test]
+    fn a_spawn_below_a_test_module_is_still_found() {
+        let src = "\
+fn a() {
+    quiet_command(\"git\");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {
+        std::process::Command::new(\"ls\");
+    }
+}
+
+fn b() {
+    std::process::Command::new(\"git\");
+}
+";
+        let found = scan_spawns(src);
+        assert_eq!(
+            found.len(),
+            1,
+            "the spawn in `b` is shipped code below a test module and must be found, \
+             while the one inside `mod tests` must not: {found:?}"
+        );
+        assert_eq!(found[0].0, 14, "and it is reported at its real line: {found:?}");
+    }
+
+    /// A `cfg(test)` item with no braces at all, which is how the blind spot
+    /// this PR removes would have come straight back.
+    ///
+    /// `zest-cloud/src/lib.rs` declares `#[cfg(test)] mod testing;`. Hunting
+    /// for a closing brace runs past a declaration to whatever closes next,
+    /// skipping every shipped line in between -- and it happens to be harmless
+    /// in that file only because it sits on the last line of 39.
+    #[test]
+    fn a_semicolon_terminated_test_item_does_not_swallow_the_rest_of_the_file() {
+        let src = "\
+#[cfg(test)]
+mod testing;
+
+fn ship() {
+    std::process::Command::new(\"git\");
+}
+";
+        let found = scan_spawns(src);
+        assert_eq!(
+            found.len(),
+            1,
+            "`mod testing;` ends at its own semicolon, so the spawn below it is still \
+             shipped code and must be found: {found:?}"
+        );
+        assert_eq!(found[0].0, 5, "at its real line: {found:?}");
+    }
+
+    /// `remote.rs` spells it this way, and an equality check missed it -- so
+    /// that file's *test* code was being scanned as shipped code.
+    #[test]
+    fn a_cfg_test_with_other_predicates_still_opens_a_test_item() {
+        assert!(opens_test_item("#[cfg(test)]"));
+        assert!(opens_test_item("#[cfg(all(test, unix))]"));
+        assert!(!opens_test_item("#[cfg(windows)]"));
+        assert!(
+            !opens_test_item("#[cfg(feature = \"testing\")]"),
+            "`test` as a whole predicate, never as a substring -- or a crate with a \
+             `testing` feature silently stops being scanned"
+        );
+    }
 
     #[test]
     fn every_boundary_forbids_tls_and_http_unless_it_holds_it_by_design() {
