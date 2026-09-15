@@ -230,12 +230,14 @@ impl App {
             self.settings_report(format!("this setting cannot be written (field {field_idx})"));
             return;
         };
-        // `config_file()` is None until the file exists — first-ever edit —
-        // and in portable mode it points at `zesterm.toml`, which the
-        // fallback would get wrong; that is why the file path wins.
-        let Some(target) = zest_config::paths::config_file()
-            .or_else(|| zest_config::paths::config_dir().map(|d| d.join(zest_config::paths::CONFIG_FILE)))
-        else {
+        // Through `config_target`, like the Profiles side, rather than
+        // composing the fallback here: `config_write_target`'s own doc says it
+        // exists "rather than a `config_dir().join(CONFIG_FILE)` at each call
+        // site", because portable mode's file is `zesterm.toml` beside the
+        // binary and a caller that builds the fallback itself writes to a file
+        // the loader will never read. This one happened to build it correctly;
+        // the next one would not have to.
+        let Some(target) = Self::config_target() else {
             self.settings_error = Some("no config directory on this system".to_string());
             self.mark_chrome_dirty();
             return;
