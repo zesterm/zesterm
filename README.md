@@ -130,6 +130,7 @@ Then, on any of the three:
 cargo build --workspace
 cargo xtask check-deps
 cargo xtask check-spawn
+cargo xtask check-size
 ```
 
 ## Packaging

@@ -227,6 +227,7 @@ fn main() -> ExitCode {
     match cmd.as_deref() {
         Some("check-deps") => check_deps(),
         Some("check-spawn") => check_spawn(),
+        Some("check-size") => check_size(),
         Some("schema") => write_schema(false),
         Some("check-schema") => write_schema(true),
         Some("check-bindings") => check_bindings(),
@@ -733,6 +734,182 @@ const SPAWN_ALLOWED: &[(&str, &str)] = &[
 /// `Command::new` below a cut was inside a test -- so the gate reported green
 /// for years while covering a fraction of what it named. A gate that silently
 /// stops reading is worse than one that never claimed to.
+/// A file may be this long before it has to justify itself.
+const FILE_BUDGET: usize = 2_500;
+
+/// A function may be this long before it has to justify itself.
+///
+/// Three hundred is not a style opinion. It is roughly where a reader stops
+/// being able to hold the whole thing at once, and every entry in `FN_ALLOWED`
+/// below is a function somebody has since had to read twice.
+const FN_BUDGET: usize = 300;
+
+/// Files over `FILE_BUDGET`, with the size they are *allowed to be*.
+///
+/// The number is a ratchet, not an exemption: an entry pins the file at what it
+/// measured when it was added, so a listed file may shrink freely and may not
+/// grow by a line. That is the difference between a list that drains and a list
+/// that becomes the place things go to stop being counted.
+const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
+    ("crates/zest-app/src/app/mod.rs", 15_396, "#554 phase 1 is splitting this; every PR lowers it"),
+    ("crates/zest-daemon/src/server.rs", 6_906, "62% tests; moving those out is the first step, #554"),
+    ("crates/zest-app/src/chrome/layout.rs", 6_725, "#554 phase 2 splits this along `layout()`'s own dispatch order"),
+    ("crates/zest-mcp/src/tools.rs", 3_404, "dial/args/json/wait are four clean lifts, #554"),
+    ("crates/zest-render-wgpu/src/scene.rs", 2_824, "bands/viewport/color/runs are separable, #554"),
+    ("crates/zest-app/src/chrome/settings_screen.rs", 2_811, "geometry pinned to docs/design/client-ui §11"),
+    ("crates/zest-app/src/app/dispatch.rs", 2_747, "1,885 of these are `handle_window_event`, #554 phase 3"),
+    ("crates/zest-app/src/remote.rs", 2_716, "53% tests; `start`'s shared closure state must be named first"),
+    ("crates/zest-core/src/grid/mod.rs", 2_542, "the restatement state machine is the extraction, ADR-013"),
+];
+
+/// Functions over `FN_BUDGET`, with the size they are allowed to be. Same
+/// ratchet rule as `SIZE_ALLOWED`.
+const FN_ALLOWED: &[(&str, &str, usize, &str)] = &[
+    ("crates/zest-app/src/app/dispatch.rs", "handle_window_event", 1_885, "1,267 of it is one inline `KeyboardInput` arm, #554 phase 3"),
+    ("crates/zest-app/src/app/mod.rs", "refresh_chrome", 933, "#554 phase 3, paired with `on_chrome_click`"),
+    ("crates/zest-daemon/src/server.rs", "handle", 872, "one match over 21 ClientMessage variants; the arms are the seams"),
+    ("crates/zest-app/src/chrome/settings_screen.rs", "draw_control", 722, "13 widget arms sharing one `dim`/hit-region discipline (#476)"),
+    ("crates/zest-app/src/app/mod.rs", "on_chrome_click", 669, "#554 phase 3, paired with `refresh_chrome`"),
+    ("crates/zest-daemon/src/main.rs", "main", 667, "CLI parsing, one arm per flag"),
+    ("crates/zest-app/src/app/mod.rs", "redraw", 659, "#554 phase 3"),
+    ("crates/zest-app/src/remote.rs", "start", 629, "two thread bodies over one captured environment"),
+    ("crates/zest-app/src/chrome/layout.rs", "vertical", 605, "#554 phase 2"),
+    ("crates/zest-app/src/app/dispatch.rs", "open_window", 506, "#554 phase 3"),
+    ("crates/zest-mcp/src/rpc.rs", "tool_definitions", 498, "one JSON literal per tool; splitting it would only hide it"),
+    ("crates/zest-app/src/chrome/layout.rs", "picker_overlay", 457, "#554 phase 2"),
+    ("crates/zest-app/src/chrome/layout.rs", "horizontal", 447, "#554 phase 2"),
+    ("crates/zest-app/src/chrome/settings_screen.rs", "settings_screen", 397, "the §11 page frame, drawn in one pass"),
+    ("crates/zest-app/src/app/mod.rs", "build_screen_model", 374, "#554 phase 3"),
+    ("crates/zest-app/src/main.rs", "parse_args", 324, "one arm per CLI flag"),
+    ("crates/zest-app/src/chrome/layout.rs", "launcher_overlay", 320, "#554 phase 2"),
+    ("crates/zest-app/src/chrome/profiles_screen.rs", "profiles_screen", 318, "the §12 page frame, drawn in one pass"),
+];
+
+/// Neither file nor function may pass its budget, and nothing on the two
+/// allowlists may grow past the size it was admitted at.
+///
+/// The gate exists because `app.rs` reached 19,221 lines and a 1,886-line
+/// method without anything anywhere objecting, and because it was touched by
+/// 35% of all commits while it did (#554). Size is not the defect; it is what
+/// made the defects unreadable.
+///
+/// A function's end is its closing brace in the same column, and `#[cfg(test)]`
+/// spans are skipped -- the same two rules `check-spawn` uses, for the same
+/// reasons, and sharing `opens_test_item`/`end_of_item` so they cannot drift.
+fn check_size() -> ExitCode {
+    let mut files = Vec::new();
+    collect_rs(std::path::Path::new("crates"), &mut files);
+    collect_rs(std::path::Path::new("xtask/src"), &mut files);
+    files.sort();
+
+    let mut over = Vec::new();
+    let mut stale = Vec::new();
+    for path in &files {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let lines: Vec<&str> = text.lines().collect();
+
+        match SIZE_ALLOWED.iter().find(|(p, ..)| *p == rel) {
+            Some((_, budget, _)) if lines.len() > *budget => over.push(format!(
+                "{rel}: {} lines, and its allowance is {budget} -- a listed file may shrink, never grow",
+                lines.len()
+            )),
+            Some((_, budget, _)) if lines.len() <= FILE_BUDGET => {
+                stale.push(format!("{rel}: now {} lines, under the {FILE_BUDGET} budget -- drop its entry (allowance {budget})", lines.len()));
+            }
+            Some(_) => {}
+            None if lines.len() > FILE_BUDGET => {
+                over.push(format!("{rel}: {} lines, over the {FILE_BUDGET} budget", lines.len()));
+            }
+            None => {}
+        }
+
+        for (name, size, line_no) in functions_in(&lines) {
+            let allowed = FN_ALLOWED.iter().find(|(p, f, ..)| *p == rel && *f == name);
+            match allowed {
+                Some((.., budget, _)) if size > *budget => over.push(format!(
+                    "{rel}:{line_no}: `{name}` is {size} lines, and its allowance is {budget}"
+                )),
+                Some((.., budget, _)) if size <= FN_BUDGET => stale.push(format!(
+                    "{rel}:{line_no}: `{name}` is now {size} lines, under the {FN_BUDGET} budget -- drop its entry (allowance {budget})"
+                )),
+                Some(_) => {}
+                None if size > FN_BUDGET => over.push(format!(
+                    "{rel}:{line_no}: `{name}` is {size} lines, over the {FN_BUDGET} budget"
+                )),
+                None => {}
+            }
+        }
+    }
+
+    if over.is_empty() && stale.is_empty() {
+        println!("check-size: every file under {FILE_BUDGET} lines and every function under {FN_BUDGET}, or pinned below what it was");
+        return ExitCode::SUCCESS;
+    }
+    if !over.is_empty() {
+        eprintln!("check-size: {} over budget", over.len());
+        for v in &over {
+            eprintln!("  - {v}");
+        }
+        eprintln!(
+            "\nSplit it, or add it to SIZE_ALLOWED / FN_ALLOWED in xtask with the size it\n\
+             is now and a reason. An entry pins what it lists: shrink freely, never grow."
+        );
+    }
+    // A shrunk entry is not a failure of the code, but leaving it listed lets
+    // the file grow back to its old size unnoticed -- which is the one way this
+    // gate could quietly stop working.
+    if !stale.is_empty() {
+        eprintln!("check-size: {} allowlist entr(y/ies) no longer needed", stale.len());
+        for v in &stale {
+            eprintln!("  - {v}");
+        }
+    }
+    ExitCode::FAILURE
+}
+
+/// Every `fn` in a file's shipped code, as `(name, lines, first line)`.
+///
+/// An item ends at its closing brace in the same column, which is what this
+/// rustfmt-free workspace actually guarantees; brace counting would be defeated
+/// by a brace in a string or a comment.
+fn functions_in(lines: &[&str]) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    while n < lines.len() {
+        let line = lines[n];
+        if opens_test_item(line) {
+            n = end_of_item(lines, n);
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if let Some(name) = fn_name(trimmed) {
+            let close = format!("{}}}", " ".repeat(indent));
+            if let Some(end) = (n + 1..lines.len()).find(|&i| lines[i] == close) {
+                out.push((name, end - n + 1, n + 1));
+                n = end + 1;
+                continue;
+            }
+        }
+        n += 1;
+    }
+    out
+}
+
+/// The name of the function a line declares, if it declares one.
+fn fn_name(trimmed: &str) -> Option<String> {
+    let mut rest = trimmed;
+    for prefix in ["pub(crate) ", "pub(super) ", "pub ", "default ", "async ", "const ", "unsafe ", "extern \"C\" "] {
+        if let Some(r) = rest.strip_prefix(prefix) {
+            rest = r;
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Every direct `Command::new` in one file's shipped code, as `(line, text)`.
 ///
 /// Separated from the walk so the skipping rules can be tested against a
@@ -905,6 +1082,61 @@ mod tests {
     /// `zest-cloud` — never to quiet a check because a direct dependency looked
     /// convenient.
     const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
+
+    /// A function ends at its closing brace in the same column, and a nested
+    /// one does not end its parent early.
+    #[test]
+    fn a_function_is_measured_to_its_own_closing_brace() {
+        let src: Vec<&str> = "\
+fn outer() {
+    let x = 1;
+    if x == 1 {
+    }
+}
+
+    fn method(&self) -> bool {
+        true
+    }
+"
+        .lines()
+        .collect();
+        let found = functions_in(&src);
+        assert_eq!(
+            found,
+            vec![("outer".to_string(), 5, 1), ("method".to_string(), 3, 7)],
+            "the inner `}}` is indented, so it cannot close `outer`, and the 4-space \
+             method closes on its own `    }}`: {found:?}"
+        );
+    }
+
+    /// Test code is exempt for the same reason it is exempt from `check-spawn`,
+    /// and via the same two helpers so the rules cannot drift apart.
+    #[test]
+    fn a_test_module_is_not_measured() {
+        let src: Vec<&str> = "\
+#[cfg(test)]
+mod tests {
+    fn enormous() {
+    }
+}
+
+fn shipped() {
+}
+"
+        .lines()
+        .collect();
+        let found = functions_in(&src);
+        assert_eq!(found, vec![("shipped".to_string(), 2, 7)], "{found:?}");
+    }
+
+    #[test]
+    fn a_declaration_is_read_through_its_qualifiers() {
+        assert_eq!(fn_name("pub(crate) async fn dial(").as_deref(), Some("dial"));
+        assert_eq!(fn_name("pub(super) fn surface_for(").as_deref(), Some("surface_for"));
+        assert_eq!(fn_name("const fn close_policy(").as_deref(), Some("close_policy"));
+        assert_eq!(fn_name("let f = 1;"), None);
+        assert_eq!(fn_name("// fn not_really()"), None, "a comment declares nothing");
+    }
 
     /// The bug this gate had for its whole life, as a literal.
     ///
