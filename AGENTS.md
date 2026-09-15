@@ -64,7 +64,7 @@ Never commit straight to `main`.**
    it occupies `<repo>/main`, which parallel sessions share.
 
 3. **Implement & verify.** For a bug fix, failing test first — see "Test-first
-   bug fixes" under Conventions. Either way, prove the change: the eight gates
+   bug fixes" under Conventions. Either way, prove the change: the nine gates
    below, plus the TypeScript suite if you touched `clients/web/` or any type on
    the wire, plus the `cloud/` suite if you touched `cloud/`.
 
@@ -187,7 +187,7 @@ first anyway.
 
 ## The gates
 
-All eight must pass before you call something done:
+All nine must pass before you call something done:
 
 ```
 cargo test --workspace
@@ -198,6 +198,7 @@ cargo xtask check-schema
 cargo xtask check-bindings
 cargo xtask check-fixtures
 cargo xtask check-export-web
+cargo xtask check-size
 ```
 
 `check-export-web` is in this list, unlike the TypeScript suite below, for the
@@ -205,6 +206,14 @@ reason that keeps them apart: a **Rust-only** change to `zest-config` or
 `zest-theme` breaks it. The settings schema, the walked UI fields and the
 built-in themes are generated into `clients/web/`, so editing a theme's hex or
 adding a setting leaves them stale with nothing else to notice.
+
+`check-size` is in it because `app.rs` reached 19,221 lines and a 1,886-line
+method with nothing anywhere objecting, while being touched by 35% of all
+commits (#554) -- size is not the defect, it is what makes the defects
+unreadable. Its two allowlists pin what is already over at the size it measured
+when listed, so a listed file may shrink freely and may never grow by a line; an
+entry that drops under budget is reported too, because leaving it listed is how
+a file grows back unnoticed.
 
 `check-spawn` is in it for the mirror-image reason: it catches a **Windows-only**
 symptom from source that reads fine, so the two platforms that cannot see the
@@ -1214,7 +1223,7 @@ you need before you trip on it.
 - **Never run `cargo fmt`.** There is no `rustfmt.toml` and the workspace is not
   written to rustfmt's defaults, so `cargo fmt --all` rewrites **169 files** —
   a diff that buries the change it was run beside, and one no gate asks for
-  (`cargo fmt --check` is in neither the eight gates nor CI). Match the
+  (`cargo fmt --check` is in neither the nine gates nor CI). Match the
   surrounding style by hand. Run it by accident and the cheapest recovery is
   `git checkout -- .` and replaying your edits, because it reformats *your*
   files too.
