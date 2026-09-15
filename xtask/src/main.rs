@@ -252,6 +252,7 @@ fn usage() {
         "usage: cargo xtask <command>\n\ncommands:\n  \
          check-deps     verify crate boundary invariants\n  \
          check-spawn    verify nothing shipped calls Command::new directly\n  \
+         check-size     fail if a file or function is over budget and unlisted\n  \
          schema         regenerate {SCHEMA_PATH}\n  \
          check-schema   fail if {SCHEMA_PATH} is stale\n  \
          check-bindings fail if {BINDINGS_DIR} is stale\n  \
@@ -751,7 +752,7 @@ const FN_BUDGET: usize = 300;
 /// grow by a line. That is the difference between a list that drains and a list
 /// that becomes the place things go to stop being counted.
 const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
-    ("crates/zest-app/src/app/mod.rs", 15_396, "#554 phase 1 is splitting this; every PR lowers it"),
+    ("crates/zest-app/src/app/mod.rs", 14_072, "#554 phase 1 is splitting this; every PR lowers it"),
     ("crates/zest-daemon/src/server.rs", 6_906, "62% tests; moving those out is the first step, #554"),
     ("crates/zest-app/src/chrome/layout.rs", 6_725, "#554 phase 2 splits this along `layout()`'s own dispatch order"),
     ("crates/zest-mcp/src/tools.rs", 3_404, "dial/args/json/wait are four clean lifts, #554"),
@@ -868,11 +869,19 @@ fn check_size() -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Every `fn` in a file's shipped code, as `(name, lines, first line)`.
+/// Every `fn` **definition** in a file's shipped code, as `(name, lines, first
+/// line)`.
 ///
-/// An item ends at its closing brace in the same column, which is what this
-/// rustfmt-free workspace actually guarantees; brace counting would be defeated
-/// by a brace in a string or a comment.
+/// A definition ends at its closing brace in the same column, which is what
+/// this rustfmt-free workspace actually guarantees; brace counting would be
+/// defeated by a brace in a string or a comment.
+///
+/// A *declaration* -- a trait method, an `extern` entry -- has no body, and
+/// mistaking one for a definition is worse than a wrong number: the scan would
+/// skip to whatever `}` closed next, which in `zest-pty/src/lib.rs` swallowed
+/// fifteen lines of the trait and every real function inside them. A gate that
+/// reads less than it claims to is the exact failure this one was added to
+/// prevent.
 fn functions_in(lines: &[&str]) -> Vec<(String, usize, usize)> {
     let mut out = Vec::new();
     let mut n = 0usize;
@@ -885,8 +894,32 @@ fn functions_in(lines: &[&str]) -> Vec<(String, usize, usize)> {
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
         if let Some(name) = fn_name(trimmed) {
+            // A `fn` head is a definition or a declaration, and the difference
+            // is not visible on its first line when the signature wraps. Read
+            // forward to whichever arrives first: `{` opens a body, `;` ends a
+            // trait method or an `extern` block entry, which has none.
+            let mut head = n;
+            let body = loop {
+                if head >= lines.len() {
+                    break None;
+                }
+                if lines[head].contains('{') {
+                    break Some(head);
+                }
+                if lines[head].trim_end().ends_with(';') {
+                    break None;
+                }
+                head += 1;
+            };
+            let Some(body) = body else {
+                // A declaration measures nothing and, crucially, consumes
+                // nothing: skipping to its "closing brace" would swallow every
+                // real function between here and the end of the trait.
+                n += 1;
+                continue;
+            };
             let close = format!("{}}}", " ".repeat(indent));
-            if let Some(end) = (n + 1..lines.len()).find(|&i| lines[i] == close) {
+            if let Some(end) = (body + 1..lines.len()).find(|&i| lines[i] == close) {
                 out.push((name, end - n + 1, n + 1));
                 n = end + 1;
                 continue;
@@ -1082,6 +1115,50 @@ mod tests {
     /// `zest-cloud` — never to quiet a check because a direct dependency looked
     /// convenient.
     const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
+
+    /// A trait method is a declaration, not a definition, and mistaking one
+    /// for the other is how this gate would read less than it claims to.
+    ///
+    /// `zest-pty/src/lib.rs` has four. Measured as definitions they closed on
+    /// the trait's own `}` fifteen lines later, and the scan then skipped every
+    /// real function in between.
+    #[test]
+    fn a_declaration_is_not_measured_and_does_not_swallow_what_follows() {
+        let src: Vec<&str> = "\
+trait Pty {
+    fn take_reader(&mut self) -> Option<u8>;
+    fn hangup(&self);
+}
+
+fn real() {
+    let x = 1;
+}
+"
+        .lines()
+        .collect();
+        let found = functions_in(&src);
+        assert_eq!(
+            found,
+            vec![("real".to_string(), 3, 6)],
+            "the two trait declarations have no body to measure, and must not consume \
+             the lines up to the trait's closing brace: {found:?}"
+        );
+    }
+
+    /// The `{` may not be on the head's first line.
+    #[test]
+    fn a_wrapped_signature_is_still_a_definition() {
+        let src: Vec<&str> = "\
+fn wrapped(
+    a: usize,
+) -> usize {
+    a
+}
+"
+        .lines()
+        .collect();
+        assert_eq!(functions_in(&src), vec![("wrapped".to_string(), 5, 1)]);
+    }
 
     /// A function ends at its closing brace in the same column, and a nested
     /// one does not end its parent early.
