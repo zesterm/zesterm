@@ -752,7 +752,7 @@ const FN_BUDGET: usize = 300;
 /// grow by a line. That is the difference between a list that drains and a list
 /// that becomes the place things go to stop being counted.
 const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
-    ("crates/zest-app/src/app/mod.rs", 14_072, "#554 phase 1 is splitting this; every PR lowers it"),
+    ("crates/zest-app/src/app/mod.rs", 13_176, "#554 phase 1 is splitting this; every PR lowers it"),
     ("crates/zest-daemon/src/server.rs", 6_906, "62% tests; moving those out is the first step, #554"),
     ("crates/zest-app/src/chrome/layout.rs", 6_725, "#554 phase 2 splits this along `layout()`'s own dispatch order"),
     ("crates/zest-mcp/src/tools.rs", 3_404, "dial/args/json/wait are four clean lifts, #554"),
@@ -807,7 +807,18 @@ fn check_size() -> ExitCode {
     let mut stale = Vec::new();
     for path in &files {
         let rel = path.to_string_lossy().replace('\\', "/");
-        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        // A file this gate cannot read is a file it does not check, and a gate
+        // with a silent skip in it reports green for exactly the case it exists
+        // to catch -- which is the failure this whole check was added over.
+        // Same treatment as `check-spawn`, and loud on purpose: Rust source is
+        // UTF-8 by definition, so this only fires on a broken checkout.
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                over.push(format!("{rel}: could not be read ({e}), so it was not checked"));
+                continue;
+            }
+        };
         let lines: Vec<&str> = text.lines().collect();
 
         match SIZE_ALLOWED.iter().find(|(p, ..)| *p == rel) {
@@ -978,6 +989,12 @@ fn scan_spawns(text: &str) -> Vec<(usize, String)> {
 /// that file's tests were being scanned as shipped code while other files had
 /// shipped code skipped as tests. Both halves of that were wrong.
 fn opens_test_item(line: &str) -> bool {
+    // Indentation is not part of the question. Eleven `#[cfg(test)]` items in
+    // this workspace sit inside an `impl` rather than at the top level --
+    // `PendingSession::blank`, `TabStrip`'s fixtures, `Grid`'s -- and treating
+    // those as shipped code made `check-spawn` able to report a spawn in a test
+    // helper and `check-size` able to measure one.
+    let line = line.trim_start();
     if !line.starts_with("#[cfg(") || !line.ends_with(")]") {
         return false;
     }
@@ -1020,8 +1037,10 @@ fn end_of_item(lines: &[&str], start: usize) -> usize {
         }
         n += 1;
     }
+    let indent = " ".repeat(lines[start].len() - lines[start].trim_start().len());
+    let close = format!("{indent}}}");
     for (offset, line) in lines.iter().enumerate().skip(n) {
-        if *line == "}" {
+        if *line == close {
             return offset + 1;
         }
     }
@@ -1115,6 +1134,37 @@ mod tests {
     /// `zest-cloud` — never to quiet a check because a direct dependency looked
     /// convenient.
     const TLS_BY_DESIGN: &[&str] = &["zest-cloud", "zest-mcp"];
+
+    /// Eleven `#[cfg(test)]` items in this workspace sit inside an `impl`, so
+    /// column-0 matching let both gates read a test helper as shipped code.
+    #[test]
+    fn an_indented_test_item_is_skipped_too() {
+        assert!(opens_test_item("    #[cfg(test)]"), "`PendingSession::blank` is one");
+        assert!(opens_test_item("#[cfg(test)]"));
+
+        let src: Vec<&str> = "\
+impl Thing {
+    #[cfg(test)]
+    pub(crate) fn blank() -> Self {
+        std::process::Command::new(\"ls\");
+    }
+
+    fn shipped(&self) {
+    }
+}
+"
+        .lines()
+        .collect();
+        assert!(
+            scan_spawns(&src.join("\n")).is_empty(),
+            "the spawn is in a test-only constructor, not shipped code"
+        );
+        assert_eq!(
+            functions_in(&src),
+            vec![("shipped".to_string(), 2, 7)],
+            "and the test-only method is not measured, while the one after it still is"
+        );
+    }
 
     /// A trait method is a declaration, not a definition, and mistaking one
     /// for the other is how this gate would read less than it claims to.
