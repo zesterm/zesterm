@@ -752,7 +752,7 @@ const FN_BUDGET: usize = 300;
 /// grow by a line. That is the difference between a list that drains and a list
 /// that becomes the place things go to stop being counted.
 const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
-    ("crates/zest-app/src/app/mod.rs", 13_176, "#554 phase 1 is splitting this; every PR lowers it"),
+    ("crates/zest-app/src/app/mod.rs", 12_257, "#554 phase 1 is splitting this; every PR lowers it"),
     ("crates/zest-daemon/src/server.rs", 6_906, "62% tests; moving those out is the first step, #554"),
     ("crates/zest-app/src/chrome/layout.rs", 6_725, "#554 phase 2 splits this along `layout()`'s own dispatch order"),
     ("crates/zest-mcp/src/tools.rs", 3_404, "dial/args/json/wait are four clean lifts, #554"),
