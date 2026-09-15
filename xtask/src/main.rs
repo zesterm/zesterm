@@ -752,7 +752,7 @@ const FN_BUDGET: usize = 300;
 /// grow by a line. That is the difference between a list that drains and a list
 /// that becomes the place things go to stop being counted.
 const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
-    ("crates/zest-app/src/app/mod.rs", 12_257, "#554 phase 1 is splitting this; every PR lowers it"),
+    ("crates/zest-app/src/app/mod.rs", 10_596, "#554 phase 1 is splitting this; every PR lowers it"),
     ("crates/zest-daemon/src/server.rs", 6_906, "62% tests; moving those out is the first step, #554"),
     ("crates/zest-app/src/chrome/layout.rs", 6_725, "#554 phase 2 splits this along `layout()`'s own dispatch order"),
     ("crates/zest-mcp/src/tools.rs", 3_404, "dial/args/json/wait are four clean lifts, #554"),
@@ -767,10 +767,10 @@ const SIZE_ALLOWED: &[(&str, usize, &str)] = &[
 /// ratchet rule as `SIZE_ALLOWED`.
 const FN_ALLOWED: &[(&str, &str, usize, &str)] = &[
     ("crates/zest-app/src/app/dispatch.rs", "handle_window_event", 1_885, "1,267 of it is one inline `KeyboardInput` arm, #554 phase 3"),
-    ("crates/zest-app/src/app/mod.rs", "refresh_chrome", 933, "#554 phase 3, paired with `on_chrome_click`"),
+    ("crates/zest-app/src/app/chrome_build.rs", "refresh_chrome", 933, "#554 phase 3, paired with `on_chrome_click`"),
     ("crates/zest-daemon/src/server.rs", "handle", 872, "one match over 21 ClientMessage variants; the arms are the seams"),
     ("crates/zest-app/src/chrome/settings_screen.rs", "draw_control", 722, "13 widget arms sharing one `dim`/hit-region discipline (#476)"),
-    ("crates/zest-app/src/app/mod.rs", "on_chrome_click", 669, "#554 phase 3, paired with `refresh_chrome`"),
+    ("crates/zest-app/src/app/chrome_build.rs", "on_chrome_click", 669, "#554 phase 3, paired with `refresh_chrome`"),
     ("crates/zest-daemon/src/main.rs", "main", 667, "CLI parsing, one arm per flag"),
     ("crates/zest-app/src/app/mod.rs", "redraw", 659, "#554 phase 3"),
     ("crates/zest-app/src/remote.rs", "start", 629, "two thread bodies over one captured environment"),
